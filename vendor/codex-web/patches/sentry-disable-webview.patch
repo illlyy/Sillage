@@ -1,0 +1,10 @@
+--- a/webview/assets/app-initial~artifact-tab-content.electron~notebook-preview-panel~app-main~appgen-settings-p~k7s99xf2-CDccaBxU.js
++++ b/webview/assets/app-initial~artifact-tab-content.electron~notebook-preview-panel~app-main~appgen-settings-p~k7s99xf2-CDccaBxU.js
+@@ -8627,6 +8627,7 @@
+     n = re(e.appVersion),
+     r = e.buildFlavor !== `prod`;
+   (eg({
++    enabled: !1,
+     beforeSend: m,
+     dsn: oe,
+     environment: cg,

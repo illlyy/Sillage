@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-Czos8NxU.js";import{MP as t,XP as n}from"./app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js";function r(e,t){let n=i.safeParse(e.url);return n.success?n.data:t}var i,a=e((()=>{t(),i=n().url().refine(e=>e.startsWith(`https://`))}));export{a as n,r as t};
+//# sourceMappingURL=app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~ef1z9qec-C0X-pQbD.js.map

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <style name="Theme.Termux" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:colorPrimary">#FF000000</item>
+        <item name="android:windowBackground">@android:color/black</item>
+
+        <!-- Seen in buttons on left drawer: -->
+        <item name="android:colorAccent">#212121</item>
+        <item name="android:alertDialogTheme">@style/TermuxAlertDialogStyle</item>
+        <!-- Avoid action mode toolbar pushing down terminal content when
+             selecting text on pre-6.0 (non-floating toolbar). -->
+        <item name="android:windowActionModeOverlay">true</item>
+
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+
+        <!-- https://developer.android.com/training/tv/start/start.html#transition-color -->
+        <item name="android:windowAllowReturnTransitionOverlap">true</item>
+        <item name="android:windowAllowEnterTransitionOverlap">true</item>
+    </style>
+
+
+    <!-- See https://developer.android.com/training/material/theme.html for how to customize the Material theme. -->
+    <!-- NOTE: Cannot use "Light." since it hides the terminal scrollbar on the default black background. -->
+    <style name="Theme.Termux.Black" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:colorPrimary">#FF000000</item>
+        <item name="android:windowBackground">@android:color/black</item>
+
+        <!-- Seen in buttons on left drawer: -->
+        <item name="android:colorAccent">#FDFDFD</item>
+        <!-- Avoid action mode toolbar pushing down terminal content when
+             selecting text on pre-6.0 (non-floating toolbar). -->
+        <item name="android:windowActionModeOverlay">true</item>
+
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+
+        <!-- https://developer.android.com/training/tv/start/start.html#transition-color -->
+        <item name="android:windowAllowReturnTransitionOverlap">true</item>
+        <item name="android:windowAllowEnterTransitionOverlap">true</item>
+    </style>
+
+
+    <style name="TermuxAlertDialogStyle" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <!-- Seen in buttons on alert dialog: -->
+        <item name="android:colorAccent">#212121</item>
+    </style>
+
+    <style name="Theme.CodexMobile" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">#6C4A3A</item>
+        <item name="colorPrimaryVariant">#533528</item>
+        <item name="colorSecondary">#765849</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSurface">#FFF8F4</item>
+        <item name="shapeAppearanceLargeComponent">@style/ShapeAppearance.Codex.Expressive</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#FCEEE2</item>
+        <item name="android:colorBackground">#FCEEE2</item>
+        <item name="android:colorAccent">#1F1F1F</item>
+        <item name="android:statusBarColor">#FCEEE2</item>
+        <item name="android:navigationBarColor">#FCEEE2</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:alertDialogTheme">@style/CodexAlertDialogStyle</item>
+    </style>
+
+    <style name="CodexAlertDialogStyle" parent="Theme.MaterialComponents.Light.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/codex_dialog_background</item>
+        <item name="android:colorAccent">#1F1F1F</item>
+        <item name="android:textColorPrimary">#1F1F1F</item>
+        <item name="android:textColorSecondary">#5F5349</item>
+    </style>
+
+    <style name="ShapeAppearance.Codex.Expressive" parent="ShapeAppearance.MaterialComponents.LargeComponent">
+        <item name="cornerSize">28dp</item>
+    </style>
+
+</resources>

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+while [[ "${1:-}" == "-c" ]]; do
+  if (( $# < 2 )); then
+    echo "codex_remote_proxy received -c without a value" >&2
+    exit 64
+  fi
+  shift 2
+done
+
+if [[ "${1:-}" != "app-server" ]]; then
+  echo "codex_remote_proxy only supports app-server mode" >&2
+  exit 64
+fi
+
+# Ignore remaining args (for compatibility with codex app-server invocations).
+shift || true
+
+# Websocat defaults to 64KiB max message size, which causes warnings and
+# message splitting for larger app-server payloads. Use a safer default while
+# still allowing runtime override.
+CODEX_BUFFER_SIZE="${CODEX_BUFFER_SIZE:-104857600}"
+CODEX_UNIX_SOCKET="${CODEX_UNIX_SOCKET:?CODEX_UNIX_SOCKET must be set}"
+
+exec websocat -E -t -B "${CODEX_BUFFER_SIZE}" - "ws-c:unix:${CODEX_UNIX_SOCKET}"

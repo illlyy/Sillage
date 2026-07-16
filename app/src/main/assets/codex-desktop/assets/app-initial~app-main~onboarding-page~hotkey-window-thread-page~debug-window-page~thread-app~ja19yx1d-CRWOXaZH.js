@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-Czos8NxU.js";import{AO as t,JF as n,YC as r,kO as i,lF as a,qC as o,rF as s}from"./app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js";function c(){let e=r(`57256278`),t=a(l);return t===`v1`?!1:t===`v2`?!0:e}var l,u=e((()=>{s(),t(),o(),l=n(i,()=>`auto`)}));export{u as n,c as r,l as t};
+//# sourceMappingURL=app-initial~app-main~onboarding-page~hotkey-window-thread-page~debug-window-page~thread-app~ja19yx1d-CRWOXaZH.js.map

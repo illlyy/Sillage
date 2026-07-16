@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-Czos8NxU.js";import{n as t,t as n}from"./alarm-clock-minus-CMvLcfwg-C1FD907n.js";e((()=>{t()}))();export{n as default};
+//# sourceMappingURL=alarm-minus-Bwsx_1oJ-o07hd7cp.js.map

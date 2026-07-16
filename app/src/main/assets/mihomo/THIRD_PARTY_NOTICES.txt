@@ -1,0 +1,18 @@
+﻿Third-party software bundled as an optional, user-installed extension
+===================================================================
+
+Mihomo v1.19.28
+- Project/release source: https://github.com/MetaCubeX/mihomo/tree/v1.19.28
+- Binary asset: mihomo-android-arm64-v8-v1.19.28.gz
+- SHA-256: 3bc12180b6d8affd95166da48dc772487dcf29741663077d1abc105dcd1dae69
+- License: GNU General Public License v3.0 (see LICENSE-GPL-3.0.txt)
+
+MetaCubeXD v1.268.4
+- Project/release source: https://github.com/MetaCubeX/metacubexd/tree/v1.268.4
+- Asset: compressed-dist.tgz (renamed metacubexd-v1.268.4.tgz)
+- SHA-256: 5758b3649bba7f715208b214dee5033543c7c70c7d0c50851b1a066ae58d382c
+- License: MIT (see LICENSE-METACUBEXD.txt)
+
+Supply-chain policy
+-------------------
+The Mihomo binary is deliberately pinned to the GitHub-verified v1.19.28 release asset and its exact digest. The app does not follow or install artifacts from an unpinned default branch. Installation fails closed when either bundled archive digest differs.

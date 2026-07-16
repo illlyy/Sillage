@@ -1,0 +1,1 @@
+import{n as e,t}from"./lamp-DeagaxHd-Bdj8D24K.js";t();export{e as default};

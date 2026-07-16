@@ -1,0 +1,1 @@
+import{n as e,t}from"./alarm-clock-check-Iz2EgGaS-DyHt9A0b.js";e();export{t as default};

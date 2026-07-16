@@ -1,0 +1,1 @@
+import{n as e,t}from"./scissors-line-dashed-DFwCW4Ua-C0xlr7fG.js";e();export{t as default};

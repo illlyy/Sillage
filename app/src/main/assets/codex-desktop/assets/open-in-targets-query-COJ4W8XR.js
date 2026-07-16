@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-Czos8NxU.js";import{AO as t,DD as n,ND as r,PD as i,TD as a,kO as o}from"./app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js";var s,c=e((()=>{t(),i(),n(),s=a(o,`open-in-targets`,()=>({staleTime:r.ONE_MINUTE}))}));export{s as n,c as t};
+//# sourceMappingURL=open-in-targets-query-COJ4W8XR.js.map

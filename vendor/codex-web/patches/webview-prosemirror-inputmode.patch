@@ -1,0 +1,40 @@
+--- a/webview/assets/app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js
++++ b/webview/assets/app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js
+@@ -189260,8 +189260,18 @@
+     f = new EventTarget(),
+     p = new m1t(),
+     m = s,
++    inputModeDisabled = !1,
++    getAttributes = () =>
++      inputModeDisabled
++        ? { spellcheck: `true` }
++        : { spellcheck: `true`, inputmode: `none` },
++    setPointerInputMode = (e) => {
++      inputModeDisabled !== e &&
++        ((inputModeDisabled = e),
++        h.isDestroyed || h.setProps({ attributes: getAttributes }));
++    },
+     h = new kL(null, {
+-      attributes: { spellcheck: `true` },
++      attributes: getAttributes,
+       state: Hre.create({
+         schema: tJ,
+         doc:
+@@ -189392,6 +189402,17 @@
+         (h.updateState(t),
+           f.dispatchEvent(new CustomEvent(hq, { detail: e.docChanged })));
+       },
++      handleDOMEvents: {
++        mousedown(e, t) {
++          return (setPointerInputMode(!0), !1);
++        },
++        touchstart(e, t) {
++          return (setPointerInputMode(!0), !1);
++        },
++        blur(e, t) {
++          return (setPointerInputMode(!1), !1);
++        },
++      },
+       handlePaste(e, t) {
+         if (t.defaultPrevented) return !0;
+         let n = t.clipboardData,

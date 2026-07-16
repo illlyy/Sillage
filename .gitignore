@@ -1,0 +1,64 @@
+# From https://gist.github.com/iainconnor/8605514
+# with the addition of the /captures below.
+/captures
+
+# Built application files
+build/
+release/
+*.apk
+*.so
+.externalNativeBuild
+.cxx
+*.zip
+
+# Crashlytics configuations
+com_crashlytics_export_strings.xml
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Gradle generated files
+.gradle/
+
+# Signing files
+.signing/
+
+# Intellij
+.idea/
+*.iml
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.swp
+ehthumbs.db
+Thumbs.db
+# Fcode private monorepo: local state and generated work directories
+/.tmp/
+*.log
+*.aab
+*.tar
+*.tar.*
+*.gz
+*.tgz
+*.jks
+*.keystore
+*.pem
+*.p12
+*.key
+.env
+.env.*
+!.env.example
+node_modules/
+scratch/
+.codex/
+
+# Required pinned application assets that are intentionally backed up.
+!app/src/main/assets/official-skills.zip
+!app/src/main/assets/mihomo/metacubexd-v1.268.4.tgz
+
+# The upstream public debug keystore remains tracked for debug builds only.
+!app/dev_keystore.jks
