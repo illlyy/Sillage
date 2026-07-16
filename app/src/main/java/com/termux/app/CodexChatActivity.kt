@@ -238,6 +238,24 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             return
         }
 
+        chatState.modelOptions.clear()
+        profile.models.forEach { model ->
+            val efforts = model.supportedReasoningEfforts.split(',')
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            chatState.modelOptions.add(
+                NativeModelOption(
+                    id = model.id,
+                    name = model.name.ifBlank { model.id },
+                    efforts = efforts,
+                ),
+            )
+        }
+        chatState.selectedModel = profile.model
+        val selectedModelConfig = profile.models.firstOrNull { it.id.equals(profile.model, ignoreCase = true) }
+        chatState.selectedEffort = selectedModelConfig?.defaultReasoningEffort?.takeIf { it.isNotBlank() } ?: "high"
+
         chatState.modelLabel = profile.model.ifBlank { "默认模型" }
         chatState.connectionLabel = "正在连接 ${chatState.modelLabel}…"
 

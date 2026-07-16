@@ -1648,6 +1648,7 @@ private fun effortLabel(value: String): String = when (value.lowercase()) {
     "medium" -> "中"
     "high" -> "高"
     "xhigh" -> "极高"
+    "ultra" -> "Ultra"
     else -> value
 }
 
@@ -1736,7 +1737,7 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                                     enter = fadeIn(tween(160, delayMillis = 65)) + scaleIn(initialScale = 0.94f, transformOrigin = TransformOrigin(0.5f, 0.5f), animationSpec = spring(dampingRatio = 0.64f, stiffness = 390f)),
                                     exit = fadeOut(tween(90)),
                                 ) {
-                                    LiquidEffortSlider(options.take(6), selected, onSelect, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
+                                    LiquidEffortSlider(options, selected, onSelect, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
                                 }
                                 AnimatedVisibility(
                                     visible = contentReady,
