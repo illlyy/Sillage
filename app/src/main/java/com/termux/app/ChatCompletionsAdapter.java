@@ -2,8 +2,14 @@ package com.termux.app;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -17,6 +23,15 @@ final class ChatCompletionsAdapter {
         final byte[] body;
         final String contentType;
         ChatResult(byte[] body, String contentType) { this.body=body; this.contentType=contentType; }
+    }
+    interface StreamEventSink {
+        void emit(byte[] value) throws Exception;
+    }
+    static final class StreamStats {
+        boolean streaming;
+        int upstreamEvents;
+        int outputChunks;
+        long firstUpstreamEventNanos;
     }
     private static final class ToolCall {
         String id="", name="", arguments="";
@@ -240,6 +255,316 @@ final class ChatCompletionsAdapter {
     static Set<String> customToolNames(byte[] responsesRequest) {
         Set<String> names=new HashSet<>(); try { JSONArray tools=new JSONObject(new String(responsesRequest,StandardCharsets.UTF_8)).optJSONArray("tools"); if(tools!=null)for(int i=0;i<tools.length();i++){JSONObject t=tools.optJSONObject(i);if(t!=null&&"custom".equals(t.optString("type")))names.add(t.optString("name"));} } catch(Exception ignored) {} return names;
     }
+    static StreamStats streamChatResponseToResponses(InputStream source, String contentType,
+                                                           String fallbackModel, Set<String> customTools,
+                                                           StreamEventSink sink) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(source, StandardCharsets.UTF_8));
+        StreamStats stats = new StreamStats();
+        List<String> prefixLines = new ArrayList<>();
+        String probeLine;
+        while ((probeLine = reader.readLine()) != null) {
+            prefixLines.add(probeLine);
+            if (!probeLine.trim().isEmpty()) break;
+        }
+        String normalizedContentType = contentType == null ? "" : contentType.toLowerCase(java.util.Locale.US);
+        boolean eventStream = normalizedContentType.contains("text/event-stream")
+            || (!prefixLines.isEmpty() && looksLikeSse(prefixLines.get(prefixLines.size() - 1)));
+        stats.streaming = eventStream;
+        if (!eventStream) {
+            StringBuilder body = new StringBuilder();
+            for (String prefixLine : prefixLines) {
+                if (body.length() > 0) body.append('\n');
+                body.append(prefixLine);
+            }
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (body.length() > 0) body.append('\n');
+                body.append(line);
+            }
+            ChatResult converted = chatResponseToResponses(
+                body.toString().getBytes(StandardCharsets.UTF_8), contentType, fallbackModel, customTools);
+            sink.emit(converted.body);
+            stats.outputChunks = 1;
+            return stats;
+        }
+
+        ChatStreamState state = new ChatStreamState(fallbackModel, customTools, sink, stats);
+        for (String prefixLine : prefixLines) state.acceptLine(prefixLine);
+        String line;
+        while ((line = reader.readLine()) != null) state.acceptLine(line);
+        state.finish();
+        return stats;
+    }
+
+    private static boolean looksLikeSse(String line) {
+        if (line == null) return false;
+        String value = line.trim();
+        return value.startsWith("data:") || value.startsWith("event:") || value.startsWith(":");
+    }
+
+    private static final class ChatStreamState {
+        private final String responseId = "resp_" + shortId();
+        private final Set<String> customTools;
+        private final StreamEventSink sink;
+        private final StreamStats stats;
+        private final StringBuilder text = new StringBuilder();
+        private final StringBuilder reasoning = new StringBuilder();
+        private final Map<Integer,ToolCall> tools = new LinkedHashMap<>();
+        private final JSONArray completedOutput = new JSONArray();
+        private String model;
+        private JSONObject usage;
+        private String reasoningItemId;
+        private String messageItemId;
+        private int reasoningOutputIndex = -1;
+        private int messageOutputIndex = -1;
+        private int nextOutputIndex;
+        private int sequenceNumber;
+        private boolean started;
+        private boolean reasoningOpened;
+        private boolean reasoningDone;
+        private boolean messageOpened;
+        private boolean messageDone;
+        private boolean toolsEmitted;
+        private boolean completed;
+
+        ChatStreamState(String fallbackModel, Set<String> customTools, StreamEventSink sink,
+                        StreamStats stats) {
+            this.model = fallbackModel == null ? "" : fallbackModel;
+            this.customTools = customTools == null ? Collections.emptySet() : new HashSet<>(customTools);
+            this.sink = sink;
+            this.stats = stats;
+        }
+
+        void acceptLine(String line) throws Exception {
+            if (completed || line == null) return;
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) return;
+            String data = trimmed.substring(5).trim();
+            if (data.isEmpty()) return;
+            if ("[DONE]".equals(data)) {
+                finish();
+                return;
+            }
+            JSONObject chunk;
+            try { chunk = new JSONObject(data); }
+            catch (Exception ignored) { return; }
+            if (stats.firstUpstreamEventNanos == 0L) stats.firstUpstreamEventNanos = System.nanoTime();
+            stats.upstreamEvents++;
+            acceptChunk(chunk);
+        }
+
+        private void acceptChunk(JSONObject chunk) throws Exception {
+            String chunkModel = chunk.optString("model");
+            if (!chunkModel.isEmpty()) model = chunkModel;
+            if (chunk.optJSONObject("usage") != null) usage = chunk.optJSONObject("usage");
+            ensureStarted();
+            JSONArray choices = chunk.optJSONArray("choices");
+            if (choices == null || choices.length() == 0) return;
+            JSONObject choice = choices.optJSONObject(0);
+            if (choice == null) return;
+            JSONObject delta = choice.optJSONObject("delta");
+            if (delta != null) {
+                String reasoningDelta = valueText(delta.opt("reasoning_content"));
+                if (!reasoningDelta.isEmpty()) appendReasoningDelta(reasoningDelta);
+                String textDelta = valueText(delta.opt("content"));
+                if (!textDelta.isEmpty()) appendTextDelta(textDelta);
+                mergeToolCalls(tools, delta.optJSONArray("tool_calls"));
+            }
+            Object finishReason = choice.opt("finish_reason");
+            if (finishReason != null && finishReason != JSONObject.NULL
+                    && !String.valueOf(finishReason).isEmpty()) {
+                closeContentItems();
+                emitTools();
+            }
+        }
+
+        private void ensureStarted() throws Exception {
+            if (started) return;
+            started = true;
+            JSONObject initial = buildResponse(responseId, model, "", "",
+                new LinkedHashMap<>(), null, customTools);
+            initial.put("status", "in_progress");
+            initial.put("output", new JSONArray());
+            emitEvent(new JSONObject().put("type", "response.created").put("response", initial));
+            emitEvent(new JSONObject().put("type", "response.in_progress").put("response", initial));
+        }
+
+        private void appendReasoningDelta(String delta) throws Exception {
+            if (reasoningDone) {
+                reasoning.append(delta);
+                return;
+            }
+            if (messageOpened && !messageDone) closeMessage();
+            openReasoning();
+            reasoning.append(delta);
+            emitEvent(new JSONObject().put("type", "response.reasoning_summary_text.delta")
+                .put("item_id", reasoningItemId).put("output_index", reasoningOutputIndex)
+                .put("summary_index", 0).put("delta", delta));
+        }
+
+        private void openReasoning() throws Exception {
+            if (reasoningOpened) return;
+            reasoningOpened = true;
+            reasoningItemId = "rs_" + shortId();
+            reasoningOutputIndex = nextOutputIndex++;
+            JSONObject item = new JSONObject().put("id", reasoningItemId).put("type", "reasoning")
+                .put("summary", new JSONArray());
+            emitEvent(new JSONObject().put("type", "response.output_item.added")
+                .put("output_index", reasoningOutputIndex).put("item", item));
+            emitEvent(new JSONObject().put("type", "response.reasoning_summary_part.added")
+                .put("item_id", reasoningItemId).put("output_index", reasoningOutputIndex)
+                .put("summary_index", 0)
+                .put("part", new JSONObject().put("type", "summary_text").put("text", "")));
+        }
+
+        private void closeReasoning() throws Exception {
+            if (!reasoningOpened || reasoningDone) return;
+            reasoningDone = true;
+            String value = reasoning.toString();
+            JSONObject part = new JSONObject().put("type", "summary_text").put("text", value);
+            emitEvent(new JSONObject().put("type", "response.reasoning_summary_text.done")
+                .put("item_id", reasoningItemId).put("output_index", reasoningOutputIndex)
+                .put("summary_index", 0).put("text", value));
+            emitEvent(new JSONObject().put("type", "response.reasoning_summary_part.done")
+                .put("item_id", reasoningItemId).put("output_index", reasoningOutputIndex)
+                .put("summary_index", 0).put("part", part));
+            JSONObject item = new JSONObject().put("id", reasoningItemId).put("type", "reasoning")
+                .put("summary", new JSONArray().put(part));
+            emitEvent(new JSONObject().put("type", "response.output_item.done")
+                .put("output_index", reasoningOutputIndex).put("item", item));
+            completedOutput.put(item);
+        }
+
+        private void appendTextDelta(String delta) throws Exception {
+            if (reasoningOpened && !reasoningDone) closeReasoning();
+            if (messageDone) {
+                text.append(delta);
+                return;
+            }
+            openMessage();
+            text.append(delta);
+            emitEvent(new JSONObject().put("type", "response.output_text.delta")
+                .put("item_id", messageItemId).put("output_index", messageOutputIndex)
+                .put("content_index", 0).put("delta", delta).put("logprobs", new JSONArray()));
+        }
+
+        private void openMessage() throws Exception {
+            if (messageOpened) return;
+            messageOpened = true;
+            messageItemId = "msg_" + shortId();
+            messageOutputIndex = nextOutputIndex++;
+            JSONObject item = new JSONObject().put("id", messageItemId).put("type", "message")
+                .put("status", "in_progress").put("role", "assistant")
+                .put("content", new JSONArray());
+            emitEvent(new JSONObject().put("type", "response.output_item.added")
+                .put("output_index", messageOutputIndex).put("item", item));
+            emitEvent(new JSONObject().put("type", "response.content_part.added")
+                .put("item_id", messageItemId).put("output_index", messageOutputIndex)
+                .put("content_index", 0).put("part", outputTextPart("")));
+        }
+
+        private void closeMessage() throws Exception {
+            if (!messageOpened || messageDone) return;
+            messageDone = true;
+            String value = text.toString();
+            JSONObject part = outputTextPart(value);
+            emitEvent(new JSONObject().put("type", "response.output_text.done")
+                .put("item_id", messageItemId).put("output_index", messageOutputIndex)
+                .put("content_index", 0).put("text", value).put("logprobs", new JSONArray()));
+            emitEvent(new JSONObject().put("type", "response.content_part.done")
+                .put("item_id", messageItemId).put("output_index", messageOutputIndex)
+                .put("content_index", 0).put("part", part));
+            JSONObject item = new JSONObject().put("id", messageItemId).put("type", "message")
+                .put("status", "completed").put("role", "assistant")
+                .put("content", new JSONArray().put(part));
+            emitEvent(new JSONObject().put("type", "response.output_item.done")
+                .put("output_index", messageOutputIndex).put("item", item));
+            completedOutput.put(item);
+        }
+
+        private void closeContentItems() throws Exception {
+            closeReasoning();
+            closeMessage();
+        }
+
+        private void emitTools() throws Exception {
+            if (toolsEmitted) return;
+            toolsEmitted = true;
+            List<Integer> indexes = new ArrayList<>(tools.keySet());
+            Collections.sort(indexes);
+            for (Integer index : indexes) emitTool(tools.get(index));
+        }
+
+        private void emitTool(ToolCall tool) throws Exception {
+            if (tool == null) return;
+            int outputIndex = nextOutputIndex++;
+            String callId = tool.id.isEmpty() ? "call_" + shortId() : tool.id;
+            boolean custom = customTools.contains(tool.name);
+            String itemId = (custom ? "ctc_" : "fc_") + shortId();
+            String input = tool.arguments;
+            if (custom) {
+                try { input = new JSONObject(tool.arguments).optString("input", tool.arguments); }
+                catch (Exception ignored) {}
+            }
+            JSONObject added = new JSONObject().put("id", itemId)
+                .put("type", custom ? "custom_tool_call" : "function_call")
+                .put("status", "in_progress").put("call_id", callId).put("name", tool.name)
+                .put(custom ? "input" : "arguments", "");
+            emitEvent(new JSONObject().put("type", "response.output_item.added")
+                .put("output_index", outputIndex).put("item", added));
+            if (!input.isEmpty()) {
+                emitEvent(new JSONObject()
+                    .put("type", custom ? "response.custom_tool_call_input.delta"
+                        : "response.function_call_arguments.delta")
+                    .put("item_id", itemId).put("call_id", callId)
+                    .put("output_index", outputIndex).put("delta", input));
+            }
+            emitEvent(new JSONObject()
+                .put("type", custom ? "response.custom_tool_call_input.done"
+                    : "response.function_call_arguments.done")
+                .put("item_id", itemId).put("call_id", callId)
+                .put("output_index", outputIndex)
+                .put(custom ? "input" : "arguments", input));
+            JSONObject completedItem = new JSONObject(added.toString()).put("status", "completed")
+                .put(custom ? "input" : "arguments", input);
+            emitEvent(new JSONObject().put("type", "response.output_item.done")
+                .put("output_index", outputIndex).put("item", completedItem));
+            completedOutput.put(completedItem);
+        }
+
+        void finish() throws Exception {
+            if (completed) return;
+            ensureStarted();
+            closeContentItems();
+            emitTools();
+            JSONObject response = buildResponse(responseId, model, text.toString(), reasoning.toString(),
+                tools, usage, customTools);
+            response.put("output", completedOutput);
+            recordResponse(response);
+            emitEvent(new JSONObject().put("type", "response.completed").put("response", response));
+            completed = true;
+        }
+
+        private void emitEvent(JSONObject value) throws Exception {
+            value.put("sequence_number", sequenceNumber++);
+            StringBuilder encoded = new StringBuilder();
+            event(encoded, value);
+            sink.emit(encoded.toString().getBytes(StandardCharsets.UTF_8));
+            stats.outputChunks++;
+        }
+    }
+
+    private static JSONObject outputTextPart(String text) throws Exception {
+        return new JSONObject().put("type", "output_text").put("text", text)
+            .put("annotations", new JSONArray());
+    }
+
+    private static String valueText(Object value) {
+        StringBuilder result = new StringBuilder();
+        appendValue(result, value);
+        return result.toString();
+    }
+
     static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel) throws Exception { return chatResponseToResponses(source,contentType,fallbackModel,new HashSet<>()); }
     static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel, Set<String> customTools) throws Exception {
         String raw=new String(source,StandardCharsets.UTF_8); String model=fallbackModel; String responseId="resp_"+shortId(); StringBuilder text=new StringBuilder(); StringBuilder reasoning=new StringBuilder(); Map<Integer,ToolCall> tools=new LinkedHashMap<>(); JSONObject usage=null;
@@ -317,6 +642,11 @@ final class ChatCompletionsAdapter {
         JSONObject convertedRequest=new JSONObject(chatText); if(!"system".equals(convertedRequest.getJSONArray("messages").getJSONObject(0).optString("role"))) throw new IllegalStateException("developer instructions must be normalized to system");
         String chunk="data: {\"model\":\"demo\",\"choices\":[{\"delta\":{\"content\":\"ok\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"patch\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
         ChatResult result=chatResponseToResponses(chunk.getBytes(StandardCharsets.UTF_8),"text/event-stream","demo",customToolNames(request.toString().getBytes(StandardCharsets.UTF_8))); String events=new String(result.body,StandardCharsets.UTF_8); if(!events.contains("response.completed")||!events.contains("custom_tool_call")||!events.contains("patch"))throw new IllegalStateException("response conversion failed");
+        String streaming="data: {\"model\":\"demo\",\"choices\":[{\"delta\":{\"content\":\"o\"}}]}\n\ndata: {\"model\":\"demo\",\"choices\":[{\"delta\":{\"content\":\"k\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        java.io.ByteArrayOutputStream streamed=new java.io.ByteArrayOutputStream();
+        StreamStats stats=streamChatResponseToResponses(new java.io.ByteArrayInputStream(streaming.getBytes(StandardCharsets.UTF_8)),"text/event-stream","demo",new HashSet<>(),streamed::write);
+        String streamedEvents=streamed.toString("UTF-8");
+        if(!stats.streaming||stats.upstreamEvents!=2||!streamedEvents.contains("\"delta\":\"o\"")||!streamedEvents.contains("\"delta\":\"k\"")||!streamedEvents.contains("response.completed"))throw new IllegalStateException("streaming response conversion failed");
     }
 
     private static String shortId(){return UUID.randomUUID().toString().replace("-","").substring(0,24);}

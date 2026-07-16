@@ -200,15 +200,44 @@ final class LocalApiProxy {
             try { response = code >= 400 ? connection.getErrorStream() : connection.getInputStream(); }
             catch (Exception e) { response = connection.getErrorStream(); }
             if (adaptChat && code >= 200 && code < 300) {
-                byte[] upstream = response == null ? new byte[0] : readAll(response);
-                if (response != null) response.close();
+                if (response == null) throw new IllegalStateException("Chat upstream returned an empty response stream");
                 String adaptedModel = requestModel;
                 if (adaptedModel.isEmpty()) try { adaptedModel = new JSONObject(new String(body, StandardCharsets.UTF_8)).optString("model"); } catch (Exception ignored) {}
-                ChatCompletionsAdapter.ChatResult adapted = ChatCompletionsAdapter.chatResponseToResponses(upstream, contentType, adaptedModel, customTools);
-                byte[] adaptedBody = flattenCollaboration
-                    ? rewriteCollaborationToolCalls(adapted.body, adapted.contentType) : adapted.body;
                 responseStarted = true;
-                writeResponse(client, code, adapted.contentType, adaptedBody);
+                OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
+                writeAscii(clientOut, "HTTP/1.1 " + code + " " + reason(code) + "\r\n");
+                writeAscii(clientOut, "Content-Type: text/event-stream; charset=utf-8\r\n");
+                writeAscii(clientOut, "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+                clientOut.flush();
+                long conversionStartedNanos = System.nanoTime();
+                final long[] firstOutputNanos = new long[]{0L};
+                final boolean rewriteNamespaces = flattenCollaboration;
+                ChatCompletionsAdapter.StreamStats streamStats;
+                try {
+                    streamStats = ChatCompletionsAdapter.streamChatResponseToResponses(
+                        response, contentType, adaptedModel, customTools, value -> {
+                            byte[] output = rewriteNamespaces
+                                ? rewriteCollaborationToolCalls(value, "text/event-stream") : value;
+                            if (firstOutputNanos[0] == 0L) firstOutputNanos[0] = System.nanoTime();
+                            writeChunk(clientOut, output, output.length);
+                        });
+                } finally {
+                    response.close();
+                }
+                writeAscii(clientOut, "0\r\n\r\n");
+                clientOut.flush();
+                long completedNanos = System.nanoTime();
+                long firstUpstreamMs = streamStats.firstUpstreamEventNanos == 0L ? -1L
+                    : nanosToMillis(streamStats.firstUpstreamEventNanos - conversionStartedNanos);
+                long firstOutputMs = firstOutputNanos[0] == 0L ? -1L
+                    : nanosToMillis(firstOutputNanos[0] - conversionStartedNanos);
+                Log.i(TAG, "id=" + requestId + " chatConversion="
+                    + (streamStats.streaming ? "stream" : "buffered-json")
+                    + " contentType=" + safeContentType(contentType)
+                    + " firstUpstreamMs=" + firstUpstreamMs + " firstOutputMs=" + firstOutputMs
+                    + " upstreamEvents=" + streamStats.upstreamEvents
+                    + " outputChunks=" + streamStats.outputChunks
+                    + " totalMs=" + nanosToMillis(completedNanos - conversionStartedNanos));
             } else {
                 responseStarted = true;
                 OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
@@ -216,16 +245,42 @@ final class LocalApiProxy {
                 if (contentType != null) writeAscii(clientOut, "Content-Type: " + contentType + "\r\n");
                 writeAscii(clientOut, "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
                 if (response != null) {
-                    if (flattenCollaboration && code >= 200 && code < 300) {
-                        streamWithCollaborationNamespaces(response, contentType, clientOut);
-                    } else {
-                        byte[] buffer = new byte[16 * 1024]; int count;
-                        while ((count = response.read(buffer)) >= 0) {
-                            if (count == 0) continue;
-                            writeChunk(clientOut, buffer, count);
+                    try {
+                        boolean responsesEventStream = requestResponses && code >= 200 && code < 300
+                            && contentType != null
+                            && contentType.toLowerCase(Locale.US).contains("event-stream");
+                        if (responsesEventStream) {
+                            long normalizationStartedNanos = System.nanoTime();
+                            final boolean rewriteNamespaces = flattenCollaboration;
+                            ResponsesSseNormalizer.Stats normalizationStats = ResponsesSseNormalizer.normalize(
+                                response, value -> {
+                                    byte[] output = rewriteNamespaces
+                                        ? rewriteCollaborationToolCalls(value, "text/event-stream") : value;
+                                    writeChunk(clientOut, output, output.length);
+                                });
+                            Log.i(TAG, "id=" + requestId + " responsesNormalization contentType="
+                                + safeContentType(contentType)
+                                + " upstreamEvents=" + normalizationStats.upstreamEvents
+                                + " outputEvents=" + normalizationStats.outputEvents
+                                + " syntheticAdded=" + normalizationStats.syntheticAddedItems
+                                + " syntheticCompleted=" + normalizationStats.syntheticCompletedItems
+                                + " suppressedLate=" + normalizationStats.suppressedLateItems
+                                + " canonicalizedAdded=" + normalizationStats.canonicalizedAddedItems
+                                + " missingItemId=" + normalizationStats.deltasWithoutItemId
+                                + " totalMs=" + nanosToMillis(System.nanoTime() - normalizationStartedNanos)
+                                + " types=" + normalizationStats.eventTypeSummary());
+                        } else if (flattenCollaboration && code >= 200 && code < 300) {
+                            streamWithCollaborationNamespaces(response, contentType, clientOut);
+                        } else {
+                            byte[] buffer = new byte[16 * 1024]; int count;
+                            while ((count = response.read(buffer)) >= 0) {
+                                if (count == 0) continue;
+                                writeChunk(clientOut, buffer, count);
+                            }
                         }
+                    } finally {
+                        response.close();
                     }
-                    response.close();
                 }
                 writeAscii(clientOut, "0\r\n\r\n"); clientOut.flush();
             }
@@ -663,6 +718,12 @@ final class LocalApiProxy {
             + (fallback ? " status=" + fallbackStatus : ""));
     }
 
+    private static long nanosToMillis(long nanos) { return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(Math.max(0L, nanos)); }
+    private static String safeContentType(String value) {
+        if (value == null || value.trim().isEmpty()) return "missing";
+        String normalized = value.replace('\r', ' ').replace('\n', ' ').trim();
+        return normalized.length() <= 120 ? normalized : normalized.substring(0, 120);
+    }
     private static String pathWithoutQuery(String value) { int q=value.indexOf('?'); return q<0?value:value.substring(0,q); }
     private static byte[] readAll(InputStream input) throws Exception { ByteArrayOutputStream out=new ByteArrayOutputStream(); byte[] b=new byte[16384]; int n; while((n=input.read(b))>=0)if(n>0)out.write(b,0,n); return out.toByteArray(); }
     private static void writeChunk(OutputStream out, byte[] value, int count) throws Exception { writeAscii(out,Integer.toHexString(count)+"\r\n");out.write(value,0,count);writeAscii(out,"\r\n");out.flush(); }

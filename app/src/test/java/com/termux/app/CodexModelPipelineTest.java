@@ -7,8 +7,17 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileWriter;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class CodexModelPipelineTest {
     @Test
@@ -638,6 +647,222 @@ public class CodexModelPipelineTest {
         assertFalse(v2Toml.toString().contains("[agents]"));
     }
 
+    @Test
+    public void chatSseAdapterEmitsFirstTextDeltaBeforeUpstreamCompletes() throws Exception {
+        PipedInputStream input = new PipedInputStream();
+        PipedOutputStream upstream = new PipedOutputStream(input);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        CountDownLatch firstDelta = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread converter = new Thread(() -> {
+            try {
+                ChatCompletionsAdapter.streamChatResponseToResponses(input, "text/event-stream",
+                    "demo", Collections.emptySet(), value -> {
+                        synchronized (output) { output.write(value); }
+                        if (new String(value, StandardCharsets.UTF_8)
+                                .contains("response.output_text.delta")) firstDelta.countDown();
+                    });
+            } catch (Throwable error) { failure.set(error); }
+        });
+        converter.start();
+
+        JSONObject first = chatChunk(new JSONObject().put("content", "Hel"), JSONObject.NULL);
+        upstream.write(sseData(first).getBytes(StandardCharsets.UTF_8));
+        upstream.flush();
+        assertTrue("first delta must arrive before upstream EOF", firstDelta.await(2, TimeUnit.SECONDS));
+        String partial;
+        synchronized (output) { partial = output.toString("UTF-8"); }
+        assertTrue(partial.contains("\"delta\":\"Hel\""));
+        assertFalse(partial.contains("response.completed"));
+
+        JSONObject second = chatChunk(new JSONObject().put("content", "lo"), "stop");
+        upstream.write(sseData(second).getBytes(StandardCharsets.UTF_8));
+        upstream.write(sseData(new JSONObject().put("model", "demo")
+            .put("choices", new JSONArray()).put("usage", new JSONObject()
+                .put("prompt_tokens", 3).put("completion_tokens", 2).put("total_tokens", 5)))
+            .getBytes(StandardCharsets.UTF_8));
+        upstream.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+        upstream.close();
+        converter.join(2_000L);
+        assertFalse("converter must finish", converter.isAlive());
+        if (failure.get() != null) throw new AssertionError(failure.get());
+
+        byte[] completedBytes;
+        synchronized (output) { completedBytes = output.toByteArray(); }
+        String events = new String(completedBytes, StandardCharsets.UTF_8);
+        assertTrue(events.indexOf("\"delta\":\"Hel\"") < events.indexOf("\"delta\":\"lo\""));
+        JSONObject completed = completedResponse(completedBytes);
+        assertEquals("Hello", completed.getJSONArray("output").getJSONObject(0)
+            .getJSONArray("content").getJSONObject(0).getString("text"));
+        assertEquals(5, completed.getJSONObject("usage").getInt("total_tokens"));
+    }
+
+    @Test
+    public void chatSseAdapterStreamsReasoningBeforeTextWithValidItemLifecycle() throws Exception {
+        StringBuilder sse = new StringBuilder();
+        sse.append(sseData(chatChunk(new JSONObject().put("reasoning_content", "think "), JSONObject.NULL)));
+        sse.append(sseData(chatChunk(new JSONObject().put("reasoning_content", "more"), JSONObject.NULL)));
+        sse.append(sseData(chatChunk(new JSONObject().put("content", "answer"), "stop")));
+        sse.append("data: [DONE]\n\n");
+        StreamCapture capture = convertChatStream(sse.toString(), "text/event-stream", Collections.emptySet());
+        String events = capture.text();
+        int reasoningDelta = events.indexOf("response.reasoning_summary_text.delta");
+        int reasoningDone = events.indexOf("response.reasoning_summary_text.done");
+        int textDelta = events.indexOf("response.output_text.delta");
+        assertTrue(reasoningDelta >= 0 && reasoningDelta < reasoningDone && reasoningDone < textDelta);
+        JSONObject completed = completedResponse(capture.bytes());
+        JSONArray output = completed.getJSONArray("output");
+        assertEquals("reasoning", output.getJSONObject(0).getString("type"));
+        assertEquals("think more", output.getJSONObject(0).getJSONArray("summary")
+            .getJSONObject(0).getString("text"));
+        assertEquals("answer", output.getJSONObject(1).getJSONArray("content")
+            .getJSONObject(0).getString("text"));
+    }
+
+    @Test
+    public void chatSseAdapterKeepsParallelToolFragmentsSeparatedAndOrdered() throws Exception {
+        JSONArray firstCalls = new JSONArray()
+            .put(chatToolDelta(1, "call_b", "wait_agent", "{\"id\":\""))
+            .put(chatToolDelta(0, "call_a", "spawn_agent", "{\"input\":\""));
+        JSONArray secondCalls = new JSONArray()
+            .put(chatToolDelta(0, "", "", "x\"}"))
+            .put(chatToolDelta(1, "", "", "a\"}"));
+        String sse = sseData(chatChunk(new JSONObject().put("tool_calls", firstCalls), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("tool_calls", secondCalls), "tool_calls"))
+            + "data: [DONE]\n\n";
+        StreamCapture capture = convertChatStream(sse, "text/event-stream",
+            new HashSet<>(Collections.singletonList("spawn_agent")));
+        JSONObject completed = completedResponse(capture.bytes());
+        JSONArray output = completed.getJSONArray("output");
+        assertEquals(2, output.length());
+        assertEquals("custom_tool_call", output.getJSONObject(0).getString("type"));
+        assertEquals("call_a", output.getJSONObject(0).getString("call_id"));
+        assertEquals("x", output.getJSONObject(0).getString("input"));
+        assertEquals("function_call", output.getJSONObject(1).getString("type"));
+        assertEquals("call_b", output.getJSONObject(1).getString("call_id"));
+        assertEquals("{\"id\":\"a\"}", output.getJSONObject(1).getString("arguments"));
+    }
+
+    @Test
+    public void responsesNormalizerSynthesizesMissingItemsBeforeProviderDeltas() throws Exception {
+        JSONObject reasoningPart = new JSONObject().put("type", "response.reasoning_summary_part.added")
+            .put("item_id", "rs_1").put("output_index", 0).put("summary_index", 0)
+            .put("part", new JSONObject().put("type", "summary_text").put("text", ""));
+        JSONObject reasoningDelta = new JSONObject().put("type", "response.reasoning_summary_text.delta")
+            .put("item_id", "rs_1").put("output_index", 0).put("summary_index", 0)
+            .put("delta", "think");
+        JSONObject textDelta = new JSONObject().put("type", "response.output_text.delta")
+            .put("item_id", "msg_1").put("output_index", 1).put("content_index", 0)
+            .put("delta", "Hello");
+        JSONObject lateAdded = new JSONObject().put("type", "response.output_item.added")
+            .put("output_index", 1).put("item", new JSONObject().put("id", "msg_1")
+                .put("type", "message").put("role", "assistant").put("status", "in_progress")
+                .put("content", new JSONArray()));
+        JSONObject message = new JSONObject().put("id", "msg_1").put("type", "message")
+            .put("role", "assistant").put("status", "completed")
+            .put("content", new JSONArray().put(new JSONObject().put("type", "output_text")
+                .put("text", "Hello").put("annotations", new JSONArray())));
+        JSONObject done = new JSONObject().put("type", "response.output_item.done")
+            .put("output_index", 1).put("item", message);
+        JSONObject completed = new JSONObject().put("type", "response.completed")
+            .put("response", new JSONObject().put("id", "resp_1")
+                .put("usage", new JSONObject().put("input_tokens", 1)
+                    .put("output_tokens", 1).put("total_tokens", 2)));
+        String source = sseEventNameOnly(reasoningPart) + sseEventNameOnly(reasoningDelta)
+            + sseEventNameOnly(textDelta) + sseEventNameOnly(lateAdded)
+            + sseEventNameOnly(done) + sseEventNameOnly(completed) + "data: [DONE]\n\n";
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ResponsesSseNormalizer.Stats stats = ResponsesSseNormalizer.normalize(
+            new ByteArrayInputStream(source.getBytes(StandardCharsets.UTF_8)), output::write);
+        String normalized = output.toString("UTF-8");
+
+        int reasoningAdded = normalized.indexOf("\"id\":\"rs_1\",\"type\":\"reasoning\"");
+        int reasoningPartPosition = normalized.indexOf("response.reasoning_summary_part.added");
+        int reasoningDone = normalized.indexOf("response.output_item.done", reasoningPartPosition);
+        int messageAdded = normalized.indexOf("\"id\":\"msg_1\",\"type\":\"message\"");
+        int textPosition = normalized.indexOf("response.output_text.delta");
+        assertTrue(reasoningAdded >= 0 && reasoningAdded < reasoningPartPosition);
+        assertTrue(reasoningDone > reasoningPartPosition && reasoningDone < messageAdded);
+        assertTrue(messageAdded >= 0 && messageAdded < textPosition);
+        assertEquals(2, stats.syntheticAddedItems);
+        assertEquals(1, stats.syntheticCompletedItems);
+        assertEquals(1, stats.suppressedLateItems);
+        assertEquals(0, stats.deltasWithoutItemId);
+    }
+
+    @Test
+    public void chatAdapterHandlesUsageOnlyDoneMalformedSseAndBufferedJson() throws Exception {
+        JSONObject usage = new JSONObject().put("prompt_tokens", 7)
+            .put("completion_tokens", 4).put("total_tokens", 11);
+        String sse = "\n: keep-alive\n\ndata: not-json\n\n"
+            + sseData(new JSONObject().put("model", "demo").put("choices", new JSONArray())
+                .put("usage", usage))
+            + "data: [DONE]\n\n";
+        StreamCapture streamed = convertChatStream(sse, "application/octet-stream", Collections.emptySet());
+        assertTrue(streamed.stats.streaming);
+        assertEquals(1, streamed.stats.upstreamEvents);
+        assertEquals(11, completedResponse(streamed.bytes()).getJSONObject("usage").getInt("total_tokens"));
+
+        JSONObject json = new JSONObject().put("model", "demo")
+            .put("choices", new JSONArray().put(new JSONObject().put("message",
+                new JSONObject().put("role", "assistant").put("content", "buffered"))))
+            .put("usage", usage);
+        StreamCapture buffered = convertChatStream(json.toString(), "application/json", Collections.emptySet());
+        assertFalse(buffered.stats.streaming);
+        assertEquals(1, buffered.stats.outputChunks);
+        JSONObject completed = completedResponse(buffered.bytes());
+        assertEquals("buffered", completed.getJSONArray("output").getJSONObject(0)
+            .getJSONArray("content").getJSONObject(0).getString("text"));
+    }
+
+    private static JSONObject chatChunk(JSONObject delta, Object finishReason) throws Exception {
+        JSONObject choice = new JSONObject().put("delta", delta);
+        if (finishReason != null) choice.put("finish_reason", finishReason);
+        return new JSONObject().put("id", "chatcmpl_demo").put("model", "demo")
+            .put("choices", new JSONArray().put(choice));
+    }
+
+    private static JSONObject chatToolDelta(int index, String id, String name, String arguments)
+            throws Exception {
+        JSONObject function = new JSONObject().put("arguments", arguments);
+        if (!name.isEmpty()) function.put("name", name);
+        JSONObject result = new JSONObject().put("index", index).put("function", function);
+        if (!id.isEmpty()) result.put("id", id);
+        return result;
+    }
+
+    private static String sseData(JSONObject value) {
+        return "data: " + value + "\n\n";
+    }
+
+    private static String sseEventNameOnly(JSONObject value) throws Exception {
+        JSONObject data = new JSONObject(value.toString());
+        String type = data.optString("type", "message");
+        data.remove("type");
+        return "event: " + type + "\n" + "data: " + data + "\n\n";
+    }
+
+
+    private static StreamCapture convertChatStream(String source, String contentType,
+                                                    java.util.Set<String> customTools) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ChatCompletionsAdapter.StreamStats stats = ChatCompletionsAdapter.streamChatResponseToResponses(
+            new ByteArrayInputStream(source.getBytes(StandardCharsets.UTF_8)), contentType, "demo",
+            customTools, output::write);
+        return new StreamCapture(output.toByteArray(), stats);
+    }
+
+    private static final class StreamCapture {
+        private final byte[] bytes;
+        final ChatCompletionsAdapter.StreamStats stats;
+        StreamCapture(byte[] bytes, ChatCompletionsAdapter.StreamStats stats) {
+            this.bytes = bytes;
+            this.stats = stats;
+        }
+        byte[] bytes() { return bytes; }
+        String text() { return new String(bytes, StandardCharsets.UTF_8); }
+    }
+
     private static JSONObject findAssistantToolMessage(JSONArray messages) throws Exception {
         for (int i = 0; i < messages.length(); i++) {
             JSONObject message = messages.getJSONObject(i);
@@ -648,8 +873,8 @@ public class CodexModelPipelineTest {
         return null;
     }
 
-    private static JSONObject completedResponse(ChatCompletionsAdapter.ChatResult result) throws Exception {
-        String[] lines = new String(result.body, StandardCharsets.UTF_8).split("\r?\n");
+    private static JSONObject completedResponse(byte[] body) throws Exception {
+        String[] lines = new String(body, StandardCharsets.UTF_8).split("\r?\n");
         for (String line : lines) {
             if (!line.startsWith("data: ")) continue;
             JSONObject event = new JSONObject(line.substring(6));
@@ -657,6 +882,10 @@ public class CodexModelPipelineTest {
         }
         fail("response.completed event missing");
         return null;
+    }
+
+    private static JSONObject completedResponse(ChatCompletionsAdapter.ChatResult result) throws Exception {
+        return completedResponse(result.body);
     }
 
 }
