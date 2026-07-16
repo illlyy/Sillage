@@ -31,7 +31,7 @@ internal enum class NativeChatRole {
 
 internal data class NativeAttachment(val name: String, val path: String, val image: Boolean)
 
-internal data class NativeModelOption(val id: String, val name: String, val efforts: List<String>)
+internal data class NativeModelOption(val id: String, val name: String, val efforts: List<String>, val defaultEffort: String)
 
 internal data class NativeConversation(val threadId: String, val title: String, val state: String, val projectPath: String, val favorite: Boolean) { val projectName: String get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
 
@@ -244,17 +244,23 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 .map { it.trim().lowercase() }
                 .filter { it.isNotEmpty() }
                 .distinct()
+            val defaultEffort = model.defaultReasoningEffort.trim().lowercase()
+                .takeIf { it in efforts }
+                ?: efforts.firstOrNull { it == "high" }
+                ?: efforts.firstOrNull()
+                ?: "high"
             chatState.modelOptions.add(
                 NativeModelOption(
                     id = model.id,
                     name = model.name.ifBlank { model.id },
-                    efforts = efforts,
+                    efforts = efforts.ifEmpty { listOf(defaultEffort) },
+                    defaultEffort = defaultEffort,
                 ),
             )
         }
         chatState.selectedModel = profile.model
-        val selectedModelConfig = profile.models.firstOrNull { it.id.equals(profile.model, ignoreCase = true) }
-        chatState.selectedEffort = selectedModelConfig?.defaultReasoningEffort?.takeIf { it.isNotBlank() } ?: "high"
+        val selectedModelOption = chatState.modelOptions.firstOrNull { it.id.equals(profile.model, ignoreCase = true) }
+        chatState.selectedEffort = selectedModelOption?.defaultEffort ?: "high"
 
         chatState.modelLabel = profile.model.ifBlank { "默认模型" }
         chatState.connectionLabel = "正在连接 ${chatState.modelLabel}…"

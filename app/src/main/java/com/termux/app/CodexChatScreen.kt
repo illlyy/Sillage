@@ -115,6 +115,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -302,9 +303,20 @@ internal fun NativeChatScreen(
         if (!listDragged) followOutput = !listState.canScrollForward
     }
 
-    LaunchedEffect(state.messages.size, state.revision) {
+    LaunchedEffect(state.messages.size) {
         if (followOutput && state.messages.isNotEmpty()) {
             listState.animateScrollToItem(state.messages.lastIndex, Int.MAX_VALUE)
+        }
+    }
+
+    // Streaming deltas can arrive many times per second. Follow them at a stable frame rate
+    // instead of launching a new scroll animation for every token.
+    LaunchedEffect(state.busy, followOutput) {
+        while (state.busy && followOutput) {
+            if (state.messages.isNotEmpty() && !listDragged) {
+                listState.scrollToItem(state.messages.lastIndex, Int.MAX_VALUE)
+            }
+            delay(96L)
         }
     }
 
@@ -484,10 +496,10 @@ internal fun NativeChatScreen(
             onDismiss = { showModelPicker = false },
             onSelect = { id ->
                 state.selectedModel = id
-                state.modelLabel = id
                 val option = state.modelOptions.firstOrNull { it.id == id }
+                state.modelLabel = option?.name ?: id
                 if (option != null && state.selectedEffort !in option.efforts) {
-                    state.selectedEffort = option.efforts.firstOrNull() ?: "high"
+                    state.selectedEffort = option.defaultEffort
                 }
                 showModelPicker = false
             },
@@ -940,6 +952,53 @@ private fun RikkaUserMessage(text: String, onEdit: () -> Unit) {
     }
 }
 
+
+@Composable
+private fun StreamingResponseText(text: String, streaming: Boolean) {
+    val latestText = rememberUpdatedState(text)
+    var displayedText by remember { mutableStateOf(if (streaming) "" else text) }
+
+    LaunchedEffect(streaming) {
+        if (!streaming) {
+            displayedText = latestText.value
+            return@LaunchedEffect
+        }
+        if (!latestText.value.startsWith(displayedText)) displayedText = ""
+        while (true) {
+            val target = latestText.value
+            if (!target.startsWith(displayedText)) {
+                displayedText = target
+            } else if (displayedText.length < target.length) {
+                val pending = target.length - displayedText.length
+                val step = when {
+                    pending > 160 -> 18
+                    pending > 72 -> 10
+                    pending > 24 -> 6
+                    else -> 3
+                }
+                displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
+            }
+            delay(24L)
+        }
+    }
+
+    if (streaming) {
+        // Full Markwon/LaTeX parsing on every token is expensive and causes repeated remeasure.
+        // Render a stable lightweight surface while streaming, then promote to rich Markdown once.
+        SelectionContainer {
+            Text(
+                text = displayedText,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyLarge,
+                lineHeight = 24.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    } else {
+        RichResponseText(text)
+    }
+}
+
 @Composable
 private fun RikkaAssistantMessage(text: String, streaming: Boolean, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     val context = LocalContext.current
@@ -954,7 +1013,7 @@ private fun RikkaAssistantMessage(text: String, streaming: Boolean, onRetry: (()
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text("默认助手", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(6.dp)); RichResponseText(text)
+                    Spacer(Modifier.height(6.dp)); StreamingResponseText(text, streaming)
                     if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp); Spacer(Modifier.width(7.dp)); Text("正在生成", style = MaterialTheme.typography.labelSmall)
                     }
@@ -1011,13 +1070,13 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
     AnimatedVisibility(
         visible = visible,
         modifier = modifier,
-        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = spring(dampingRatio = 0.40f, stiffness = 320f), clip = true),
-        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = spring(dampingRatio = 0.38f, stiffness = 350f), clip = true),
+        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f), clip = true),
+        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = spring(dampingRatio = 0.82f, stiffness = 440f), clip = true),
     ) {
         AnimatedVisibility(
             visible = visible,
-            enter = fadeIn(tween(75, easing = LinearEasing)) + slideInVertically(initialOffsetY = { -it / 3 }, animationSpec = tween(115, easing = LinearEasing)),
-            exit = fadeOut(tween(65, easing = LinearEasing)) + slideOutVertically(targetOffsetY = { -it / 5 }, animationSpec = tween(90, easing = LinearEasing)),
+            enter = fadeIn(tween(75, easing = LinearEasing)) + slideInVertically(initialOffsetY = { -it / 8 }, animationSpec = tween(130, easing = LinearEasing)),
+            exit = fadeOut(tween(65, easing = LinearEasing)) + slideOutVertically(targetOffsetY = { -it / 10 }, animationSpec = tween(105, easing = LinearEasing)),
         ) { content() }
     }
 }
@@ -1657,6 +1716,13 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
     var expanded by remember { mutableStateOf(false) }
     var popupVisible by remember { mutableStateOf(false) }
     var contentReady by remember { mutableStateOf(false) }
+    var previewEffort by remember(options, selected) { mutableStateOf(selected) }
+    var effortDragging by remember { mutableStateOf(false) }
+    val effortLabelScale by animateFloatAsState(
+        targetValue = if (effortDragging) 1.14f else 1f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
+        label = "effortLabelScale",
+    )
     val menuVisibility = remember { MutableTransitionState(false) }
     val scope = rememberCoroutineScope()
     val density = androidx.compose.ui.platform.LocalDensity.current
@@ -1727,7 +1793,15 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                                         Icon(HugeIcons.Zap, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                                         Spacer(Modifier.width(8.dp))
                                         Text("思维强度", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                                        AnimatedContent(targetState = selected, transitionSpec = { (fadeIn(tween(120)) + scaleIn(initialScale = 0.72f, animationSpec = spring(dampingRatio = 0.46f, stiffness = 420f))).togetherWith(fadeOut(tween(90)) + scaleOut(targetScale = 1.18f, animationSpec = tween(110))) }, label = "effortLabelBounce") { effort ->
+                                        AnimatedContent(
+                                            targetState = previewEffort,
+                                            modifier = Modifier.graphicsLayer { scaleX = effortLabelScale; scaleY = effortLabelScale },
+                                            transitionSpec = {
+                                                (fadeIn(tween(90)) + slideInVertically(initialOffsetY = { it / 5 }, animationSpec = spring(dampingRatio = 0.72f, stiffness = 560f)))
+                                                    .togetherWith(fadeOut(tween(70)) + slideOutVertically(targetOffsetY = { -it / 6 }, animationSpec = tween(90)))
+                                            },
+                                            label = "effortLabelPreview",
+                                        ) { effort ->
                                             Text(effortLabel(effort), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                         }
                                     }
@@ -1737,7 +1811,14 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                                     enter = fadeIn(tween(160, delayMillis = 65)) + scaleIn(initialScale = 0.94f, transformOrigin = TransformOrigin(0.5f, 0.5f), animationSpec = spring(dampingRatio = 0.64f, stiffness = 390f)),
                                     exit = fadeOut(tween(90)),
                                 ) {
-                                    LiquidEffortSlider(options, selected, onSelect, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
+                                    LiquidEffortSlider(
+                                        options = options,
+                                        selected = selected,
+                                        onPreview = { previewEffort = it },
+                                        onDraggingChanged = { effortDragging = it },
+                                        onSelect = onSelect,
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                    )
                                 }
                                 AnimatedVisibility(
                                     visible = contentReady,
@@ -1756,30 +1837,42 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
 }
 
 @Composable
-private fun LiquidEffortSlider(options: List<String>, selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun LiquidEffortSlider(
+    options: List<String>, selected: String,
+    onPreview: (String) -> Unit,
+    onDraggingChanged: (Boolean) -> Unit,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     if (options.isEmpty()) return
     val scope = rememberCoroutineScope()
     var visualIndex by remember(options) { mutableFloatStateOf(options.indexOf(selected).coerceAtLeast(0).toFloat()) }
     var dragging by remember { mutableStateOf(false) }
     var settleJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    val thumbScale by animateFloatAsState(if (dragging) 1.32f else 1f, spring(dampingRatio = 0.48f, stiffness = 360f), label = "liquidThumbScale")
-    fun settle(index: Float) {
+    val previewIndex = visualIndex.roundToInt().coerceIn(options.indices)
+    val thumbScale by animateFloatAsState(if (dragging) 1.22f else 1f, spring(dampingRatio = 0.72f, stiffness = 480f), label = "liquidThumbScale")
+
+    fun updateDragging(value: Boolean) { dragging = value; onDraggingChanged(value) }
+    fun settle(index: Float, commit: Boolean) {
         val target = index.roundToInt().coerceIn(options.indices)
         settleJob?.cancel()
         settleJob = scope.launch {
-            animate(visualIndex, target.toFloat(), animationSpec = spring(dampingRatio = 0.50f, stiffness = 390f)) { value, _ -> visualIndex = value }
+            animate(visualIndex, target.toFloat(), animationSpec = spring(dampingRatio = 0.78f, stiffness = 500f)) { value, _ ->
+                visualIndex = value
+                onPreview(options[value.roundToInt().coerceIn(options.indices)])
+            }
             visualIndex = target.toFloat()
-            onSelect(options[target])
+            onPreview(options[target])
+            if (commit && options[target] != selected) onSelect(options[target])
         }
     }
     LaunchedEffect(selected, options, dragging) {
-        if (!dragging) {
-            val target = options.indexOf(selected).coerceAtLeast(0).toFloat()
-            if (kotlin.math.abs(visualIndex - target) > 0.001f && settleJob?.isActive != true) {
-                animate(visualIndex, target, animationSpec = spring(dampingRatio = 0.55f, stiffness = 420f)) { value, _ -> visualIndex = value }
-            }
+        if (!dragging && settleJob?.isActive != true) {
+            visualIndex = options.indexOf(selected).coerceAtLeast(0).toFloat()
+            onPreview(options[visualIndex.roundToInt().coerceIn(options.indices)])
         }
     }
+
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth().height(46.dp), contentAlignment = Alignment.CenterStart) {
             val steps = (options.size - 1).coerceAtLeast(1)
@@ -1787,37 +1880,42 @@ private fun LiquidEffortSlider(options: List<String>, selected: String, onSelect
             val segmentPx = trackWidthPx / steps
             val progress = (visualIndex / steps).coerceIn(0f, 1f)
             Box(Modifier.fillMaxWidth().height(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f)).pointerInput(options) {
-                detectTapGestures { offset -> settle((offset.x / size.width) * steps) }
+                detectTapGestures { offset ->
+                    val target = ((offset.x / size.width) * steps).coerceIn(0f, steps.toFloat())
+                    onPreview(options[target.roundToInt().coerceIn(options.indices)])
+                    settle(target, commit = true)
+                }
             })
             Box(Modifier.fillMaxWidth(progress.coerceAtLeast(0.02f)).height(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                options.forEachIndexed { index, _ ->
-                    Box(Modifier.size(if (index == visualIndex.roundToInt()) 7.dp else 5.dp).clip(CircleShape).background(if (index <= visualIndex + 0.01f) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)))
-                }
+                options.forEachIndexed { index, _ -> Box(Modifier.size(if (index == previewIndex) 7.dp else 5.dp).clip(CircleShape).background(if (index <= visualIndex + 0.01f) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f))) }
             }
             Surface(
                 modifier = Modifier.size(42.dp, 28.dp).graphicsLayer {
                     translationX = (progress * (trackWidthPx - size.width)).coerceIn(0f, (trackWidthPx - size.width).coerceAtLeast(0f))
-                    scaleX = thumbScale
-                    scaleY = if (dragging) 1.18f else thumbScale
+                    scaleX = thumbScale; scaleY = if (dragging) 1.10f else thumbScale
                 }.pointerInput(options) {
                     detectDragGestures(
-                        onDragStart = { dragging = true },
-                        onDragCancel = { dragging = false; settle(visualIndex) },
-                        onDragEnd = { dragging = false; settle(visualIndex) },
+                        onDragStart = { updateDragging(true) },
+                        onDragCancel = { updateDragging(false); settle(options.indexOf(selected).coerceAtLeast(0).toFloat(), commit = false) },
+                        onDragEnd = { updateDragging(false); settle(visualIndex, commit = true) },
                     ) { change, amount ->
                         change.consume()
                         visualIndex = (visualIndex + amount.x / segmentPx).coerceIn(0f, steps.toFloat())
+                        onPreview(options[visualIndex.roundToInt().coerceIn(options.indices)])
                     }
                 },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = if (dragging) 0.20f else 0.10f)),
-                shadowElevation = if (dragging) 10.dp else 4.dp,
-            ) { Box(contentAlignment = Alignment.Center) { Box(Modifier.size(25.dp, 12.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = if (dragging) 0.24f else 0.14f))) } }
+                shape = CircleShape, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = if (dragging) 0.18f else 0.10f)),
+                shadowElevation = if (dragging) 7.dp else 3.dp,
+            ) { Box(contentAlignment = Alignment.Center) { Box(Modifier.size(25.dp, 12.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = if (dragging) 0.22f else 0.14f))) } }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            options.forEach { effort -> Text(effortLabel(effort), style = MaterialTheme.typography.labelSmall, color = if (effort == selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+            options.forEachIndexed { index, effort ->
+                val active = index == previewIndex
+                val scale by animateFloatAsState(if (active && dragging) 1.10f else 1f, spring(dampingRatio = 0.76f, stiffness = 540f), label = "effortTickScale")
+                Text(effortLabel(effort), modifier = Modifier.graphicsLayer { scaleX = scale; scaleY = scale }, style = MaterialTheme.typography.labelSmall, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
