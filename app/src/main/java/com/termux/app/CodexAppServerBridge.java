@@ -36,6 +36,9 @@ final class CodexAppServerBridge {
     private final Set<String> pendingFinalTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> syntheticCompletedTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
+    static final long MISSING_TURN_COMPLETION_CHECK_MS = 1200L;
+    static final long MISSING_TURN_COMPLETION_WARNING_MS = 60_000L;
+    static final int MISSING_TURN_COMPLETION_IDLE_CHECKS = 2;
     /** Threads explicitly opened by the desktop UI; subagent threads never enter this set. */
     private final Set<String> primaryThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingPrimaryThreadTitles = new ConcurrentHashMap<>();
@@ -893,10 +896,17 @@ final class CodexAppServerBridge {
         return syntheticCompletedTurns.remove(key);
     }
 
-    private boolean isFinalAgentMessage(JSONObject params) {
+    static boolean isFinalAgentMessage(JSONObject params) {
         if (params == null) return false;
         JSONObject item = params.optJSONObject("item");
-        return item != null && "agentMessage".equals(item.optString("type"));
+        return item != null && "agentMessage".equals(item.optString("type"))
+            && "final_answer".equals(item.optString("phase"));
+    }
+
+    static boolean shouldSynthesizeMissingTurnCompletion(boolean pending, boolean hasActiveRequests,
+                                                          int consecutiveIdleChecks) {
+        return pending && !hasActiveRequests
+            && consecutiveIdleChecks >= MISSING_TURN_COMPLETION_IDLE_CHECKS;
     }
 
     private void scheduleMissingTurnCompletion(JSONObject params) {
@@ -905,32 +915,55 @@ final class CodexAppServerBridge {
         String thread = params.optString("threadId");
         String turnId = params.optString("turnId");
         new Thread(() -> {
+            int consecutiveIdleChecks = 0;
+            long waitingSince = System.currentTimeMillis();
+            long nextWarningAt = waitingSince + MISSING_TURN_COMPLETION_WARNING_MS;
             try {
-                Thread.sleep(1200L);
-                if (!pendingFinalTurns.remove(key)) return;
-                long now = System.currentTimeMillis();
-                long started = turnStartedAtMs.getOrDefault(key, now - 1000L);
-                syntheticCompletedTurns.add(key);
-                JSONObject turn = new JSONObject()
-                    .put("id", turnId)
-                    .put("items", new JSONArray())
-                    .put("itemsView", "notLoaded")
-                    .put("status", "completed")
-                    .put("error", JSONObject.NULL)
-                    .put("startedAt", started / 1000L)
-                    .put("completedAt", now / 1000L)
-                    .put("durationMs", Math.max(1000L, now - started));
-                JSONObject completed = new JSONObject().put("method", "turn/completed")
-                    .put("params", new JSONObject().put("threadId", thread).put("turn", turn));
-                android.util.Log.w(TAG, "Synthesizing missing turn/completed for " + turnId);
-                if (desktopBridge != null) desktopBridge.onAppServerMessage(completed);
-                emit("onTurnComplete", "");
-                JSONObject syntheticParams = completed.optJSONObject("params");
-                if (isPrimaryTurn(syntheticParams)) {
-                    CodexTaskStore.markCompleted(activity, thread, false);
-                    notifyTaskCompleted();
+                while (pendingFinalTurns.contains(key)) {
+                    Thread.sleep(MISSING_TURN_COMPLETION_CHECK_MS);
+                    if (!pendingFinalTurns.contains(key)) return;
+
+                    LocalApiProxy proxy = apiProxy;
+                    boolean hasActiveRequests = proxy != null && proxy.hasActiveRequests();
+                    consecutiveIdleChecks = hasActiveRequests ? 0 : consecutiveIdleChecks + 1;
+                    long checkTime = System.currentTimeMillis();
+                    if (hasActiveRequests && checkTime >= nextWarningAt) {
+                        android.util.Log.w(TAG, "Still waiting for real turn/completed while upstream requests are active for "
+                            + turnId + " waitedMs=" + (checkTime - waitingSince));
+                        nextWarningAt = checkTime + MISSING_TURN_COMPLETION_WARNING_MS;
+                    }
+                    if (!shouldSynthesizeMissingTurnCompletion(true, hasActiveRequests, consecutiveIdleChecks)) {
+                        continue;
+                    }
+                    if (!pendingFinalTurns.remove(key)) return;
+
+                    long now = System.currentTimeMillis();
+                    long started = turnStartedAtMs.getOrDefault(key, now - 1000L);
+                    syntheticCompletedTurns.add(key);
+                    JSONObject turn = new JSONObject()
+                        .put("id", turnId)
+                        .put("items", new JSONArray())
+                        .put("itemsView", "notLoaded")
+                        .put("status", "completed")
+                        .put("error", JSONObject.NULL)
+                        .put("startedAt", started / 1000L)
+                        .put("completedAt", now / 1000L)
+                        .put("durationMs", Math.max(1000L, now - started));
+                    JSONObject completed = new JSONObject().put("method", "turn/completed")
+                        .put("params", new JSONObject().put("threadId", thread).put("turn", turn));
+                    android.util.Log.w(TAG, "Synthesizing missing turn/completed after upstream became idle for " + turnId);
+                    if (desktopBridge != null) desktopBridge.onAppServerMessage(completed);
+                    emit("onTurnComplete", "");
+                    JSONObject syntheticParams = completed.optJSONObject("params");
+                    if (isPrimaryTurn(syntheticParams)) {
+                        CodexTaskStore.markCompleted(activity, thread, false);
+                        notifyTaskCompleted();
+                    }
+                    sendRequest("turn/interrupt", new JSONObject().put("threadId", thread).put("turnId", turnId));
+                    return;
                 }
-                sendRequest("turn/interrupt", new JSONObject().put("threadId", thread).put("turnId", turnId));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             } catch (Exception e) {
                 syntheticCompletedTurns.remove(key);
                 android.util.Log.e(TAG, "Failed to complete final answer turn", e);

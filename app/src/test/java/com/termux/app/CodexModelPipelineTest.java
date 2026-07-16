@@ -594,6 +594,34 @@ public class CodexModelPipelineTest {
     public void localProxyBoundsCustomModelStallsAndConcurrency() {
         assertEquals(300_000, LocalApiProxy.UPSTREAM_IDLE_TIMEOUT_MS);
         assertEquals(32, LocalApiProxy.MAX_CONCURRENT_UPSTREAM_REQUESTS);
+        assertFalse(new LocalApiProxy("https://example.com/v1").hasActiveRequests());
+    }
+
+    @Test
+    public void onlyFinalAnswerAgentMessagesScheduleMissingTurnCompletion() throws Exception {
+        JSONObject params = new JSONObject().put("item", new JSONObject()
+            .put("type", "agentMessage").put("phase", "commentary"));
+        assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+
+        params.getJSONObject("item").remove("phase");
+        assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+
+        params.getJSONObject("item").put("phase", "final_answer");
+        assertTrue(CodexAppServerBridge.isFinalAgentMessage(params));
+
+        params.getJSONObject("item").put("type", "collabAgentToolCall");
+        assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+    }
+
+    @Test
+    public void missingTurnFallbackWaitsForUpstreamAndIdleGracePeriod() {
+        int requiredIdleChecks = CodexAppServerBridge.MISSING_TURN_COMPLETION_IDLE_CHECKS;
+        assertTrue(requiredIdleChecks >= 2);
+        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(false, false, requiredIdleChecks));
+        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, true, requiredIdleChecks));
+        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, true, requiredIdleChecks + 100));
+        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, false, requiredIdleChecks - 1));
+        assertTrue(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, false, requiredIdleChecks));
     }
 
     @Test

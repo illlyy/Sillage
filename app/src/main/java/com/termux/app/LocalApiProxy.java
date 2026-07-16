@@ -88,6 +88,10 @@ final class LocalApiProxy {
         try { if (server != null) server.close(); } catch (Exception ignored) {}
     }
 
+    boolean hasActiveRequests() {
+        return requestSlots.availablePermits() < MAX_CONCURRENT_UPSTREAM_REQUESTS;
+    }
+
     private void acceptLoop() {
         while (running) {
             try {
