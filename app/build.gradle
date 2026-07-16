@@ -1,9 +1,11 @@
 plugins {
-    id "com.android.application"
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.plugin.compose'
 }
 
 android {
-    compileSdkVersion project.properties.compileSdkVersion.toInteger()
+    namespace 'com.termux'
+    compileSdk project.properties.compileSdkVersion.toInteger()
     ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
     def appVersionName = System.getenv("TERMUX_APP_VERSION_NAME") ?: ""
     def apkVersionTag = System.getenv("TERMUX_APK_VERSION_TAG") ?: ""
@@ -11,7 +13,18 @@ android {
     def splitAPKsForReleaseBuilds = System.getenv("TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS") ?: "0" // F-Droid does not support split APKs #1904
 
     dependencies {
-        implementation "androidx.annotation:annotation:1.3.0"
+                implementation platform('androidx.compose:compose-bom:2025.04.01')
+        implementation 'androidx.activity:activity-compose:1.10.1'
+        implementation 'androidx.window:window:1.5.0'
+        implementation 'androidx.compose.ui:ui'
+        implementation 'androidx.compose.ui:ui-tooling-preview'
+        implementation 'androidx.compose.material3:material3:1.5.0-alpha23'
+        implementation 'com.github.rikkahub:hugeicons-compose:1.3'
+        implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.9.0'
+        implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+        debugImplementation 'androidx.compose.ui:ui-tooling'
+
+implementation "androidx.annotation:annotation:1.3.0"
         implementation "androidx.core:core:1.6.0"
         implementation "com.google.android.material:material:1.4.0"
         implementation "androidx.drawerlayout:drawerlayout:1.1.1"
@@ -21,6 +34,8 @@ android {
         implementation "io.noties.markwon:core:$markwonVersion"
         implementation "io.noties.markwon:ext-strikethrough:$markwonVersion"
         implementation "io.noties.markwon:linkify:$markwonVersion"
+        implementation "io.noties.markwon:ext-latex:$markwonVersion"
+        implementation "io.noties.markwon:inline-parser:$markwonVersion"
         implementation "io.noties.markwon:recycler:$markwonVersion"
 
         implementation project(":terminal-view")
@@ -29,8 +44,8 @@ android {
 
     defaultConfig {
         applicationId "com.ilyop.codex"
-        minSdkVersion project.properties.minSdkVersion.toInteger()
-        targetSdkVersion project.properties.targetSdkVersion.toInteger()
+        minSdk project.properties.minSdkVersion.toInteger()
+        targetSdk project.properties.targetSdkVersion.toInteger()
         versionCode 1002
         versionName "0.118.3"
 
@@ -76,7 +91,7 @@ android {
         release {
             minifyEnabled true
             shrinkResources false // Reproducible builds
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
 
         debug {
@@ -85,8 +100,13 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose true
+        buildConfig true
     }
 
     externalNativeBuild {
@@ -95,7 +115,7 @@ android {
         }
     }
 
-    lintOptions {
+    lint {
         disable 'ProtectedPermissions'
     }
 
@@ -105,21 +125,9 @@ android {
         }
     }
 
-    packagingOptions {
+    packaging {
         jniLibs {
             useLegacyPackaging true
-        }
-    }
-
-    applicationVariants.all { variant ->
-        variant.outputs.all { output ->
-            if (variant.buildType.name == "debug") {
-                def abi = output.getFilter(com.android.build.OutputFile.ABI)
-                outputFileName = new File("codex-mobile_" + (apkVersionTag ? apkVersionTag : "debug") + "_" + (abi ? abi : "universal") + ".apk")
-            } else if (variant.buildType.name == "release") {
-                def abi = output.getFilter(com.android.build.OutputFile.ABI)
-                outputFileName = new File("codex-mobile_" + (apkVersionTag ? apkVersionTag : "release") + "_" + (abi ? abi : "universal") + ".apk")
-            }
         }
     }
 
@@ -205,9 +213,9 @@ task downloadBootstraps() {
     }
 }
 
-afterEvaluate {
-    android.applicationVariants.all { variant ->
-        variant.javaCompileProvider.get().dependsOn(downloadBootstraps)
+tasks.configureEach { task ->
+    if (task.name.startsWith("compile") || task.name.startsWith("configureNdkBuild") || task.name.startsWith("buildNdkBuild")) {
+        task.dependsOn(downloadBootstraps)
     }
 }
 
@@ -215,3 +223,10 @@ afterEvaluate {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
+
+
+kotlin {
+    jvmToolchain(17)
+}
+
+

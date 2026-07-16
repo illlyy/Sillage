@@ -42,6 +42,21 @@ final class CodexTaskStore {
         update(context, threadId, cleanTitle(title, threadId), RUNNING);
     }
 
+    static synchronized void updateTitle(Context context, String threadId, String title) {
+        if (threadId == null || threadId.isEmpty() || title == null || title.trim().isEmpty()) return;
+        List<Task> tasks = read(context);
+        String state = COMPLETED;
+        for (Task task : tasks) if (threadId.equals(task.threadId)) { state = task.state; break; }
+        update(context, threadId, cleanTitle(title, threadId), state);
+    }
+
+    static synchronized void delete(Context context, String threadId) {
+        if (threadId == null || threadId.isEmpty()) return;
+        List<Task> tasks = read(context);
+        tasks.removeIf(task -> threadId.equals(task.threadId));
+        write(context, tasks);
+    }
+
     static synchronized void markCompleted(Context context, String threadId, boolean failed) {
         if (threadId == null || threadId.isEmpty()) return;
         List<Task> tasks = read(context);

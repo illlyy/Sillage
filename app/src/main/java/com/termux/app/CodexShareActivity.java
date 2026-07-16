@@ -34,8 +34,8 @@ public final class CodexShareActivity extends Activity {
         try {
             JSONObject payload = stageShare(source);
             new AlertDialog.Builder(this)
-                .setTitle("??? Fcode")
-                .setItems(new String[]{"????? UI ??", "??? UI ???", "??? Termux"}, (dialog, which) -> {
+                .setTitle("分享到 Fcode")
+                .setItems(new String[]{"发送到当前 UI 会话", "在 UI 中新建会话", "发送到 Termux"}, (dialog, which) -> {
                     if (which == 0) launchUi(ACTION_SHARE_TO_CURRENT_UI, payload);
                     else if (which == 1) launchUi(ACTION_SHARE_TO_NEW_UI, payload);
                     else launchTermux(source, payload);
@@ -43,24 +43,24 @@ public final class CodexShareActivity extends Activity {
                 .setOnCancelListener(dialog -> finish())
                 .show();
         } catch (Exception error) {
-            Toast.makeText(this, "?????????" + error.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "处理分享内容失败：" + error.getMessage(), Toast.LENGTH_LONG).show();
             finish();
         }
     }
 
     private JSONObject stageShare(Intent source) throws Exception {
         File root = new File(TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH, "codex-shares/" + UUID.randomUUID());
-        if (!root.mkdirs()) throw new IllegalStateException("??????????");
+        if (!root.mkdirs()) throw new IllegalStateException("无法创建分享缓存目录");
         JSONArray files = new JSONArray();
         for (Uri uri : sharedUris(source)) {
             if (uri == null) continue;
             String name = safeName(displayName(uri));
             File destination = new File(root, files.length() + "-" + name).getCanonicalFile();
             String prefix = root.getCanonicalPath() + File.separator;
-            if (!destination.getPath().startsWith(prefix)) throw new IllegalArgumentException("?????");
+            if (!destination.getPath().startsWith(prefix)) throw new IllegalArgumentException("非法的文件路径");
             try (InputStream input = getContentResolver().openInputStream(uri);
                  FileOutputStream output = new FileOutputStream(destination)) {
-                if (input == null) throw new IllegalStateException("????????");
+                if (input == null) throw new IllegalStateException("无法读取分享文件");
                 byte[] buffer = new byte[32 * 1024];
                 int count;
                 while ((count = input.read(buffer)) >= 0) if (count > 0) output.write(buffer, 0, count);
@@ -86,7 +86,7 @@ public final class CodexShareActivity extends Activity {
             JSONArray files = payload.optJSONArray("files");
             if (files != null && files.length() > 1) {
                 File downloads = new File(TermuxConstants.TERMUX_HOME_DIR_PATH, "downloads");
-                if (!downloads.isDirectory() && !downloads.mkdirs()) throw new IllegalStateException("???? ~/downloads");
+                if (!downloads.isDirectory() && !downloads.mkdirs()) throw new IllegalStateException("无法创建 ~/downloads");
                 for (int i = 0; i < files.length(); i++) {
                     JSONObject item = files.getJSONObject(i);
                     File inputFile = new File(item.getString("path"));
@@ -98,7 +98,7 @@ public final class CodexShareActivity extends Activity {
                         while ((count = input.read(buffer)) >= 0) if (count > 0) output.write(buffer, 0, count);
                     }
                 }
-                Toast.makeText(this, "??? " + files.length() + " ???? ~/downloads", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "已将 " + files.length() + " 个文件复制到 ~/downloads", Toast.LENGTH_SHORT).show();
                 startActivity(new Intent(this, CodexHomeActivity.class).setAction(CodexHomeActivity.ACTION_OPEN_TERMUX)
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP));
             } else {
@@ -108,7 +108,7 @@ public final class CodexShareActivity extends Activity {
                 startActivity(intent);
             }
         } catch (Exception error) {
-            Toast.makeText(this, "????? Termux?" + error.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "无法分享到 Termux：" + error.getMessage(), Toast.LENGTH_LONG).show();
         }
         finish();
     }

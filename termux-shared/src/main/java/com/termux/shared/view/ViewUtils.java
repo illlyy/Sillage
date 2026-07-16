@@ -183,13 +183,14 @@ public class ViewUtils {
     public static Point getDisplaySize( @NonNull Context context, boolean activitySize) {
         // android.view.WindowManager.getDefaultDisplay() and Display.getSize() are deprecated in
         // API 30 and give wrong values in API 30 for activitySize=false in multi-window
-        androidx.window.WindowManager windowManager = new androidx.window.WindowManager(context);
-        androidx.window.WindowMetrics windowMetrics;
+        androidx.window.layout.WindowMetricsCalculator calculator =
+            androidx.window.layout.WindowMetricsCalculator.getOrCreate();
+        androidx.window.layout.WindowMetrics metrics;
         if (activitySize)
-            windowMetrics = windowManager.getCurrentWindowMetrics();
+            metrics = calculator.computeCurrentWindowMetrics((Activity) context);
         else
-            windowMetrics = windowManager.getMaximumWindowMetrics();
-        return new Point(windowMetrics.getBounds().width(), windowMetrics.getBounds().height());
+            metrics = calculator.computeMaximumWindowMetrics((Activity) context);
+        return new Point(metrics.getBounds().width(), metrics.getBounds().height());
     }
 
     /** Convert {@link Rect} to {@link String}. */

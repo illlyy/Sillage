@@ -37,3 +37,12 @@ This private monorepo combines source and generated assets from multiple upstrea
 ## Official skills snapshot
 
 `app/src/main/assets/official-skills.json` and `app/src/main/assets/official-skills.zip` are a pinned runtime snapshot used by the Android application. Their source revision and redistribution terms must be recorded and reviewed before public publication.
+## RikkaHub native UI
+
+- Upstream: https://github.com/rikkahub/rikkahub
+- Snapshot revision: `de4f157910c8e2ff22aabc3ae9c03a29c96edc53`.
+- Snapshot scope and update notes: `vendor/rikkahub-native/UPSTREAM.md`.
+- License: segmented dual-license text retained at `vendor/rikkahub-native/LICENSE`.
+- The snapshot excludes RikkaHub web-ui and backend/database/service implementations.
+
+Fcode ports may modify the native UI for the Codex/Termux backend. Confirm upstream commercial/public-distribution rights before publication.

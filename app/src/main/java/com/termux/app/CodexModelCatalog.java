@@ -118,14 +118,14 @@ final class CodexModelCatalog {
     }
 
     private static String effortDescription(String effort) {
-        if ("none".equals(effort)) return "????";
-        if ("minimal".equals(effort)) return "????";
-        if ("low".equals(effort)) return "?";
-        if ("medium".equals(effort)) return "?";
-        if ("high".equals(effort)) return "?";
-        if ("xhigh".equals(effort)) return "??";
-        if ("max".equals(effort)) return "??????";
-        if ("ultra".equals(effort)) return "???????????";
+        if ("none".equals(effort)) return "不思考";
+        if ("minimal".equals(effort)) return "最少思考";
+        if ("low".equals(effort)) return "低";
+        if ("medium".equals(effort)) return "中";
+        if ("high".equals(effort)) return "高";
+        if ("xhigh".equals(effort)) return "超高";
+        if ("max".equals(effort)) return "最高思考强度";
+        if ("ultra".equals(effort)) return "Ultra 多代理模式";
         return effort;
     }
 }

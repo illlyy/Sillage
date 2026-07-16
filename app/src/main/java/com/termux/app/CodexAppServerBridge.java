@@ -23,26 +23,44 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Direct JSONL bridge to `codex app-server --stdio`; no Node.js or external Termux required. */
 final class CodexAppServerBridge {
+    interface EventListener {
+        void onEvent(String function, String value);
+    }
+
     private static final String TAG = "IlyopCodexBridge";
     private final Activity activity;
     private final WebView webView;
+    private final EventListener eventListener;
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final Map<String, Long> turnStartedAtMs = new ConcurrentHashMap<>();
     private final Set<String> pendingFinalTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> syntheticCompletedTurns = ConcurrentHashMap.newKeySet();
+    private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
     /** Threads explicitly opened by the desktop UI; subagent threads never enter this set. */
     private final Set<String> primaryThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingPrimaryThreadTitles = new ConcurrentHashMap<>();
     private Process process;
     private BufferedWriter writer;
     private volatile String threadId;
+    private volatile String activeTurnId;
     private volatile int initializeRequestId = -1;
+    private volatile int editRollbackRequestId = -1;
+    private volatile String pendingEditedText;
+    private volatile String pendingEditedModel;
+    private volatile String pendingEditedEffort;
     private LocalApiProxy apiProxy;
     private CodexDesktopBridge desktopBridge;
 
     CodexAppServerBridge(Activity activity, WebView webView) {
         this.activity = activity;
         this.webView = webView;
+        this.eventListener = null;
+    }
+
+    CodexAppServerBridge(Activity activity, EventListener eventListener) {
+        this.activity = activity;
+        this.webView = null;
+        this.eventListener = eventListener;
     }
 
     void setDesktopBridge(CodexDesktopBridge bridge) { this.desktopBridge = bridge; }
@@ -203,7 +221,19 @@ final class CodexAppServerBridge {
     }
 
     @JavascriptInterface public void sendMessage(String text) {
-        if (text == null || text.trim().isEmpty()) return;
+        sendMessage(text, null, null);
+    }
+
+    void sendMessage(String text, String model, String effort) {
+        sendMessage(text, model, effort, "[]");
+    }
+
+    void sendMessage(String text, String model, String effort, String attachmentsJson) {
+        if (text == null) text = "";
+        JSONArray attachments;
+        try { attachments = new JSONArray(attachmentsJson == null ? "[]" : attachmentsJson); }
+        catch (Exception ignored) { attachments = new JSONArray(); }
+        if (text.trim().isEmpty() && attachments.length() == 0) return;
         if (threadId == null) {
             emit("onNativeError", "Codex app-server is not ready yet");
             return;
@@ -212,17 +242,70 @@ final class CodexAppServerBridge {
             JSONObject params = new JSONObject();
             params.put("threadId", threadId);
             JSONArray input = new JSONArray();
-            input.put(new JSONObject().put("type", "text").put("text", text));
+            if (!text.trim().isEmpty()) input.put(new JSONObject().put("type", "text").put("text", text));
+            for (int i = 0; i < attachments.length(); i++) {
+                JSONObject attachment = attachments.optJSONObject(i);
+                if (attachment == null) continue;
+                String path = attachment.optString("path", "");
+                if (path.isEmpty()) continue;
+                if (attachment.optBoolean("image", false)) {
+                    input.put(new JSONObject().put("type", "localImage").put("path", path));
+                } else {
+                    input.put(new JSONObject().put("type", "text").put("text",
+                        "Attached local file: " + path + " (" + attachment.optString("name", "file") + ")"));
+                }
+            }
             params.put("input", input);
+            if (model != null && !model.trim().isEmpty()) params.put("model", model);
+            if (effort != null && !effort.trim().isEmpty()) params.put("effort", effort);
             sendRequest("turn/start", params);
         } catch (Exception e) {
             emit("onNativeError", e.getMessage());
         }
     }
 
+    void editTurn(String text, String model, String effort, int rollbackTurns) {
+        if (threadId == null || text == null || text.trim().isEmpty()) return;
+        try {
+            pendingEditedText = text;
+            pendingEditedModel = model;
+            pendingEditedEffort = effort;
+            editRollbackRequestId = sendRequest("thread/rollback", new JSONObject()
+                .put("threadId", threadId)
+                .put("numTurns", Math.max(1, rollbackTurns)));
+        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
     @JavascriptInterface public void newConversation() {
         threadId = null;
         try { sendThreadStart(); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
+    void resumeConversation(String resumeThreadId) {
+        if (resumeThreadId == null || resumeThreadId.trim().isEmpty()) return;
+        threadId = null;
+        activeTurnId = null;
+        new Thread(() -> {
+            try {
+                File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
+                File sessionFile = findSessionFile(sessionsRoot, resumeThreadId);
+                emit("onHistory", sessionFile == null ? "[]" : readConversationHistory(sessionFile).toString());
+                sendRequest("thread/resume", new JSONObject().put("threadId", resumeThreadId));
+            } catch (Exception e) {
+                emit("onNativeError", e.getMessage());
+            }
+        }, "CodexConversationResume").start();
+    }
+
+    @JavascriptInterface public void interruptCurrentTurn() {
+        String thread = threadId;
+        String turn = activeTurnId;
+        if (thread == null || turn == null) return;
+        try {
+            sendRequest("turn/interrupt", new JSONObject().put("threadId", thread).put("turnId", turn));
+        } catch (Exception e) {
+            emit("onNativeError", e.getMessage());
+        }
     }
 
     private void sendInitialize() throws Exception {
@@ -250,7 +333,9 @@ final class CodexAppServerBridge {
 
     private int sendRequest(String method, JSONObject params) throws Exception {
         int id = nextId.getAndIncrement();
-        sendJson(new JSONObject().put("method", method).put("id", id).put("params", params));
+        JSONObject request = new JSONObject().put("method", method).put("id", id).put("params", params);
+        rememberPrimaryRequest(request);
+        sendJson(request);
         return id;
     }
 
@@ -344,11 +429,26 @@ final class CodexAppServerBridge {
             initializeRequestId = -1;
             sendJson(new JSONObject().put("method", "initialized"));
             if (desktopBridge != null) desktopBridge.onAppServerInitialized();
+            else sendThreadStart();
             return;
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
         if (message.has("error")) {
+            if (message.optInt("id", -1) == editRollbackRequestId) {
+                editRollbackRequestId = -1;
+                pendingEditedText = pendingEditedModel = pendingEditedEffort = null;
+            }
             emit("onNativeError", message.getJSONObject("error").optString("message", message.toString()));
+            return;
+        }
+        if (message.has("id") && message.optInt("id", -1) == editRollbackRequestId) {
+            editRollbackRequestId = -1;
+            String text = pendingEditedText;
+            String model = pendingEditedModel;
+            String effort = pendingEditedEffort;
+            pendingEditedText = pendingEditedModel = pendingEditedEffort = null;
+            if (message.has("error")) emit("onNativeError", message.optJSONObject("error").optString("message", "Unable to edit message"));
+            else sendMessage(text, model, effort, "[]");
             return;
         }
         if (message.has("id") && message.has("result")) {
@@ -359,7 +459,7 @@ final class CodexAppServerBridge {
                 primaryThreadIds.add(threadId);
                 Integer responseId = message.has("id") ? message.optInt("id", -1) : -1;
                 String pendingTitle = pendingPrimaryThreadTitles.remove(responseId);
-                if (pendingTitle != null) CodexTaskStore.markRunning(activity, threadId, pendingTitle);
+                if (pendingTitle != null && desktopBridge != null) CodexTaskStore.markRunning(activity, threadId, pendingTitle);
                 emit("onReady", threadId);
             }
             return;
@@ -368,9 +468,31 @@ final class CodexAppServerBridge {
         JSONObject params = message.optJSONObject("params");
         logCollabAgentEvent(method, params);
         if ("item/agentMessage/delta".equals(method) && params != null) {
+            String itemId = params.optString("itemId", "");
+            if (!itemId.isEmpty()) streamedAgentItemIds.add(itemId);
             emit("onDelta", params.optString("delta", ""));
+        } else if ("item/completed".equals(method) && isReasoningItem(params)) {
+            JSONObject item = params.optJSONObject("item");
+            String text = extractReasoningText(item);
+            if (!text.isEmpty()) emit("onReasoningComplete", text);
+        } else if ("item/completed".equals(method) && isCommandItem(params)) {
+            JSONObject item = params.optJSONObject("item");
+            emit("onCommandComplete", item == null ? "{}" : item.toString());
+        } else if ("item/completed".equals(method) && isToolDetailItem(params)) {
+            JSONObject item = params.optJSONObject("item");
+            emit("onToolComplete", item == null ? "{}" : item.toString());
         } else if ("item/completed".equals(method) && isFinalAgentMessage(params)) {
+            JSONObject item = params == null ? null : params.optJSONObject("item");
+            String itemId = item == null ? "" : item.optString("id", "");
+            if (itemId.isEmpty() || !streamedAgentItemIds.remove(itemId)) {
+                String finalText = extractAgentMessageText(item);
+                if (!finalText.isEmpty()) emit("onDelta", finalText);
+            }
             scheduleMissingTurnCompletion(params);
+        } else if (("item/reasoning/summaryTextDelta".equals(method) || "item/reasoning/textDelta".equals(method)) && params != null) {
+            emit("onReasoningDelta", params.optString("delta", ""));
+        } else if ("item/commandExecution/outputDelta".equals(method) && params != null) {
+            emit("onCommandDelta", params.optString("delta", ""));
         } else if ("item/started".equals(method) && params != null) {
             JSONObject item = params.optJSONObject("item");
             if (item != null) emit("onItem", item.optString("type", "item"));
@@ -386,6 +508,55 @@ final class CodexAppServerBridge {
             JSONObject error = params.optJSONObject("error");
             emit("onNativeError", error == null ? params.toString() : error.optString("message", error.toString()));
         }
+    }
+
+    private static boolean isToolDetailItem(JSONObject params) {
+        JSONObject item = params == null ? null : params.optJSONObject("item");
+        if (item == null) return false;
+        String type = item.optString("type", "");
+        return "fileChange".equals(type) || "mcpToolCall".equals(type) || "webSearch".equals(type)
+            || "collabAgentToolCall".equals(type);
+    }
+
+    private static boolean isReasoningItem(JSONObject params) {
+        JSONObject item = params == null ? null : params.optJSONObject("item");
+        return item != null && "reasoning".equals(item.optString("type"));
+    }
+
+    private static boolean isCommandItem(JSONObject params) {
+        JSONObject item = params == null ? null : params.optJSONObject("item");
+        return item != null && "commandExecution".equals(item.optString("type"));
+    }
+
+    private static String extractReasoningText(JSONObject item) {
+        if (item == null) return "";
+        String text = item.optString("text", "");
+        if (!text.isEmpty()) return text;
+        JSONArray summary = item.optJSONArray("summary");
+        if (summary == null) return "";
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < summary.length(); i++) {
+            Object part = summary.opt(i);
+            if (part instanceof String) out.append(part);
+            else if (part instanceof JSONObject) out.append(((JSONObject) part).optString("text", ""));
+        }
+        return out.toString();
+    }
+
+    private static String extractAgentMessageText(JSONObject item) {
+        if (item == null) return "";
+        String text = item.optString("text", "");
+        if (!text.isEmpty()) return text;
+        JSONArray content = item.optJSONArray("content");
+        if (content == null) return "";
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < content.length(); i++) {
+            JSONObject part = content.optJSONObject(i);
+            if (part == null) continue;
+            String value = part.optString("text", "");
+            if (!value.isEmpty()) out.append(value);
+        }
+        return out.toString();
     }
 
     private static void logCollabAgentEvent(String method, JSONObject params) {
@@ -426,6 +597,7 @@ final class CodexAppServerBridge {
         if (thread.isEmpty()) return;
         long startedAtSeconds = turn.optLong("startedAt", 0L);
         String turnId = turn.optString("id");
+        if (thread.equals(threadId)) activeTurnId = turnId;
         turnStartedAtMs.put(turnKey(thread, turnId),
             startedAtSeconds > 0 ? startedAtSeconds * 1000L : System.currentTimeMillis());
         scheduleTurnRuntimeDiagnostics(thread, turnId);
@@ -435,7 +607,7 @@ final class CodexAppServerBridge {
     private void scheduleTurnStallDiagnostics(String thread, String turn) {
         final String key = turnKey(thread, turn);
         for (long thresholdMs : new long[]{60_000L, 180_000L}) {
-            webView.postDelayed(() -> {
+            activity.getWindow().getDecorView().postDelayed(() -> {
                 Long started = turnStartedAtMs.get(key);
                 if (started == null) return;
                 long elapsed = Math.max(0L, System.currentTimeMillis() - started);
@@ -480,6 +652,189 @@ final class CodexAppServerBridge {
             }
         }
         return null;
+    }
+
+    static String resolveConversationProject(String threadId) {
+        try {
+            File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
+            File sessionFile = findSessionFile(sessionsRoot, threadId);
+            if (sessionFile == null) return "";
+            String fallback = "";
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(sessionFile), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    JSONObject record;
+                    try { record = new JSONObject(line); } catch (Exception ignored) { continue; }
+                    JSONObject payload = record.optJSONObject("payload");
+                    if (payload == null) continue;
+                    if ("turn_context".equals(record.optString("type"))) {
+                        JSONArray roots = payload.optJSONArray("workspace_roots");
+                        if (roots != null && roots.length() > 0) {
+                            String root = roots.optString(0, "").trim();
+                            if (!root.isEmpty()) return root;
+                        }
+                        String cwd = payload.optString("cwd", "").trim();
+                        if (!cwd.isEmpty()) fallback = cwd;
+                    } else if ("session_meta".equals(record.optString("type")) && fallback.isEmpty()) {
+                        fallback = payload.optString("cwd", "").trim();
+                    }
+                }
+            }
+            return fallback;
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to resolve conversation project " + shortId(threadId), error);
+            return "";
+        }
+    }
+
+    static String resolveConversationTitle(String threadId) {
+        try {
+            File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
+            File sessionFile = findSessionFile(sessionsRoot, threadId);
+            if (sessionFile == null) return "";
+            JSONArray history = readConversationHistory(sessionFile);
+            for (int i = 0; i < history.length(); i++) {
+                JSONObject message = history.optJSONObject(i);
+                if (message == null || !"user".equals(message.optString("role"))) continue;
+                String title = message.optString("content", "").replaceAll("\s+", " ").trim();
+                if (!title.isEmpty()) return title.length() > 52 ? title.substring(0, 51) + "…" : title;
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to resolve conversation title " + shortId(threadId), error);
+        }
+        return "";
+    }
+
+    static JSONArray readConversationHistory(File sessionFile) throws Exception {
+        JSONArray messages = new JSONArray();
+        StringBuilder reasoning = new StringBuilder();
+        StringBuilder command = new StringBuilder();
+        JSONArray tools = new JSONArray();
+        java.util.Map<String, JSONObject> calls = new java.util.HashMap<>();
+        int lastProcessIndex = -1;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(sessionFile), java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                JSONObject record;
+                try { record = new JSONObject(line); } catch (Exception ignored) { continue; }
+                JSONObject payload = record.optJSONObject("payload");
+                if (payload == null) continue;
+                if ("event_msg".equals(record.optString("type")) && "task_complete".equals(payload.optString("type"))) {
+                    long durationMs = payload.optLong("duration_ms", 0L);
+                    if (lastProcessIndex >= 0 && durationMs > 0) {
+                        JSONObject processMessage = messages.optJSONObject(lastProcessIndex);
+                        String contentValue = processMessage == null ? "" : processMessage.optString("content", "");
+                        if (contentValue.startsWith("PROCESS2|")) try {
+                            String json = new String(android.util.Base64.decode(contentValue.substring(9), android.util.Base64.DEFAULT), java.nio.charset.StandardCharsets.UTF_8);
+                            JSONObject process = new JSONObject(json).put("duration", Math.max(1L, durationMs / 1000L));
+                            String encoded = android.util.Base64.encodeToString(process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+                            processMessage.put("content", "PROCESS2|" + encoded);
+                            messages.put(lastProcessIndex, processMessage);
+                        } catch (Exception ignored) {}
+                    }
+                    continue;
+                }
+                if (!"response_item".equals(record.optString("type"))) continue;
+                String payloadType = payload.optString("type", "");
+                if ("reasoning".equals(payloadType)) {
+                    JSONArray summary = payload.optJSONArray("summary");
+                    if (summary != null) for (int i = 0; i < summary.length(); i++) {
+                        JSONObject part = summary.optJSONObject(i);
+                        String value = part == null ? summary.optString(i, "") : part.optString("text", "");
+                        if (!value.isEmpty()) reasoning.append(value).append('\n');
+                    }
+                    continue;
+                }
+                if ("function_call".equals(payloadType)) {
+                    String callId = payload.optString("call_id", payload.optString("id", ""));
+                    String name = payload.optString("name", "tool");
+                    String arguments = payload.optString("arguments", "");
+                    JSONObject args;
+                    try { args = new JSONObject(arguments); }
+                    catch (Exception ignored) { args = new JSONObject().put("raw", arguments); }
+                    calls.put(callId, new JSONObject().put("name", name).put("arguments", args));
+                    continue;
+                }
+                if ("function_call_output".equals(payloadType)) {
+                    String callId = payload.optString("call_id", "");
+                    JSONObject call = calls.remove(callId);
+                    String output = payload.optString("output", "");
+                    if (call != null) tools.put(historyToolCard(call, output));
+                    else if (!output.isEmpty()) command.append(output.trim()).append('\n');
+                    continue;
+                }
+                if (!"message".equals(payloadType)) continue;
+                String role = payload.optString("role", "");
+                if (!"user".equals(role) && !"assistant".equals(role)) continue;
+                JSONArray content = payload.optJSONArray("content");
+                if (content == null) continue;
+                StringBuilder text = new StringBuilder();
+                for (int i = 0; i < content.length(); i++) {
+                    JSONObject part = content.optJSONObject(i);
+                    if (part == null) continue;
+                    String type = part.optString("type", "");
+                    if (!"input_text".equals(type) && !"output_text".equals(type)) continue;
+                    text.append(part.optString("text", ""));
+                }
+                String value = text.toString().trim();
+                if ("user".equals(role) && isInjectedContextMessage(value)) continue;
+                if ("assistant".equals(role) && (reasoning.length() > 0 || command.length() > 0 || tools.length() > 0)) {
+                    JSONObject process = new JSONObject().put("duration", 0).put("reasoning", reasoning.toString().trim())
+                        .put("command", command.toString().trim()).put("tools", tools);
+                    String encoded = android.util.Base64.encodeToString(process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+                    messages.put(new JSONObject().put("role", "activity").put("content", "PROCESS2|" + encoded));
+                    lastProcessIndex = messages.length() - 1;
+                    reasoning.setLength(0); command.setLength(0); tools = new JSONArray();
+                }
+                if (!value.isEmpty()) messages.put(new JSONObject().put("role", role).put("content", value));
+            }
+        }
+        return messages;
+    }
+
+
+    private static JSONObject historyToolCard(JSONObject call, String output) throws Exception {
+        String name = call.optString("name", "tool");
+        JSONObject args = call.optJSONObject("arguments");
+        if (args == null) args = new JSONObject();
+        String lower = name.toLowerCase(java.util.Locale.ROOT);
+        if (lower.contains("shell") || lower.contains("command") || lower.equals("exec") || lower.equals("terminal")) {
+            Object commandValue = args.opt("command");
+            String commandText = commandValue instanceof JSONArray
+                ? ((JSONArray) commandValue).join(" ").replace("\"", "")
+                : args.optString("command", args.optString("cmd", args.optString("raw", name)));
+            JSONObject result = new JSONObject().put("type", "commandExecution").put("command", commandText)
+                .put("aggregatedOutput", output).put("status", "completed");
+            if (args.has("cwd")) result.put("cwd", args.optString("cwd", ""));
+            return result;
+        }
+        if (lower.contains("patch") || lower.contains("file_change") || lower.contains("write_file")) {
+            return new JSONObject().put("type", "fileChange").put("changes", output.isEmpty() ? args.toString(2) : output)
+                .put("status", "completed");
+        }
+        if (lower.contains("web_search") || lower.equals("search")) {
+            return new JSONObject().put("type", "webSearch").put("query", args.optString("query", args.toString()))
+                .put("output", output).put("status", "completed");
+        }
+        if (lower.contains("collab") || lower.contains("agent")) {
+            return new JSONObject().put("type", "collabAgentToolCall").put("name", name)
+                .put("detail", output.isEmpty() ? args.toString(2) : output).put("status", "completed");
+        }
+        return new JSONObject().put("type", "mcpToolCall").put("tool", name)
+            .put("arguments", args).put("output", output).put("status", "completed");
+    }
+
+    private static boolean isInjectedContextMessage(String value) {
+        if (value == null) return true;
+        String text = value.trim();
+        return text.startsWith("<environment_context>")
+            || text.startsWith("<permissions instructions>")
+            || text.startsWith("<app-context>")
+            || text.startsWith("<collaboration_mode>")
+            || text.startsWith("<skills_instructions>")
+            || text.startsWith("<plugins_instructions>")
+            || (text.startsWith("<cwd>") && text.contains("<filesystem>"));
     }
 
     static String readTurnRuntimeDiagnostic(File sessionFile, String turnId) throws Exception {
@@ -541,8 +896,7 @@ final class CodexAppServerBridge {
     private boolean isFinalAgentMessage(JSONObject params) {
         if (params == null) return false;
         JSONObject item = params.optJSONObject("item");
-        return item != null && "agentMessage".equals(item.optString("type"))
-            && "final_answer".equals(item.optString("phase"));
+        return item != null && "agentMessage".equals(item.optString("type"));
     }
 
     private void scheduleMissingTurnCompletion(JSONObject params) {
@@ -632,7 +986,7 @@ final class CodexAppServerBridge {
         String title = extractTaskTitle(params);
         if ("turn/start".equals(method) && !requestedThread.isEmpty()) {
             CodexTaskStore.markRunning(activity, requestedThread, title);
-        } else if ("thread/start".equals(method)) {
+        } else if ("thread/start".equals(method) && desktopBridge != null) {
             int requestId = request.optInt("id", -1);
             if (requestId >= 0) pendingPrimaryThreadTitles.put(requestId, title);
         }
@@ -651,7 +1005,7 @@ final class CodexAppServerBridge {
             }
         }
         String prompt = params.optString("prompt", params.optString("message", ""));
-        return prompt.isEmpty() ? "Codex ??" : prompt;
+        return prompt.isEmpty() ? "Codex 任务" : prompt;
     }
 
     private boolean isPrimaryTurn(JSONObject params) {
@@ -671,22 +1025,30 @@ final class CodexAppServerBridge {
     private void notifyTaskCompleted() {
         if (activity instanceof CodexHomeActivity) {
             activity.runOnUiThread(((CodexHomeActivity) activity)::onCodexTaskCompleted);
+        } else {
+            activity.runOnUiThread(() -> CodexOverlayService.notifyTaskCompleted(activity));
         }
     }
 
     private void emit(String function, String value) {
         android.util.Log.d(TAG, "EMIT function=" + function + " length=" + (value == null ? 0 : value.length()));
-        final String quoted = JSONObject.quote(value == null ? "" : value);
-        activity.runOnUiThread(() -> webView.evaluateJavascript(
-            "window.codex && window.codex." + function + "(" + quoted + ")", null));
+        final String safeValue = value == null ? "" : value;
+        final String quoted = JSONObject.quote(safeValue);
+        activity.runOnUiThread(() -> {
+            if (eventListener != null) eventListener.onEvent(function, safeValue);
+            if (webView != null) webView.evaluateJavascript(
+                "window.codex && window.codex." + function + "(" + quoted + ")", null);
+        });
     }
 
     synchronized void stop() {
         threadId = null;
+        activeTurnId = null;
         initializeRequestId = -1;
         turnStartedAtMs.clear();
         pendingFinalTurns.clear();
         syntheticCompletedTurns.clear();
+        streamedAgentItemIds.clear();
         try { if (writer != null) writer.close(); } catch (Exception ignored) {}
         writer = null;
         if (process != null) process.destroy();

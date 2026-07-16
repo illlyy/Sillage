@@ -465,6 +465,7 @@ public final class CodexHomeActivity extends Activity {
         sectionParams.topMargin = dp(34);
         sectionParams.bottomMargin = dp(10);
         body.addView(section, sectionParams);
+        body.addView(actionCard("原生聊天", "独立的 Compose 对话界面", "CHAT", this::startNativeChat), cardParams(0));
         body.addView(actionCard("启动 WebUI", "继续上次的页面与会话", "WEB", this::startWebUi), cardParams(0));
         body.addView(actionCard("启动 Termux", "打开应用内调试终端", "CLI", this::openInternalTerminal), cardParams(10));
         body.addView(actionCard("配置管理", "API、模型与 Codex 运行环境", "CFG", this::showConfiguration), cardParams(10));
@@ -4438,6 +4439,23 @@ public final class CodexHomeActivity extends Activity {
         this.webView.setVisibility(8);
     }
 
+    private void startNativeChat() {
+        closeDrawer();
+        CodexProviderStore.Profile active = providerStore == null ? null : providerStore.active();
+        if (active == null || active.baseUrl == null || active.baseUrl.trim().isEmpty()
+                || active.apiKey == null || active.apiKey.trim().isEmpty()) {
+            showConfiguration();
+            Toast.makeText(this, "请先创建并启用 API 配置", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!isCodexInstalled()) {
+            Toast.makeText(this, "请先安装 Codex CLI", Toast.LENGTH_SHORT).show();
+            showOnboardingFromMain();
+            return;
+        }
+        startActivity(new Intent(this, CodexChatActivity.class));
+    }
+
     public void startWebUi() {
         closeDrawer();
         final CodexProviderStore.Profile active = providerStore.active();
@@ -4461,7 +4479,7 @@ public final class CodexHomeActivity extends Activity {
                 activeUltraSubagentLimit(), activeNormalSubagentLimit(), activeUltraTransportEfforts(),
                 activePreventRecursiveSubagents());
         } else if (webUiReloadPending) {
-            status.setText("????????");
+            status.setText("正在重新加载 WebUI…");
         }
     }
 

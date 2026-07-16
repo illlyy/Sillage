@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="com.termux"
     android:installLocation="internalOnly">
 
     <uses-feature
@@ -60,6 +59,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".app.CodexChatActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|uiMode|keyboard|keyboardHidden|navigation"
+            android:exported="false"
+            android:label="Fcode Chat"
+            android:windowSoftInputMode="adjustNothing"
+            android:theme="@style/Theme.CodexMobile" />
 
         <activity
             android:name=".app.MihomoDashboardActivity"
@@ -231,3 +238,4 @@
     </application>
 
 </manifest>
+
