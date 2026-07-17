@@ -33,7 +33,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -281,7 +280,7 @@ internal fun NativeChatScreen(
     val density = androidx.compose.ui.platform.LocalDensity.current
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
+    val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
     var showFilesSheet by remember { mutableStateOf(false) }
@@ -1591,7 +1590,7 @@ private fun RikkaChatInput(
     val sidePadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputSidePadding")
     val bottomPadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomPadding")
     val inputShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = bottomCorner, bottomStart = bottomCorner)
-    val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
+    val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     Surface(modifier = modifier, color = Color.Transparent) {
         Column(
             modifier = insetModifier.padding(start = sidePadding, end = sidePadding, top = 8.dp, bottom = bottomPadding),
