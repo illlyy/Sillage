@@ -36,6 +36,9 @@ final class CodexAppServerBridge {
     private final Set<String> pendingFinalTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> syntheticCompletedTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
+    private long lastAgentDeltaAt;
+    private int agentDeltaCount;
+    private int agentDeltaChars;
     static final long MISSING_TURN_COMPLETION_CHECK_MS = 1200L;
     static final long MISSING_TURN_COMPLETION_WARNING_MS = 60_000L;
     static final int MISSING_TURN_COMPLETION_IDLE_CHECKS = 2;
@@ -602,7 +605,15 @@ final class CodexAppServerBridge {
         if ("item/agentMessage/delta".equals(method) && params != null) {
             String itemId = params.optString("itemId", "");
             if (!itemId.isEmpty()) streamedAgentItemIds.add(itemId);
-            emit("onDelta", params.optString("delta", ""));
+            String delta = params.optString("delta", "");
+            long now = android.os.SystemClock.uptimeMillis();
+            long gap = lastAgentDeltaAt == 0L ? 0L : now - lastAgentDeltaAt;
+            lastAgentDeltaAt = now;
+            agentDeltaCount++;
+            agentDeltaChars += delta.length();
+            Log.d(TAG, "agent-delta item=" + itemId + " chars=" + delta.length() + " gapMs=" + gap
+                + " totalChunks=" + agentDeltaCount + " totalChars=" + agentDeltaChars);
+            emit("onDelta", delta);
         } else if ("item/completed".equals(method) && isReasoningItem(params)) {
             JSONObject item = params.optJSONObject("item");
             String text = extractReasoningText(item);
@@ -615,6 +626,10 @@ final class CodexAppServerBridge {
             emit("onToolComplete", item == null ? "{}" : item.toString());
         } else if ("item/completed".equals(method) && isFinalAgentMessage(params)) {
             JSONObject item = params == null ? null : params.optJSONObject("item");
+            Log.i(TAG, "agent-stream-complete chunks=" + agentDeltaCount + " chars=" + agentDeltaChars);
+            lastAgentDeltaAt = 0L;
+            agentDeltaCount = 0;
+            agentDeltaChars = 0;
             String itemId = item == null ? "" : item.optString("id", "");
             if (itemId.isEmpty() || !streamedAgentItemIds.remove(itemId)) {
                 String finalText = extractAgentMessageText(item);

@@ -297,6 +297,7 @@ internal fun NativeChatScreen(
     val listState = rememberLazyListState()
     val listDragged by listState.interactionSource.collectIsDraggedAsState()
     var followOutput by remember { mutableStateOf(true) }
+    var followPausedUntil by remember { mutableLongStateOf(0L) }
     var historyLimit by remember { mutableIntStateOf(40) }
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
@@ -344,15 +345,6 @@ internal fun NativeChatScreen(
         }
     }
 
-    LaunchedEffect(state.messages.size) {
-        if (followOutput && state.messages.isNotEmpty()) {
-            val visibleCount = minOf(historyLimit, state.messages.size)
-            val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-            delay(16L)
-            listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
-        }
-    }
-
     LaunchedEffect(inputHeightPx, imeBottomPx) {
         if (followOutput && !listDragged && state.messages.isNotEmpty()) {
             val visibleCount = minOf(historyLimit, state.messages.size)
@@ -372,6 +364,7 @@ internal fun NativeChatScreen(
             // Do not keep a frame callback alive for an idle conversation. Poll slowly
             // until generation/layout growth needs the smooth 60/120 Hz follow motor.
             if (!followOutput || listDragged || state.messages.isEmpty() ||
+                android.os.SystemClock.uptimeMillis() < followPausedUntil ||
                 (!state.busy && !listState.canScrollForward)
             ) {
                 delay(72L)
@@ -386,9 +379,11 @@ internal fun NativeChatScreen(
             val last = layout.visibleItemsInfo.lastOrNull() ?: continue
             // Composer clearance is represented by afterContentPadding, so it must be part
             // of the distance or following stops while the last line is still hidden.
-            val overflow = (last.offset + last.size + layout.afterContentPadding - layout.viewportEndOffset)
+            val measuredOverflow = (last.offset + last.size + layout.afterContentPadding - layout.viewportEndOffset)
                 .coerceAtLeast(0)
                 .toFloat()
+            val unseenRunway = if (last.index < layout.totalItemsCount - 1) with(density) { 72.dp.toPx() } else 0f
+            val overflow = maxOf(measuredOverflow, unseenRunway)
             if (!listState.canScrollForward || overflow < 0.5f) continue
 
             val baseVelocity = with(density) { 520.dp.toPx() }
@@ -500,10 +495,13 @@ internal fun NativeChatScreen(
                                         val block = quoted.lineSequence().joinToString("\n") { "> $it" }
                                         onInputChange(listOf(state.input.trimEnd(), block, "").filter { it.isNotEmpty() }.joinToString("\n\n"))
                                     },
+                                    onReasoningAutoCollapse = {
+                                        followPausedUntil = android.os.SystemClock.uptimeMillis() + 560L
+                                    },
                                 )
                             }
                             if (state.busy && liveAssistantId == null) {
-                                item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory) }
+                                item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory, {}) }
                             }
                         }
                         AnimatedVisibility(
@@ -1065,10 +1063,10 @@ private fun RikkaEmptyState(
 }
 
 @Composable
-private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatState, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit) {
+private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatState, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}) {
     when (message.role) {
         NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
-        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onLoadSubagentHistory, onQuote)
+        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onLoadSubagentHistory, onQuote, onReasoningAutoCollapse)
         NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
@@ -1142,7 +1140,7 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
         showRichText = false
 
         var warmupMs = 0L
-        while (latestStreaming.value && latestText.value.length < 24 && warmupMs < 180L) {
+        while (latestStreaming.value && latestText.value.length < 32 && warmupMs < 420L) {
             delay(30L)
             warmupMs += 30L
         }
@@ -1166,13 +1164,13 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 1_200 -> 36
-                    pending > 600 -> 30
-                    pending > 300 -> 24
-                    pending > 140 -> 18
-                    pending > 60 -> 13
-                    pending > 24 -> 9
-                    else -> 5
+                    pending > 1_200 -> 18
+                    pending > 600 -> 14
+                    pending > 300 -> 11
+                    pending > 140 -> 8
+                    pending > 60 -> 6
+                    pending > 24 -> 4
+                    else -> 3
                 }
                 val oldLength = displayedText.length
                 displayedText = target.take((oldLength + step).coerceAtMost(target.length))
@@ -1182,7 +1180,7 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
             val remaining = latestText.value.length - displayedText.length
             val quietFor = android.os.SystemClock.uptimeMillis() - quietSince
             if (!latestStreaming.value && remaining <= 0 && quietFor >= 360L) break
-            delay(if (remaining > 300) 38L else if (remaining > 80) 46L else 58L)
+            delay(if (remaining > 600) 34L else if (remaining > 180) 40L else 48L)
         }
 
         // Keep the stable Compose text until the final tail fade is complete. Switching
@@ -1243,7 +1241,7 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
 }
 
 @Composable
-private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit) {
+private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1253,7 +1251,7 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
                 if (liveState != null) {
-                    ProcessingPanel(liveState, elapsedSeconds, text.isNotBlank(), onLoadSubagentHistory)
+                    ProcessingPanel(liveState, elapsedSeconds, text.isNotBlank(), onLoadSubagentHistory, onReasoningAutoCollapse)
                     Spacer(Modifier.height(6.dp))
                 }
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1340,10 +1338,14 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
 }
 
 @Composable
-private fun SmoothReasoningText(text: String) {
+private fun SmoothReasoningText(text: String, animateUpdates: Boolean) {
     val latest = rememberUpdatedState(text)
-    var displayed by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) {
+    var displayed by remember(animateUpdates) { mutableStateOf(if (animateUpdates) "" else text) }
+    LaunchedEffect(animateUpdates) {
+        if (!animateUpdates) {
+            displayed = latest.value
+            return@LaunchedEffect
+        }
         while (true) {
             val target = latest.value
             if (!target.startsWith(displayed)) displayed = target
@@ -1359,11 +1361,12 @@ private fun SmoothReasoningText(text: String) {
 }
 
 @Composable
-private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit) {
+private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
         if (state.reasoningComplete && answerStarted) {
-            delay(180L)
+            delay(260L)
+            onAutomaticCollapse()
             expanded = false
         }
     }
@@ -1391,7 +1394,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
             Column {
-                if (state.reasoningText.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { SmoothReasoningText(state.reasoningText) }
+                if (state.reasoningText.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { SmoothReasoningText(state.reasoningText, animateUpdates = !state.reasoningComplete) }
                 if (state.commandText.isNotBlank()) Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) { SelectionContainer { Text(state.commandText, modifier = Modifier.padding(10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
                 if (state.liveSubagents.isNotEmpty()) {
                     FlowRow(
