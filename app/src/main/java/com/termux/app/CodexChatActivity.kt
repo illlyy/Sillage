@@ -106,15 +106,34 @@ internal class NativeChatState {
 
     fun appendAssistantFinal(text: String) {
         if (text.isBlank()) return
-        messages.add(
-            NativeChatMessage(
-                role = NativeChatRole.ASSISTANT,
-                content = text,
+        val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT }
+        if (existingIndex != null) {
+            val existing = messages[existingIndex]
+            // A few app-server/provider combinations deliver both deltas and the final
+            // item. Keep the stable message id and merge the authoritative final text;
+            // adding a second assistant item makes a whole paragraph flash on screen.
+            val merged = when {
+                text.startsWith(existing.content) -> text
+                existing.content.startsWith(text) -> existing.content
+                else -> text
+            }
+            messages[existingIndex] = existing.copy(
+                content = merged,
                 streaming = false,
-                revealStartedAt = System.currentTimeMillis(),
-                finalOnlyReveal = true,
-            ),
-        )
+                finalOnlyReveal = false,
+            )
+        } else {
+            messages.add(
+                NativeChatMessage(
+                    role = NativeChatRole.ASSISTANT,
+                    content = text,
+                    streaming = false,
+                    revealStartedAt = System.currentTimeMillis(),
+                    finalOnlyReveal = true,
+                ),
+            )
+        }
         revision++
     }
 
@@ -147,21 +166,6 @@ internal class NativeChatState {
             "webSearch" -> "正在搜索"
             else -> "处理中"
         }
-        revision++
-        return
-        val label = when (type) {
-            "reasoning" -> "正在思考"
-            "commandExecution" -> "正在运行命令"
-            "fileChange" -> "正在修改文件"
-            "mcpToolCall" -> "正在调用工具"
-            "webSearch" -> "正在搜索"
-            "collabAgentToolCall" -> "正在调度子代理"
-            else -> "正在处理 · $type"
-        }
-        if (messages.lastOrNull()?.role == NativeChatRole.ACTIVITY &&
-            messages.lastOrNull()?.content == label
-        ) return
-        messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = label))
         revision++
     }
 
