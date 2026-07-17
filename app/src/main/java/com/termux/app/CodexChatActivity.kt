@@ -106,6 +106,13 @@ internal class NativeChatState {
         revision++
     }
 
+    fun finishReasoning() {
+        if (reasoningComplete) return
+        reasoningComplete = true
+        reasoningCompletedAt = System.currentTimeMillis()
+        revision++
+    }
+
     fun appendAssistant(delta: String) {
         if (delta.isEmpty()) return
         val last = messages.lastOrNull()
@@ -231,6 +238,7 @@ internal class NativeChatState {
     }
 
     fun completeTurn() {
+        finishReasoning()
         val duration = ((System.currentTimeMillis() - turnStartedAt).coerceAtLeast(0L) / 1000L)
         run {
             val payload = JSONObject()
@@ -606,13 +614,28 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 pendingConversationAnimationKey?.let { key -> chatState.conversationAnimationKey = key }
                 pendingConversationAnimationKey = null
             }
-            "onDelta" -> chatState.appendAssistant(value)
-            "onFinalAnswer" -> chatState.appendAssistantFinal(value)
-            "onReasoningDelta" -> { chatState.reasoningText += value; chatState.revision++ }
+            "onDelta" -> {
+                chatState.finishReasoning()
+                chatState.appendAssistant(value)
+            }
+            "onFinalAnswer" -> {
+                chatState.finishReasoning()
+                chatState.appendAssistantFinal(value)
+            }
+            "onReasoningDelta" -> {
+                // A completed reasoning item is only a segment boundary. Models can emit
+                // more reasoning summaries after tool calls, so any new delta makes the
+                // reasoning phase live again until answer text actually starts.
+                chatState.reasoningComplete = false
+                chatState.reasoningCompletedAt = 0L
+                chatState.reasoningText += value
+                chatState.revision++
+            }
             "onReasoningComplete" -> {
+                // Reconcile the segment's authoritative snapshot, but do not show the
+                // global check mark yet. The reasoning phase ends on the first answer
+                // delta (or when the whole turn completes), not on each item/completed.
                 if (value.length > chatState.reasoningText.length) chatState.reasoningText = value
-                chatState.reasoningComplete = true
-                chatState.reasoningCompletedAt = System.currentTimeMillis()
                 chatState.revision++
             }
             "onCommandDelta" -> { chatState.commandText += value; chatState.revision++ }
