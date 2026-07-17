@@ -1021,17 +1021,17 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 400 -> 12
-                    pending > 160 -> 8
-                    pending > 64 -> 5
-                    pending > 20 -> 3
-                    else -> 1
+                    pending > 400 -> 14
+                    pending > 160 -> 9
+                    pending > 64 -> 6
+                    pending > 20 -> 4
+                    else -> 2
                 }
                 val nextLength = (displayedText.length + step).coerceAtMost(target.length)
                 revealedTailLength = nextLength - displayedText.length
                 displayedText = target.take(nextLength)
             }
-            delay(if (streaming) 24L else 18L)
+            delay(if (streaming) 48L else 36L)
         }
         displayedText = latestText.value
         delay(24L)
@@ -1041,7 +1041,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
     LaunchedEffect(displayedText) {
         if (displayedText.isNotEmpty() && !showRichText) {
             tailAlpha.snapTo(0.42f)
-            tailAlpha.animateTo(1f, tween(90, easing = LinearOutSlowInEasing))
+            tailAlpha.animateTo(1f, tween(150, easing = LinearOutSlowInEasing))
         }
     }
 
