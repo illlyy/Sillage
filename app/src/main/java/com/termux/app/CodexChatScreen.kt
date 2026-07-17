@@ -389,8 +389,8 @@ internal fun NativeChatScreen(
             // Interpolate toward the growing bottom instead of moving by a fixed chunk.
             // This makes the viewport track the same cadence as the text reveal and avoids
             // the staircase motion caused by one scroll jump per incoming network delta.
-            val interpolation = (1f - kotlin.math.exp(-7.2f * elapsedSeconds)).coerceIn(0f, 1f)
-            val maxFrameDistance = with(density) { 1_080.dp.toPx() } * elapsedSeconds
+            val interpolation = (1f - kotlin.math.exp(-6.0f * elapsedSeconds)).coerceIn(0f, 1f)
+            val maxFrameDistance = with(density) { 960.dp.toPx() } * elapsedSeconds
             val distance = (overflow * interpolation).coerceAtMost(maxFrameDistance).coerceAtMost(overflow)
             if (distance > 0.25f) listState.scrollBy(distance)
         }
@@ -1194,7 +1194,6 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
     var displayedText by remember(messageId) { mutableStateOf(if (startedAsStream) "" else text) }
     var tailStart by remember(messageId) { mutableIntStateOf(0) }
     var tailGeneration by remember(messageId) { mutableIntStateOf(0) }
-    var tailAlpha by remember(messageId) { mutableFloatStateOf(1f) }
     var showRichText by remember(messageId) { mutableStateOf(!startedAsStream) }
 
     // This coroutine belongs to the message, not to the transient `streaming` flag.
@@ -1255,17 +1254,6 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
         showRichText = true
     }
 
-    // Fade only the newest small batch. Older glyphs are never covered or restarted, so
-    // continuous deltas cannot flash an entire line/paragraph as the old mask did.
-    LaunchedEffect(tailGeneration) {
-        if (tailGeneration == 0) return@LaunchedEffect
-        tailAlpha = 0.08f
-        repeat(20) { frame ->
-            delay(32L)
-            tailAlpha = 0.08f + 0.92f * ((frame + 1) / 20f)
-        }
-    }
-
     // Keep both renderers alive for a short hand-off. Markwon's AndroidView needs a
     // layout pass; replacing Compose Text in one frame can otherwise show a blank flash
     // and suddenly change the message height when lists/headings gain Markdown spacing.
@@ -1283,20 +1271,11 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
             label = "streamToMarkdown",
         ) { rich ->
             if (!rich) {
-                val safeTailStart = tailStart.coerceIn(0, displayedText.length)
-                val animatedText = androidx.compose.ui.text.buildAnnotatedString {
-                    if (safeTailStart > 0) append(displayedText.substring(0, safeTailStart))
-                    withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = tailAlpha))) {
-                        append(displayedText.substring(safeTailStart))
-                    }
-                }
-                Text(
-                    text = animatedText,
-                    modifier = Modifier.fillMaxWidth(),
-                    style = MaterialTheme.typography.bodyLarge,
-                    lineHeight = 24.sp,
-                    letterSpacing = 0.1.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
+                FadingTailText(
+                    text = displayedText,
+                    tailStart = tailStart,
+                    generation = tailGeneration,
+                    reasoning = false,
                 )
             } else {
                 RichResponseText(text)
@@ -1403,35 +1382,60 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
 }
 
 @Composable
+private fun FadingTailText(text: String, tailStart: Int, generation: Int, reasoning: Boolean) {
+    // Recreating only this keyed animation starts the new tail dimmed on its very first
+    // frame. The previous implementation drew it opaque once and dimmed it one frame
+    // later from LaunchedEffect, which was the visible flash.
+    androidx.compose.runtime.key(generation) {
+        var visible by remember { mutableStateOf(false) }
+        val tailAlpha by animateFloatAsState(
+            targetValue = if (visible) 1f else 0.30f,
+            animationSpec = tween(620, easing = LinearOutSlowInEasing),
+            label = if (reasoning) "reasoningTail" else "answerTail",
+        )
+        LaunchedEffect(Unit) { visible = true }
+        val safeTailStart = tailStart.coerceIn(0, text.length)
+        val baseColor = if (reasoning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+        val animatedText = remember(text, safeTailStart, tailAlpha, baseColor) {
+            androidx.compose.ui.text.buildAnnotatedString {
+                if (safeTailStart > 0) append(text.substring(0, safeTailStart))
+                withStyle(androidx.compose.ui.text.SpanStyle(color = baseColor.copy(alpha = tailAlpha))) {
+                    append(text.substring(safeTailStart))
+                }
+            }
+        }
+        Text(
+            text = animatedText,
+            modifier = Modifier.fillMaxWidth(),
+            style = if (reasoning) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
+            lineHeight = if (reasoning) 22.sp else 24.sp,
+            letterSpacing = if (reasoning) 0.sp else 0.1.sp,
+            color = baseColor,
+        )
+    }
+}
+
+@Composable
 private fun LiveReasoningText(text: String) {
     var previousText by remember { mutableStateOf(text) }
-    var tailStart by remember { mutableIntStateOf(text.length) }
-    var tailAlpha by remember { mutableFloatStateOf(1f) }
+    val tailStart = if (text.startsWith(previousText)) previousText.length else 0
+    val generation = text.length
+    androidx.compose.runtime.SideEffect { previousText = text }
 
-    LaunchedEffect(text) {
-        tailStart = if (text.startsWith(previousText)) previousText.length else 0
-        previousText = text
-        tailAlpha = 0.08f
-        repeat(20) { frame ->
-            delay(32L)
-            tailAlpha = 0.08f + 0.92f * ((frame + 1) / 20f)
-        }
+    // Rebuilding and animating a multi-thousand-character AnnotatedString every frame is
+    // expensive on Android's text stack. Past this threshold correctness and scrolling
+    // win: render the accumulated summary once per incoming snapshot without a 60 Hz fade.
+    if (text.length > 1_600) {
+        Text(
+            text = text,
+            modifier = Modifier.fillMaxWidth(),
+            style = MaterialTheme.typography.bodyMedium,
+            lineHeight = 22.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        FadingTailText(text, tailStart, generation, reasoning = true)
     }
-
-    val safeTailStart = tailStart.coerceIn(0, text.length)
-    val animatedText = androidx.compose.ui.text.buildAnnotatedString {
-        if (safeTailStart > 0) append(text.substring(0, safeTailStart))
-        withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = tailAlpha))) {
-            append(text.substring(safeTailStart))
-        }
-    }
-    Text(
-        text = animatedText,
-        modifier = Modifier.fillMaxWidth(),
-        style = MaterialTheme.typography.bodyMedium,
-        lineHeight = 22.sp,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
 }
 
 @Composable
