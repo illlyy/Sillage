@@ -169,6 +169,10 @@ import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import io.noties.markwon.Markwon
+import io.noties.markwon.AbstractMarkwonPlugin
+import io.noties.markwon.MarkwonSpansFactory
+import io.noties.markwon.core.MarkwonTheme
+import org.commonmark.node.Code
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
@@ -1438,6 +1442,35 @@ private object NativeMarkdownRenderer {
 
     fun get(context: android.content.Context): Markwon = renderer ?: synchronized(this) {
         renderer ?: Markwon.builder(context)
+            .usePlugin(object : AbstractMarkwonPlugin() {
+                override fun configureTheme(builder: MarkwonTheme.Builder) {
+                    val density = context.resources.displayMetrics.density
+                    builder
+                        .blockMargin((18f * density).roundToInt())
+                        .listItemColor(android.graphics.Color.rgb(184, 112, 130))
+                        .bulletWidth((7f * density).roundToInt())
+                        .bulletListItemStrokeWidth((2f * density).roundToInt())
+                        .blockQuoteColor(android.graphics.Color.rgb(207, 151, 164))
+                        .blockQuoteWidth((4f * density).roundToInt())
+                        .linkColor(android.graphics.Color.rgb(157, 77, 99))
+                        .isLinkUnderlined(false)
+                        .codeBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        .codeTextColor(android.graphics.Color.rgb(117, 62, 78))
+                }
+
+                override fun configureSpansFactory(builder: MarkwonSpansFactory.Builder) {
+                    val density = context.resources.displayMetrics.density
+                    builder.setFactory(Code::class.java) { _, _ ->
+                        RoundedInlineCodeSpan(
+                            horizontalPadding = 5f * density,
+                            verticalPadding = 2f * density,
+                            radius = 6f * density,
+                            backgroundColor = android.graphics.Color.rgb(246, 229, 233),
+                            textColor = android.graphics.Color.rgb(112, 57, 73),
+                        )
+                    }
+                }
+            })
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(LinkifyPlugin.create())
             .usePlugin(MarkwonInlineParserPlugin.create())
@@ -1453,6 +1486,62 @@ private object NativeMarkdownRenderer {
         val rendered = markwon.toMarkdown(text)
         synchronized(renderedCache) { renderedCache[text] = rendered }
         return rendered
+    }
+}
+
+private class RoundedInlineCodeSpan(
+    private val horizontalPadding: Float,
+    private val verticalPadding: Float,
+    private val radius: Float,
+    private val backgroundColor: Int,
+    private val textColor: Int,
+) : android.text.style.ReplacementSpan() {
+    override fun getSize(
+        paint: android.graphics.Paint,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        fm: android.graphics.Paint.FontMetricsInt?,
+    ): Int {
+        if (fm != null) {
+            val source = paint.fontMetricsInt
+            fm.ascent = (source.ascent - verticalPadding).roundToInt()
+            fm.descent = (source.descent + verticalPadding).roundToInt()
+            fm.top = fm.ascent
+            fm.bottom = fm.descent
+        }
+        return (paint.measureText(text, start, end) + horizontalPadding * 2f).roundToInt()
+    }
+
+    override fun draw(
+        canvas: android.graphics.Canvas,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: android.graphics.Paint,
+    ) {
+        val oldColor = paint.color
+        val oldTypeface = paint.typeface
+        paint.typeface = android.graphics.Typeface.MONOSPACE
+        val width = paint.measureText(text, start, end) + horizontalPadding * 2f
+        paint.color = backgroundColor
+        canvas.drawRoundRect(
+            x,
+            top + verticalPadding * 0.35f,
+            x + width,
+            bottom - verticalPadding * 0.35f,
+            radius,
+            radius,
+            paint,
+        )
+        paint.color = textColor
+        canvas.drawText(text, start, end, x + horizontalPadding, y.toFloat(), paint)
+        paint.color = oldColor
+        paint.typeface = oldTypeface
     }
 }
 
@@ -1479,6 +1568,7 @@ private fun RichMarkdownText(text: String) {
             includeFontPadding = false
             letterSpacing = 0.01f
             setLineSpacing(resources.displayMetrics.density * 4f, 1f)
+            setPadding(0, (2f * resources.displayMetrics.density).roundToInt(), 0, (2f * resources.displayMetrics.density).roundToInt())
             breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
             hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
             linksClickable = true
