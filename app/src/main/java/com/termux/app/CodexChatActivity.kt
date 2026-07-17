@@ -93,6 +93,19 @@ internal class NativeChatState {
         planExplanation = ""
         activeGoalObjective = ""
         busy = false
+        processingLabel = ""
+        reasoningText = ""
+        reasoningComplete = false
+        reasoningCompletedAt = 0L
+        commandText = ""
+        toolDetails.clear()
+        liveSubagents.clear()
+        subagentHistories.clear()
+        loadingSubagentHistories.clear()
+        turnStartedAt = 0L
+        turnMessageStartIndex = 0
+        phaseStartedAt = 0L
+        phaseMessageStartIndex = 0
         revision++
     }
 
@@ -691,9 +704,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         bridge?.loadSubagentHistory(threadId)
     }
 
+    private fun discardPendingStreamEvents(reason: String) {
+        streamHandler.removeCallbacks(flushReasoningRunnable)
+        streamHandler.removeCallbacks(flushAnswerRunnable)
+        reasoningFlushScheduled = false
+        answerFlushScheduled = false
+        val droppedReasoning = pendingReasoning.length
+        val droppedAnswer = pendingAnswer.length
+        pendingReasoning.setLength(0)
+        pendingAnswer.setLength(0)
+        stopFrameDiagnostics()
+        NativeChatDiagnostics.record(this, "stream_route_reset", JSONObject()
+            .put("reason", reason).put("droppedReasoning", droppedReasoning).put("droppedAnswer", droppedAnswer))
+    }
+
     private fun resumeConversation(threadId: String) {
+        discardPendingStreamEvents("resume")
         pendingConversationAnimationKey = threadId
-        chatState.busy = false
+        currentThreadId = threadId
+        chatState.resetConversation()
         chatState.conversationTitle = chatState.conversations.firstOrNull { it.threadId == threadId }?.title ?: "对话"
         chatState.ready = false
         chatState.connectionLabel = "正在恢复对话…"
@@ -701,7 +730,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun newConversation() {
+        discardPendingStreamEvents("new")
         pendingConversationAnimationKey = null
+        currentThreadId = null
         chatState.conversationAnimationKey = "new-${UUID.randomUUID()}"
         chatState.resetConversation()
         chatState.conversationTitle = "新对话"

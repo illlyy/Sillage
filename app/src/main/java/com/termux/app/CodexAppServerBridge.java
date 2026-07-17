@@ -45,9 +45,14 @@ final class CodexAppServerBridge {
     /** Threads explicitly opened by the desktop UI; subagent threads never enter this set. */
     private final Set<String> primaryThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingPrimaryThreadTitles = new ConcurrentHashMap<>();
+    private final AtomicInteger navigationGeneration = new AtomicInteger();
+    private final Map<Integer, Integer> pendingNavigationGenerations = new ConcurrentHashMap<>();
     private Process process;
     private BufferedWriter writer;
     private volatile String threadId;
+    /** Thread whose events may mutate the currently visible native Compose conversation. */
+    private volatile String visibleThreadId;
+    private volatile boolean visibleRouteReady;
     private volatile String activeTurnId;
     private volatile int initializeRequestId = -1;
     private volatile int editRollbackRequestId = -1;
@@ -311,23 +316,57 @@ final class CodexAppServerBridge {
         } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
+    private static JSONObject navigationDetails(int generation, String thread) {
+        JSONObject details = new JSONObject();
+        try { details.put("generation", generation).put("thread", thread); }
+        catch (Exception ignored) {}
+        return details;
+    }
+
     @JavascriptInterface public void newConversation() {
+        int generation = navigationGeneration.incrementAndGet();
         threadId = null;
+        visibleThreadId = null;
+        visibleRouteReady = false;
+        activeTurnId = null;
+        NativeChatDiagnostics.record(activity, "conversation_route", navigationDetails(generation, "new"));
         try { sendThreadStart(); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
     void resumeConversation(String resumeThreadId) {
         if (resumeThreadId == null || resumeThreadId.trim().isEmpty()) return;
-        threadId = null;
+        final String requestedThread = resumeThreadId.trim();
+        final int generation = navigationGeneration.incrementAndGet();
+        // Change the visible route synchronously, before history I/O and thread/resume.
+        // Events from the previously displayed background turn are rejected immediately.
+        threadId = requestedThread;
+        visibleThreadId = requestedThread;
+        visibleRouteReady = false;
+        primaryThreadIds.add(requestedThread);
         activeTurnId = null;
+        NativeChatDiagnostics.record(activity, "conversation_route", navigationDetails(generation, shortId(requestedThread)));
         new Thread(() -> {
             try {
                 File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
-                File sessionFile = findSessionFile(sessionsRoot, resumeThreadId);
-                emit("onHistory", sessionFile == null ? "[]" : readConversationHistory(sessionFile).toString());
-                sendRequest("thread/resume", new JSONObject().put("threadId", resumeThreadId));
+                File sessionFile = findSessionFile(sessionsRoot, requestedThread);
+                JSONArray history = sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile);
+                if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
+                final String historyValue = history.toString();
+                activity.runOnUiThread(() -> {
+                    if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
+                    // Apply the persisted snapshot before opening the event gate. Deltas
+                    // emitted while disk history was loading remain in the session file
+                    // instead of being appended and then erased by replaceHistory().
+                    if (eventListener != null) eventListener.onEvent("onHistory", historyValue);
+                    visibleRouteReady = true;
+                    try {
+                        sendNavigationRequest("thread/resume", new JSONObject().put("threadId", requestedThread), generation);
+                    } catch (Exception error) {
+                        emit("onNativeError", error.getMessage());
+                    }
+                });
             } catch (Exception e) {
-                emit("onNativeError", e.getMessage());
+                if (navigationGeneration.get() == generation) emit("onNativeError", e.getMessage());
             }
         }, "CodexConversationResume").start();
     }
@@ -453,7 +492,18 @@ final class CodexAppServerBridge {
         params.put("cwd", cwd);
         params.put("approvalPolicy", "never");
         params.put("sandbox", "danger-full-access");
-        sendRequest("thread/start", params);
+        int generation = navigationGeneration.get();
+        if (eventListener != null) sendNavigationRequest("thread/start", params, generation);
+        else sendRequest("thread/start", params);
+    }
+
+    private int sendNavigationRequest(String method, JSONObject params, int generation) throws Exception {
+        int id = nextId.getAndIncrement();
+        JSONObject request = new JSONObject().put("method", method).put("id", id).put("params", params);
+        rememberPrimaryRequest(request);
+        pendingNavigationGenerations.put(id, generation);
+        sendJson(request);
+        return id;
     }
 
     private int sendRequest(String method, JSONObject params) throws Exception {
@@ -580,12 +630,24 @@ final class CodexAppServerBridge {
             int id = message.optInt("id", -1);
             JSONObject result = message.optJSONObject("result");
             if (result != null && result.optJSONObject("thread") != null) {
-                threadId = result.getJSONObject("thread").getString("id");
-                primaryThreadIds.add(threadId);
+                String resultThreadId = result.getJSONObject("thread").getString("id");
+                primaryThreadIds.add(resultThreadId);
                 Integer responseId = message.has("id") ? message.optInt("id", -1) : -1;
                 String pendingTitle = pendingPrimaryThreadTitles.remove(responseId);
-                if (pendingTitle != null && desktopBridge != null) CodexTaskStore.markRunning(activity, threadId, pendingTitle);
-                emit("onReady", threadId);
+                if (pendingTitle != null && desktopBridge != null) CodexTaskStore.markRunning(activity, resultThreadId, pendingTitle);
+                Integer responseGeneration = pendingNavigationGenerations.remove(responseId);
+                boolean acceptForNative = eventListener == null || (responseGeneration != null
+                    && responseGeneration == navigationGeneration.get()
+                    && (visibleThreadId == null || visibleThreadId.equals(resultThreadId)));
+                if (acceptForNative) {
+                    threadId = resultThreadId;
+                    visibleThreadId = resultThreadId;
+                    visibleRouteReady = true;
+                    emit("onReady", resultThreadId);
+                } else {
+                    NativeChatDiagnostics.record(activity, "ignored_navigation_result", new JSONObject()
+                        .put("thread", shortId(resultThreadId)).put("generation", responseGeneration));
+                }
             }
             return;
         }
@@ -595,8 +657,12 @@ final class CodexAppServerBridge {
         logCollabAgentEvent(method, params);
         if (!primaryEvent && "item/completed".equals(method) && params != null) {
             JSONObject ignoredItem = params.optJSONObject("item");
-            NativeChatDiagnostics.record(activity, "ignored_child_item", new JSONObject()
-                .put("thread", shortId(params.optString("threadId", "")))
+            String ignoredThread = params.optString("threadId", "");
+            String ignoredEvent = primaryThreadIds.contains(ignoredThread) ? "ignored_background_item" : "ignored_child_item";
+            NativeChatDiagnostics.record(activity, ignoredEvent, new JSONObject()
+                .put("thread", shortId(ignoredThread))
+                .put("visibleThread", shortId(visibleThreadId))
+                .put("routeReady", visibleRouteReady)
                 .put("type", ignoredItem == null ? "" : ignoredItem.optString("type", "")));
         }
         if ("turn/plan/updated".equals(method) && params != null && primaryEvent) {
@@ -658,11 +724,11 @@ final class CodexAppServerBridge {
             if (item != null) emit("onItem", item.optString("type", "item"));
         } else if ("turn/completed".equals(method)) {
             clearPendingTurn(params);
-            if (primaryEvent) {
-                emit("onTurnComplete", "");
-                String completedThread = params == null ? "" : params.optString("threadId", "");
+            String completedThread = params == null ? "" : params.optString("threadId", "");
+            if (primaryEvent) emit("onTurnComplete", "");
+            if (isPrimaryTurn(params)) {
                 CodexTaskStore.markCompleted(activity, completedThread, turnFailed(params));
-                NativeChatDiagnostics.record(activity, "turn_complete", new JSONObject()
+                NativeChatDiagnostics.record(activity, primaryEvent ? "turn_complete" : "background_turn_complete", new JSONObject()
                     .put("thread", shortId(completedThread)).put("failed", turnFailed(params)));
                 notifyTaskCompleted();
             }
@@ -1220,8 +1286,8 @@ final class CodexAppServerBridge {
                         .put("params", new JSONObject().put("threadId", thread).put("turn", turn));
                     android.util.Log.w(TAG, "Synthesizing missing turn/completed after upstream became idle for " + turnId);
                     if (desktopBridge != null) desktopBridge.onAppServerMessage(completed);
-                    emit("onTurnComplete", "");
                     JSONObject syntheticParams = completed.optJSONObject("params");
+                    if (isPrimaryEvent(syntheticParams)) emit("onTurnComplete", "");
                     if (isPrimaryTurn(syntheticParams)) {
                         CodexTaskStore.markCompleted(activity, thread, false);
                         notifyTaskCompleted();
@@ -1308,10 +1374,15 @@ final class CodexAppServerBridge {
         return prompt.isEmpty() ? "Codex 任务" : prompt;
     }
 
-    private boolean isPrimaryEvent(JSONObject params) {
+    static boolean isVisibleThreadEvent(JSONObject params, String visibleThread) {
+        if (visibleThread == null || visibleThread.isEmpty()) return false;
         if (params == null) return true;
         String candidate = params.optString("threadId", "");
-        return candidate.isEmpty() || primaryThreadIds.contains(candidate) || candidate.equals(threadId);
+        return candidate.isEmpty() || candidate.equals(visibleThread);
+    }
+
+    private boolean isPrimaryEvent(JSONObject params) {
+        return visibleRouteReady && isVisibleThreadEvent(params, visibleThreadId);
     }
 
     private boolean isPrimaryTurn(JSONObject params) {
@@ -1349,6 +1420,8 @@ final class CodexAppServerBridge {
 
     synchronized void stop() {
         threadId = null;
+        visibleThreadId = null;
+        visibleRouteReady = false;
         activeTurnId = null;
         initializeRequestId = -1;
         turnStartedAtMs.clear();

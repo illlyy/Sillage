@@ -941,5 +941,15 @@ public class CodexModelPipelineTest {
         assertEquals(0L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, false));
     }
 
+    @Test
+    public void nativeEventsOnlyTargetTheVisibleConversation() throws Exception {
+        JSONObject a = new JSONObject().put("threadId", "thread-a");
+        JSONObject b = new JSONObject().put("threadId", "thread-b");
+        assertTrue(CodexAppServerBridge.isVisibleThreadEvent(a, "thread-a"));
+        assertFalse(CodexAppServerBridge.isVisibleThreadEvent(b, "thread-a"));
+        assertFalse(CodexAppServerBridge.isVisibleThreadEvent(a, null));
+        assertTrue(CodexAppServerBridge.isVisibleThreadEvent(new JSONObject(), "thread-a"));
+    }
+
 
 }
