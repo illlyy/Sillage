@@ -1039,8 +1039,10 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
         return
     }
     val latestText = rememberUpdatedState(text)
-    val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
-    var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
+    // Only an actively streaming message may animate. Completed/history items must render
+    // immediately when LazyColumn recycles them, otherwise scrolling replays the reveal.
+    val animateReveal = streaming
+    var displayedText by remember(streaming) { mutableStateOf(if (animateReveal) "" else text) }
     var maskGeneration by remember { mutableIntStateOf(0) }
     var maskVisible by remember { mutableStateOf(false) }
     var showRichText by remember { mutableStateOf(!animateReveal) }
@@ -1055,6 +1057,15 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
         }
         showRichText = false
         if (!latestText.value.startsWith(displayedText)) displayedText = ""
+
+        // Hold the first tiny protocol delta briefly. Numbered Markdown commonly arrives
+        // as "1" / "." / " text" and exposing that first token causes a visible flash.
+        var warmupMs = 0L
+        while (streaming && latestText.value.length < 18 && warmupMs < 160L) {
+            delay(40L)
+            warmupMs += 40L
+        }
+
         while (streaming || displayedText.length < latestText.value.length) {
             val target = latestText.value
             if (!target.startsWith(displayedText)) {
@@ -1062,18 +1073,19 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 1_200 -> 160
-                    pending > 600 -> 96
-                    pending > 300 -> 56
-                    pending > 140 -> 32
-                    pending > 60 -> 18
-                    pending > 24 -> 10
+                    pending > 1_200 -> 40
+                    pending > 600 -> 32
+                    pending > 300 -> 26
+                    pending > 140 -> 20
+                    pending > 60 -> 14
+                    pending > 24 -> 9
                     else -> 5
                 }
                 displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
                 maskGeneration++
             }
-            delay(if (latestText.value.length - displayedText.length > 140) 28L else 56L)
+            val remaining = latestText.value.length - displayedText.length
+            delay(if (remaining > 300) 34L else if (remaining > 80) 44L else 58L)
         }
         displayedText = latestText.value
         delay(560L)
@@ -1086,12 +1098,15 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
     LaunchedEffect(maskGeneration) {
         if (maskGeneration == 0) return@LaunchedEffect
         maskVisible = true
-        delay(72L)
+        // Let Compose commit the glyph layout, then start clearing the independent mask.
+        // This delay is shorter than the output cadence so continuous streaming cannot
+        // keep the mask permanently opaque.
+        delay(20L)
         maskVisible = false
     }
     val maskAlpha by animateFloatAsState(
         targetValue = if (maskVisible) 0.92f else 0f,
-        animationSpec = if (maskVisible) tween(35, easing = LinearEasing) else tween(520, easing = LinearEasing),
+        animationSpec = if (maskVisible) tween(18, easing = LinearEasing) else tween(460, easing = LinearEasing),
         label = "streamTailMask",
     )
 
