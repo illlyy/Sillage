@@ -981,7 +981,7 @@ private fun RikkaEmptyState(
 private fun RikkaMessageItem(message: NativeChatMessage, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     when (message.role) {
         NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
-        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onQuote)
+        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onQuote)
         NativeChatRole.ACTIVITY -> RikkaActivityMessage(message)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
@@ -1033,116 +1033,101 @@ private fun FinalOnlyAnswerReveal(text: String, revealStartedAt: Long) {
 }
 
 @Composable
-private fun StreamingResponseText(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean) {
+private fun StreamingResponseText(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean) {
     if (finalOnlyReveal) {
         FinalOnlyAnswerReveal(text, revealStartedAt)
         return
     }
     val latestText = rememberUpdatedState(text)
-    // Only an actively streaming message may animate. Completed/history items must render
-    // immediately when LazyColumn recycles them, otherwise scrolling replays the reveal.
-    val animateReveal = streaming
-    var displayedText by remember(streaming) { mutableStateOf(if (animateReveal) "" else text) }
-    var maskGeneration by remember { mutableIntStateOf(0) }
-    var maskVisible by remember { mutableStateOf(false) }
-    var showRichText by remember { mutableStateOf(!animateReveal) }
+    val latestStreaming = rememberUpdatedState(streaming)
+    val startedAsStream = remember(messageId) { streaming }
+    var displayedText by remember(messageId) { mutableStateOf(if (startedAsStream) "" else text) }
+    var tailStart by remember(messageId) { mutableIntStateOf(0) }
+    var tailGeneration by remember(messageId) { mutableIntStateOf(0) }
+    var tailAlpha by remember(messageId) { mutableFloatStateOf(1f) }
+    var showRichText by remember(messageId) { mutableStateOf(!startedAsStream) }
 
-    // Keep layout work bounded: normal output advances gently, while a backlog is
-    // consumed in increasingly large batches instead of scheduling one frame per token.
-    LaunchedEffect(streaming, animateReveal) {
-        if (!animateReveal) {
-            displayedText = latestText.value
-            showRichText = true
-            return@LaunchedEffect
-        }
+    // This coroutine belongs to the message, not to the transient `streaming` flag.
+    // Completion therefore stops input but does not cancel the buffered drain and dump
+    // the full final answer into the UI in one frame.
+    LaunchedEffect(messageId) {
+        if (!startedAsStream) return@LaunchedEffect
         showRichText = false
-        if (!latestText.value.startsWith(displayedText)) displayedText = ""
 
-        // Hold the first tiny protocol delta briefly. Numbered Markdown commonly arrives
-        // as "1" / "." / " text" and exposing that first token causes a visible flash.
         var warmupMs = 0L
-        while (streaming && latestText.value.length < 18 && warmupMs < 160L) {
-            delay(40L)
-            warmupMs += 40L
+        while (latestStreaming.value && latestText.value.length < 24 && warmupMs < 180L) {
+            delay(30L)
+            warmupMs += 30L
         }
 
-        while (streaming || displayedText.length < latestText.value.length) {
+        while (latestStreaming.value || displayedText.length < latestText.value.length) {
             val target = latestText.value
             if (!target.startsWith(displayedText)) {
+                // A server correction replaces the pending buffer without briefly drawing
+                // the stale completed paragraph above it.
                 displayedText = ""
+                tailStart = 0
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 1_200 -> 40
-                    pending > 600 -> 32
-                    pending > 300 -> 26
-                    pending > 140 -> 20
-                    pending > 60 -> 14
+                    pending > 1_200 -> 36
+                    pending > 600 -> 30
+                    pending > 300 -> 24
+                    pending > 140 -> 18
+                    pending > 60 -> 13
                     pending > 24 -> 9
                     else -> 5
                 }
-                displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
-                maskGeneration++
+                val oldLength = displayedText.length
+                displayedText = target.take((oldLength + step).coerceAtMost(target.length))
+                tailStart = oldLength
+                tailGeneration++
             }
             val remaining = latestText.value.length - displayedText.length
-            delay(if (remaining > 300) 34L else if (remaining > 80) 44L else 58L)
+            delay(if (remaining > 300) 38L else if (remaining > 80) 46L else 58L)
         }
+
+        // Keep the stable Compose text until the final tail fade is complete. Switching
+        // to Markwon earlier changes line measurement and looks like a paragraph flash.
         displayedText = latestText.value
-        delay(560L)
+        delay(460L)
         showRichText = true
     }
 
-    // The answer is laid out only once per batch. A cheap surface-coloured mask then
-    // reveals the last line; unlike per-character spans it does not relayout glyphs
-    // on every animation tick. The one-frame delay also prevents a raw hard pop.
-    LaunchedEffect(maskGeneration) {
-        if (maskGeneration == 0) return@LaunchedEffect
-        maskVisible = true
-        // Let Compose commit the glyph layout, then start clearing the independent mask.
-        // This delay is shorter than the output cadence so continuous streaming cannot
-        // keep the mask permanently opaque.
-        delay(20L)
-        maskVisible = false
+    // Fade only the newest small batch. Older glyphs are never covered or restarted, so
+    // continuous deltas cannot flash an entire line/paragraph as the old mask did.
+    LaunchedEffect(tailGeneration) {
+        if (tailGeneration == 0) return@LaunchedEffect
+        tailAlpha = 0.12f
+        repeat(14) { frame ->
+            delay(30L)
+            tailAlpha = 0.12f + 0.88f * ((frame + 1) / 14f)
+        }
     }
-    val maskAlpha by animateFloatAsState(
-        targetValue = if (maskVisible) 0.92f else 0f,
-        animationSpec = if (maskVisible) tween(18, easing = LinearEasing) else tween(460, easing = LinearEasing),
-        label = "streamTailMask",
-    )
 
     if (!showRichText) {
-        Box(Modifier.fillMaxWidth()) {
-            Text(
-                text = displayedText,
-                modifier = Modifier.fillMaxWidth(),
-                style = MaterialTheme.typography.bodyLarge,
-                lineHeight = 24.sp,
-                letterSpacing = 0.1.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            if (maskAlpha > 0.001f) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(31.dp)
-                        .background(
-                            Brush.verticalGradient(
-                                0f to MaterialTheme.colorScheme.surface.copy(alpha = 0f),
-                                0.30f to MaterialTheme.colorScheme.surface.copy(alpha = maskAlpha * 0.45f),
-                                1f to MaterialTheme.colorScheme.surface.copy(alpha = maskAlpha),
-                            )
-                        )
-                )
+        val safeTailStart = tailStart.coerceIn(0, displayedText.length)
+        val animatedText = androidx.compose.ui.text.buildAnnotatedString {
+            if (safeTailStart > 0) append(displayedText.substring(0, safeTailStart))
+            withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = tailAlpha))) {
+                append(displayedText.substring(safeTailStart))
             }
         }
+        Text(
+            text = animatedText,
+            modifier = Modifier.fillMaxWidth(),
+            style = MaterialTheme.typography.bodyLarge,
+            lineHeight = 24.sp,
+            letterSpacing = 0.1.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     } else {
         RichResponseText(text)
     }
 }
 
 @Composable
-private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1157,7 +1142,7 @@ private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStarte
                 }
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
-                StreamingResponseText(text, streaming, revealStartedAt, finalOnlyReveal)
+                StreamingResponseText(messageId, text, streaming, revealStartedAt, finalOnlyReveal)
                 if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(7.dp))
