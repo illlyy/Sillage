@@ -2,9 +2,12 @@ package com.termux.app
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
+import android.view.Choreographer
 import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -81,6 +84,8 @@ internal class NativeChatState {
     var commandText by mutableStateOf("")
     var turnStartedAt by mutableStateOf(0L)
     var turnMessageStartIndex by mutableIntStateOf(0)
+    var phaseStartedAt by mutableStateOf(0L)
+    var phaseMessageStartIndex by mutableIntStateOf(0)
 
     fun resetConversation() {
         messages.clear()
@@ -103,6 +108,53 @@ internal class NativeChatState {
         toolDetails.clear()
         liveSubagents.clear()
         turnStartedAt = System.currentTimeMillis()
+        phaseStartedAt = turnStartedAt
+        phaseMessageStartIndex = turnMessageStartIndex
+        revision++
+    }
+
+    private fun processPayload(): String {
+        val tools = JSONArray()
+        toolDetails.forEach { raw -> tools.put(runCatching { JSONObject(raw) }.getOrElse { raw }) }
+        liveSubagents.forEach { raw ->
+            val item = runCatching { JSONObject(raw) }.getOrNull()
+            if (item != null) tools.put(item)
+        }
+        val duration = if (reasoningText.isBlank()) 0L else {
+            ((System.currentTimeMillis() - phaseStartedAt).coerceAtLeast(1L) / 1000L).coerceAtLeast(1L)
+        }
+        return JSONObject()
+            .put("duration", duration)
+            .put("reasoning", reasoningText.trim())
+            .put("command", commandText.trim())
+            .put("tools", tools)
+            .put("reasoningUnavailable", reasoningText.isBlank())
+            .toString()
+    }
+
+    private fun sealCurrentPhase() {
+        if (reasoningText.isBlank() && commandText.isBlank() && toolDetails.isEmpty() && liveSubagents.isEmpty()) return
+        val process = "PROCESS2|" + Base64.encodeToString(processPayload().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        val insertAt = (phaseMessageStartIndex until messages.size)
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT }
+            ?: messages.size
+        messages.add(insertAt, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process, revealStartedAt = System.currentTimeMillis()))
+    }
+
+    fun beginReasoningAfterAnswerIfNeeded() {
+        if (!reasoningComplete) return
+        sealCurrentPhase()
+        val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT && it.streaming }
+        if (lastAssistant >= 0) messages[lastAssistant] = messages[lastAssistant].copy(streaming = false)
+        reasoningText = ""
+        reasoningComplete = false
+        reasoningCompletedAt = 0L
+        commandText = ""
+        toolDetails.clear()
+        liveSubagents.clear()
+        processingLabel = "\u6b63\u5728\u601d\u8003"
+        phaseStartedAt = System.currentTimeMillis()
+        phaseMessageStartIndex = messages.size
         revision++
     }
 
@@ -226,11 +278,19 @@ internal class NativeChatState {
 
     fun updateSubagent(raw: String) {
         val item = runCatching { JSONObject(raw) }.getOrNull() ?: return
-        val key = item.optString("id", item.optString("agentThreadId", item.optString("tool", raw)))
+        fun safe(key: String): String = if (item.has(key) && !item.isNull(key)) item.optString(key, "").trim().takeUnless { it.equals("null", true) }.orEmpty() else ""
+        val receiver = item.optJSONArray("receiverThreadIds")?.let { array ->
+            (0 until array.length()).firstNotNullOfOrNull { index -> array.optString(index, "").trim().takeIf { it.isNotEmpty() && !it.equals("null", true) } }
+        }.orEmpty()
+        val key = safe("agentThreadId").ifBlank { receiver }.ifBlank { safe("id") }.ifBlank { safe("tool") }.ifBlank { raw.hashCode().toString() }
         val index = liveSubagents.indexOfFirst { existing ->
             runCatching {
                 val value = JSONObject(existing)
-                value.optString("id", value.optString("agentThreadId", value.optString("tool", existing))) == key
+                val existingReceiver = value.optJSONArray("receiverThreadIds")?.optString(0, "").orEmpty().takeUnless { it.equals("null", true) }.orEmpty()
+                val existingKey = listOf("agentThreadId", "id", "tool").firstNotNullOfOrNull { field ->
+                    if (value.has(field) && !value.isNull(field)) value.optString(field, "").trim().takeIf { it.isNotEmpty() && !it.equals("null", true) } else null
+                } ?: existingReceiver.ifBlank { existing.hashCode().toString() }
+                existingKey == key
             }.getOrDefault(false)
         }
         if (index >= 0) liveSubagents[index] = item.toString() else liveSubagents.add(item.toString())
@@ -239,19 +299,12 @@ internal class NativeChatState {
 
     fun completeTurn() {
         finishReasoning()
-        val duration = ((System.currentTimeMillis() - turnStartedAt).coerceAtLeast(0L) / 1000L)
-        run {
-            val payload = JSONObject()
-                .put("duration", duration)
-                .put("reasoning", reasoningText.trim())
-                .put("command", commandText.trim())
-                .put("tools", JSONArray(toolDetails))
-                .put("reasoningUnavailable", reasoningText.isBlank())
-                .toString()
-            val process = "PROCESS2|" + Base64.encodeToString(payload.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-            val assistantIndex = (turnMessageStartIndex until messages.size).firstOrNull { messages[it].role == NativeChatRole.ASSISTANT } ?: messages.size
-            messages.add(assistantIndex, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process, revealStartedAt = System.currentTimeMillis()))
-        }
+        sealCurrentPhase()
+        reasoningText = ""
+        commandText = ""
+        toolDetails.clear()
+        liveSubagents.clear()
+        phaseMessageStartIndex = messages.size
         val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT }
         if (lastAssistant >= 0) {
             messages[lastAssistant] = messages[lastAssistant].copy(streaming = false)
@@ -278,6 +331,63 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private val chatState = NativeChatState()
     private var bridge: CodexAppServerBridge? = null
     private var pendingConversationAnimationKey: String? = null
+    private val streamHandler = Handler(Looper.getMainLooper())
+    private val pendingReasoning = StringBuilder()
+    private val pendingAnswer = StringBuilder()
+    private var reasoningFlushScheduled = false
+    private var answerFlushScheduled = false
+    private val flushReasoningRunnable = Runnable {
+        reasoningFlushScheduled = false
+        flushReasoningDeltas()
+    }
+    private val flushAnswerRunnable = Runnable {
+        answerFlushScheduled = false
+        flushAnswerDeltas()
+    }
+    private var lastFrameNanos = 0L
+    private var frameWindowStartedAt = 0L
+    private var frameCount = 0
+    private var slowFrameCount = 0
+    private var worstFrameMs = 0L
+    private val frameDiagnostics = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (chatState.busy && lastFrameNanos > 0L) {
+                val frameMs = ((frameTimeNanos - lastFrameNanos).coerceAtLeast(0L) / 1_000_000L)
+                frameCount++
+                if (frameMs > 24L) slowFrameCount++
+                if (frameMs > worstFrameMs) worstFrameMs = frameMs
+                val now = android.os.SystemClock.uptimeMillis()
+                if (frameWindowStartedAt == 0L) frameWindowStartedAt = now
+                if (now - frameWindowStartedAt >= 2_000L) {
+                    NativeChatDiagnostics.record(this@CodexChatActivity, "frame_window", JSONObject()
+                        .put("frames", frameCount).put("slowFrames", slowFrameCount)
+                        .put("worstMs", worstFrameMs).put("reasoningChars", chatState.reasoningText.length)
+                        .put("messages", chatState.messages.size))
+                    frameWindowStartedAt = now
+                    frameCount = 0
+                    slowFrameCount = 0
+                    worstFrameMs = 0L
+                }
+            }
+            lastFrameNanos = frameTimeNanos
+            if (chatState.busy) Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    private fun startFrameDiagnostics() {
+        lastFrameNanos = 0L
+        frameWindowStartedAt = android.os.SystemClock.uptimeMillis()
+        frameCount = 0
+        slowFrameCount = 0
+        worstFrameMs = 0L
+        Choreographer.getInstance().removeFrameCallback(frameDiagnostics)
+        Choreographer.getInstance().postFrameCallback(frameDiagnostics)
+    }
+
+    private fun stopFrameDiagnostics() {
+        Choreographer.getInstance().removeFrameCallback(frameDiagnostics)
+        lastFrameNanos = 0L
+    }
     private var currentThreadId: String? = null
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
@@ -288,6 +398,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        NativeChatDiagnostics.record(this, "activity_create", JSONObject()
+            .put("diagnostics", NativeChatDiagnostics.file(this).absolutePath))
         val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
         chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
@@ -408,6 +520,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         while (chatState.messages.size > userIndex + 1) chatState.messages.removeAt(chatState.messages.lastIndex)
         chatState.messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "NOTICE|已从此处重新生成"))
         chatState.busy = true
+        startFrameDiagnostics()
         chatState.processingLabel = "处理中"
         chatState.reasoningText = ""
         chatState.reasoningComplete = false
@@ -417,6 +530,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
         chatState.turnMessageStartIndex = chatState.messages.size
+        chatState.phaseStartedAt = chatState.turnStartedAt
+        chatState.phaseMessageStartIndex = chatState.turnMessageStartIndex
         bridge?.editTurn(value, chatState.selectedModel, chatState.selectedEffort, rollbackTurns)
     }
 
@@ -427,6 +542,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             chatState.messages.removeAt(chatState.messages.lastIndex)
         }
         chatState.busy = true
+        startFrameDiagnostics()
         chatState.processingLabel = "处理中"
         chatState.reasoningText = ""
         chatState.reasoningComplete = false
@@ -436,6 +552,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
         chatState.turnMessageStartIndex = chatState.messages.size
+        chatState.phaseStartedAt = chatState.turnStartedAt
+        chatState.phaseMessageStartIndex = chatState.turnMessageStartIndex
         bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", chatState.selectedMode)
     }
 
@@ -454,6 +572,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val referencedSkills = chatState.selectedSkills.toList()
         val referencedAttachments = chatState.attachments.toList()
         chatState.addUser(value, referencedSkills, referencedAttachments)
+        startFrameDiagnostics()
         val attachments = JSONArray().also { array ->
             chatState.attachments.forEach { attachment ->
                 array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))
@@ -600,6 +719,34 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         finish()
     }
 
+    private fun flushReasoningDeltas() {
+        streamHandler.removeCallbacks(flushReasoningRunnable)
+        reasoningFlushScheduled = false
+        if (pendingReasoning.isEmpty()) return
+        val value = pendingReasoning.toString()
+        pendingReasoning.setLength(0)
+        val continuedAfterAnswer = chatState.reasoningComplete
+        chatState.beginReasoningAfterAnswerIfNeeded()
+        if (continuedAfterAnswer) NativeChatDiagnostics.record(this, "reasoning_segment_started", JSONObject()
+            .put("messageIndex", chatState.messages.size))
+        chatState.reasoningText += value
+        chatState.revision++
+        NativeChatDiagnostics.record(this, "reasoning_flush", JSONObject()
+            .put("chars", value.length).put("total", chatState.reasoningText.length))
+    }
+
+    private fun flushAnswerDeltas() {
+        streamHandler.removeCallbacks(flushAnswerRunnable)
+        answerFlushScheduled = false
+        if (pendingAnswer.isEmpty()) return
+        val value = pendingAnswer.toString()
+        pendingAnswer.setLength(0)
+        chatState.finishReasoning()
+        chatState.appendAssistant(value)
+        NativeChatDiagnostics.record(this, "answer_flush", JSONObject()
+            .put("chars", value.length).put("messages", chatState.messages.size))
+    }
+
     override fun onEvent(function: String, value: String) {
         when (function) {
             "onReady" -> {
@@ -615,26 +762,29 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 pendingConversationAnimationKey = null
             }
             "onDelta" -> {
-                chatState.finishReasoning()
-                chatState.appendAssistant(value)
+                flushReasoningDeltas()
+                pendingAnswer.append(value)
+                if (!answerFlushScheduled) {
+                    answerFlushScheduled = true
+                    streamHandler.postDelayed(flushAnswerRunnable, 50L)
+                }
             }
             "onFinalAnswer" -> {
+                flushReasoningDeltas()
+                flushAnswerDeltas()
                 chatState.finishReasoning()
                 chatState.appendAssistantFinal(value)
             }
             "onReasoningDelta" -> {
-                // A completed reasoning item is only a segment boundary. Models can emit
-                // more reasoning summaries after tool calls, so any new delta makes the
-                // reasoning phase live again until answer text actually starts.
-                chatState.reasoningComplete = false
-                chatState.reasoningCompletedAt = 0L
-                chatState.reasoningText += value
-                chatState.revision++
+                flushAnswerDeltas()
+                pendingReasoning.append(value)
+                if (!reasoningFlushScheduled) {
+                    reasoningFlushScheduled = true
+                    streamHandler.postDelayed(flushReasoningRunnable, 50L)
+                }
             }
             "onReasoningComplete" -> {
-                // Reconcile the segment's authoritative snapshot, but do not show the
-                // global check mark yet. The reasoning phase ends on the first answer
-                // delta (or when the whole turn completes), not on each item/completed.
+                flushReasoningDeltas()
                 if (value.length > chatState.reasoningText.length) chatState.reasoningText = value
                 chatState.revision++
             }
@@ -675,15 +825,32 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onItem" -> chatState.addActivity(value)
             "onTurnComplete" -> {
+                flushReasoningDeltas()
+                flushAnswerDeltas()
                 chatState.completeTurn()
+                stopFrameDiagnostics()
                 refreshConversations()
             }
-            "onNativeError" -> chatState.addError(value)
+            "onNativeError" -> {
+                chatState.addError(value)
+                stopFrameDiagnostics()
+            }
             "onLog" -> Unit
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (chatState.busy) startFrameDiagnostics()
+    }
+
+    override fun onPause() {
+        stopFrameDiagnostics()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        streamHandler.removeCallbacksAndMessages(null)
         bridge?.stop()
         bridge = null
         super.onDestroy()

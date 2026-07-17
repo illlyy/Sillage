@@ -1188,99 +1188,44 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
         FinalOnlyAnswerReveal(text, revealStartedAt)
         return
     }
-    val latestText = rememberUpdatedState(text)
-    val latestStreaming = rememberUpdatedState(streaming)
-    val startedAsStream = remember(messageId) { streaming }
-    var displayedText by remember(messageId) { mutableStateOf(if (startedAsStream) "" else text) }
-    var tailStart by remember(messageId) { mutableIntStateOf(0) }
-    var tailGeneration by remember(messageId) { mutableIntStateOf(0) }
-    var showRichText by remember(messageId) { mutableStateOf(!startedAsStream) }
+    var previousLength by remember(messageId) { mutableIntStateOf(text.length) }
+    var showRichText by remember(messageId) { mutableStateOf(!streaming) }
+    val tailStart = previousLength.coerceAtMost(text.length)
+    androidx.compose.runtime.SideEffect { previousLength = text.length }
 
-    // This coroutine belongs to the message, not to the transient `streaming` flag.
-    // Completion therefore stops input but does not cancel the buffered drain and dump
-    // the full final answer into the UI in one frame.
-    LaunchedEffect(messageId) {
-        if (!startedAsStream) return@LaunchedEffect
-        showRichText = false
-
-        var warmupMs = 0L
-        while (latestStreaming.value && latestText.value.length < 32 && warmupMs < 420L) {
-            delay(30L)
-            warmupMs += 30L
+    LaunchedEffect(streaming) {
+        if (streaming) {
+            showRichText = false
+        } else {
+            // Give the final coalesced text snapshot a layout pass before replacing the
+            // live chunk renderer with Markwon's final Markdown view.
+            delay(220L)
+            showRichText = true
         }
-
-        // Some providers publish completion immediately before their last UI delta.
-        // Keep a short quiet-period drain so those late chunks cannot strand the UI at
-        // the first one or two characters.
-        var observedLength = latestText.value.length
-        var quietSince = android.os.SystemClock.uptimeMillis()
-        while (true) {
-            val target = latestText.value
-            if (target.length != observedLength) {
-                observedLength = target.length
-                quietSince = android.os.SystemClock.uptimeMillis()
-            }
-            if (!target.startsWith(displayedText)) {
-                // A server correction replaces the pending buffer without briefly drawing
-                // the stale completed paragraph above it.
-                displayedText = ""
-                tailStart = 0
-            } else if (displayedText.length < target.length) {
-                val pending = target.length - displayedText.length
-                val step = when {
-                    pending > 1_200 -> 18
-                    pending > 600 -> 14
-                    pending > 300 -> 11
-                    pending > 140 -> 8
-                    pending > 60 -> 6
-                    pending > 24 -> 4
-                    else -> 3
-                }
-                val oldLength = displayedText.length
-                displayedText = target.take((oldLength + step).coerceAtMost(target.length))
-                tailStart = oldLength
-                tailGeneration++
-            }
-            val remaining = latestText.value.length - displayedText.length
-            val quietFor = android.os.SystemClock.uptimeMillis() - quietSince
-            if (!latestStreaming.value && remaining <= 0 && quietFor >= 360L) break
-            delay(if (remaining > 600) 34L else if (remaining > 180) 40L else 48L)
-        }
-
-        // Keep the stable Compose text until the final tail fade is complete. Switching
-        // to Markwon earlier changes line measurement and looks like a paragraph flash.
-        displayedText = latestText.value
-        delay(460L)
-        showRichText = true
     }
 
-    // Keep both renderers alive for a short hand-off. Markwon's AndroidView needs a
-    // layout pass; replacing Compose Text in one frame can otherwise show a blank flash
-    // and suddenly change the message height when lists/headings gain Markdown spacing.
-    // Do not animate the whole message height while chunks arrive. Doing so starts a
-    // new layout interpolation for every batch and makes the paragraph and list below it
-    // visibly wobble. The one-time AnimatedContent hand-off below still softens the
-    // transition to final Markwon output.
-    Box(modifier = Modifier.fillMaxWidth()) {
-        AnimatedContent(
-            targetState = showRichText,
-            transitionSpec = {
-                fadeIn(tween(150, easing = LinearOutSlowInEasing)) togetherWith
-                    fadeOut(tween(90, easing = LinearEasing))
-            },
-            label = "streamToMarkdown",
-        ) { rich ->
-            if (!rich) {
-                ChunkedLiveText(
-                    text = displayedText,
-                    tailStart = tailStart,
-                    generation = tailGeneration,
-                    reasoning = false,
-                    animateTail = true,
-                )
-            } else {
-                RichResponseText(text)
-            }
+    AnimatedContent(
+        targetState = showRichText,
+        transitionSpec = {
+            fadeIn(tween(150, easing = LinearOutSlowInEasing)) togetherWith
+                fadeOut(tween(90, easing = LinearEasing))
+        },
+        label = "streamToMarkdown",
+    ) { rich ->
+        if (rich) {
+            RichResponseText(text)
+        } else {
+            // Network deltas are already coalesced by the Activity. Render each stable
+            // chunk once and let the 120 Hz viewport motor provide motion; a per-glyph
+            // 620 ms alpha animation rebuilt AnnotatedString every frame and dominated
+            // long-answer frame time.
+            ChunkedLiveText(
+                text = text,
+                tailStart = tailStart,
+                generation = text.length,
+                reasoning = false,
+                animateTail = false,
+            )
         }
     }
 }
@@ -1481,8 +1426,9 @@ private fun LiveReasoningText(text: String) {
         tailStart = tailStart,
         generation = text.length,
         reasoning = true,
-        // Keep animation on the bounded final chunk; completed chunks never animate again.
-        animateTail = true,
+        // The bounded preview and inner follow motor provide motion without forcing
+        // a color/layout recomposition for every display frame.
+        animateTail = false,
     )
 }
 
@@ -1496,9 +1442,20 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     // Match RikkaHub's important performance behavior: while reasoning is live, keep it
     // inside a bounded inner viewport. Only that viewport scrolls as text grows, so the
     // outer LazyColumn is not remeasured and displaced by thousands of reasoning lines.
-    LaunchedEffect(state.reasoningText.length, reasoningPreview) {
-        if (reasoningPreview && state.reasoningText.isNotEmpty()) {
-            reasoningScrollState.animateScrollTo(reasoningScrollState.maxValue)
+    LaunchedEffect(reasoningPreview) {
+        if (!reasoningPreview) return@LaunchedEffect
+        var previousFrame = withFrameNanos { it }
+        while (isActive) {
+            val frame = withFrameNanos { it }
+            val seconds = ((frame - previousFrame).coerceAtMost(50_000_000L)) / 1_000_000_000f
+            previousFrame = frame
+            val remaining = (reasoningScrollState.maxValue - reasoningScrollState.value).coerceAtLeast(0).toFloat()
+            if (remaining > 0.5f) {
+                val interpolation = (1f - kotlin.math.exp(-9f * seconds)).coerceIn(0f, 1f)
+                reasoningScrollState.scrollBy((remaining * interpolation).coerceAtLeast(0.5f).coerceAtMost(remaining))
+            } else {
+                delay(32L)
+            }
         }
     }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
@@ -1991,10 +1948,27 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
     }
 }
 
-private fun subagentThreadId(item: JSONObject): String = item.optString(
-    "agentThreadId",
-    item.optJSONArray("receiverThreadIds")?.optString(0).orEmpty(),
-)
+private fun jsonText(item: JSONObject, vararg keys: String): String {
+    keys.forEach { key ->
+        if (item.has(key) && !item.isNull(key)) {
+            val value = item.optString(key, "").trim()
+            if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
+        }
+    }
+    return ""
+}
+
+private fun subagentThreadId(item: JSONObject): String {
+    jsonText(item, "agentThreadId").takeIf { it.isNotBlank() }?.let { return it }
+    val receivers = item.optJSONArray("receiverThreadIds") ?: return ""
+    for (index in 0 until receivers.length()) {
+        if (!receivers.isNull(index)) {
+            val value = receivers.optString(index, "").trim()
+            if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
+        }
+    }
+    return ""
+}
 
 @Composable
 private fun CollabAgentCapsule(
@@ -2106,15 +2080,17 @@ private fun CollabAgentCapsule(
     }
 }
 
-private fun subagentKey(item: JSONObject): String = subagentThreadId(item).ifBlank { item.optString("id", item.toString().hashCode().toString()) }
+private fun subagentKey(item: JSONObject): String = subagentThreadId(item).ifBlank {
+    jsonText(item, "id", "callId", "tool").ifBlank { item.toString().hashCode().toString() }
+}
 
 private fun subagentName(item: JSONObject): String {
     val id = subagentThreadId(item)
     val fallback = if (id.isNotBlank()) "\u5b50\u4ee3\u7406 ${id.take(6)}" else "\u5b50\u4ee3\u7406"
-    return item.optString("agentName", item.optString("name", item.optString("agent", fallback)))
+    return jsonText(item, "agentName", "name", "agent").ifBlank { fallback }
 }
 
-private fun subagentStatus(item: JSONObject): String = when (item.optString("status", "completed").lowercase()) {
+private fun subagentStatus(item: JSONObject): String = when (jsonText(item, "status").ifBlank { "completed" }.lowercase()) {
     "inprogress", "running", "started" -> "\u8fd0\u884c\u4e2d"
     "failed", "error" -> "\u5931\u8d25"
     else -> "\u5b8c\u6210"
@@ -2358,8 +2334,8 @@ private fun parseSubagentMessages(history: String?): List<JSONObject> {
 @Composable
 private fun SubagentDetail(item: JSONObject, history: String?, historyLoading: Boolean) {
     val name = subagentName(item)
-    val task = item.optString("task", item.optString("prompt", item.optString("input", item.optString("message", ""))))
-    val result = item.optString("output", item.optString("result", ""))
+    val task = jsonText(item, "task", "prompt", "input", "message")
+    val result = jsonText(item, "output", "result")
     val messages = remember(history) { parseSubagentMessages(history) }
     if (messages.isNotEmpty()) {
         val conversationListState = rememberLazyListState(

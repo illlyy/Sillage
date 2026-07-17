@@ -934,4 +934,12 @@ public class CodexModelPipelineTest {
         assertEquals("completed", card.getString("status"));
     }
 
+    @Test
+    public void historicalReasoningDurationUsesRecordTimestamps() {
+        assertEquals(2L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, true));
+        assertEquals(1L, CodexAppServerBridge.historyReasoningDurationSeconds(0L, 0L, true));
+        assertEquals(0L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, false));
+    }
+
+
 }
