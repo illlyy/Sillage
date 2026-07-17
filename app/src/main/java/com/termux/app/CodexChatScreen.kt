@@ -1489,11 +1489,24 @@ private fun LiveReasoningText(text: String) {
 @Composable
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
+    var fullReasoning by remember { mutableStateOf(false) }
+    val reasoningScrollState = rememberScrollState()
+    val reasoningPreview = expanded && !state.reasoningComplete && !fullReasoning
+
+    // Match RikkaHub's important performance behavior: while reasoning is live, keep it
+    // inside a bounded inner viewport. Only that viewport scrolls as text grows, so the
+    // outer LazyColumn is not remeasured and displaced by thousands of reasoning lines.
+    LaunchedEffect(state.reasoningText.length, reasoningPreview) {
+        if (reasoningPreview && state.reasoningText.isNotEmpty()) {
+            reasoningScrollState.animateScrollTo(reasoningScrollState.maxValue)
+        }
+    }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
         if (state.reasoningComplete && answerStarted) {
             delay(260L)
             onAutomaticCollapse()
             expanded = false
+            fullReasoning = false
         }
     }
     val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
@@ -1508,7 +1521,16 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     }
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(
-            modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth().clickable {
+                when {
+                    !expanded -> expanded = true
+                    reasoningPreview -> fullReasoning = true
+                    else -> {
+                        expanded = false
+                        fullReasoning = false
+                    }
+                }
+            }.padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (state.reasoningComplete) {
@@ -1518,17 +1540,27 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
             }
             Spacer(Modifier.width(8.dp))
             Text(statusText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (reasoningPreview && state.reasoningText.length > 520) {
+                Spacer(Modifier.weight(1f))
+                Text("\u5c55\u5f00", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
             Column {
                 if (state.reasoningText.isNotBlank()) {
-                    Box(modifier = Modifier.padding(top = 10.dp)) {
+                    val liveReasoningModifier = if (reasoningPreview) {
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 132.dp)
+                            .verticalScroll(reasoningScrollState)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    }
+                    Box(modifier = Modifier.padding(top = 10.dp).then(liveReasoningModifier)) {
                         if (state.reasoningComplete) {
                             RichResponseText(state.reasoningText)
                         } else {
-                            // Read the live snapshot directly. Buffering this text in a long-lived
-                            // coroutine can miss replacement updates while the panel stays composed.
                             LiveReasoningText(state.reasoningText)
                         }
                     }
