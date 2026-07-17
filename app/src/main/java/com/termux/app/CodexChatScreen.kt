@@ -119,6 +119,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
@@ -1382,6 +1383,10 @@ private fun RikkaCodeBlock(language: String, code: String) {
 
 private object NativeMarkdownRenderer {
     @Volatile private var renderer: Markwon? = null
+    private val renderedCache = object : LinkedHashMap<String, android.text.Spanned>(48, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, android.text.Spanned>?): Boolean = size > 48
+    }
+
     fun get(context: android.content.Context): Markwon = renderer ?: synchronized(this) {
         renderer ?: Markwon.builder(context)
             .usePlugin(StrikethroughPlugin.create())
@@ -1391,12 +1396,32 @@ private object NativeMarkdownRenderer {
             .build()
             .also { renderer = it }
     }
+
+    fun cached(text: String): android.text.Spanned? = synchronized(renderedCache) { renderedCache[text] }
+
+    fun render(markwon: Markwon, text: String): android.text.Spanned {
+        cached(text)?.let { return it }
+        val rendered = markwon.toMarkdown(text)
+        synchronized(renderedCache) { renderedCache[text] = rendered }
+        return rendered
+    }
 }
 
 @Composable
 private fun RichMarkdownText(text: String) {
     val context = LocalContext.current
     val markwon = remember(context.applicationContext) { NativeMarkdownRenderer.get(context.applicationContext) }
+    val parsed by produceState<android.text.Spanned?>(
+        initialValue = NativeMarkdownRenderer.cached(text),
+        key1 = text,
+        key2 = markwon,
+    ) {
+        if (value == null) {
+            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                NativeMarkdownRenderer.render(markwon, text)
+            }
+        }
+    }
     AndroidView(
         modifier = Modifier.fillMaxWidth(),
         factory = { android.widget.TextView(it).apply {
@@ -1409,11 +1434,18 @@ private fun RichMarkdownText(text: String) {
             hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
             linksClickable = true
             setTextColor(android.graphics.Color.rgb(45, 40, 42))
+            // Never expose an empty AndroidView while Markdown/formulas are parsed.
+            this.text = text
+            tag = "plain:$text"
         } },
         update = { view ->
-            if (view.tag != text) {
+            val rendered = parsed
+            if (rendered != null && view.tag != text) {
                 view.tag = text
-                markwon.setMarkdown(view, text)
+                markwon.setParsedMarkdown(view, rendered)
+            } else if (rendered == null && view.tag != "plain:$text") {
+                view.text = text
+                view.tag = "plain:$text"
             }
         },
     )
