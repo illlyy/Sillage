@@ -145,6 +145,7 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -1001,7 +1002,9 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
     val latestText = rememberUpdatedState(text)
     val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
     var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
+    var revealedTailLength by remember { mutableIntStateOf(0) }
     var showRichText by remember { mutableStateOf(!animateReveal) }
+    val tailAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
 
     LaunchedEffect(streaming, animateReveal) {
         if (!animateReveal) {
@@ -1018,24 +1021,40 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 320 -> 24
-                    pending > 160 -> 16
-                    pending > 72 -> 10
-                    pending > 24 -> 6
-                    else -> 3
+                    pending > 400 -> 12
+                    pending > 160 -> 8
+                    pending > 64 -> 5
+                    pending > 20 -> 3
+                    else -> 1
                 }
-                displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
+                val nextLength = (displayedText.length + step).coerceAtMost(target.length)
+                revealedTailLength = nextLength - displayedText.length
+                displayedText = target.take(nextLength)
             }
-            delay(if (streaming) 32L else 20L)
+            delay(if (streaming) 24L else 18L)
         }
         displayedText = latestText.value
         delay(24L)
         showRichText = true
     }
 
+    LaunchedEffect(displayedText) {
+        if (displayedText.isNotEmpty() && !showRichText) {
+            tailAlpha.snapTo(0.42f)
+            tailAlpha.animateTo(1f, tween(90, easing = LinearOutSlowInEasing))
+        }
+    }
+
     if (!showRichText) {
+        val stableEnd = (displayedText.length - revealedTailLength).coerceAtLeast(0)
+        val animatedText = androidx.compose.ui.text.buildAnnotatedString {
+            append(displayedText.substring(0, stableEnd))
+            withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = tailAlpha.value))) {
+                append(displayedText.substring(stableEnd))
+            }
+        }
         Text(
-            text = displayedText,
+            text = animatedText,
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodyLarge,
             lineHeight = 24.sp,
