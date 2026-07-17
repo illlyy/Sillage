@@ -232,6 +232,10 @@ final class CodexAppServerBridge {
     }
 
     void sendMessage(String text, String model, String effort, String attachmentsJson) {
+        sendMessage(text, model, effort, attachmentsJson, null);
+    }
+
+    void sendMessage(String text, String model, String effort, String attachmentsJson, String collaborationMode) {
         if (text == null) text = "";
         JSONArray attachments;
         try { attachments = new JSONArray(attachmentsJson == null ? "[]" : attachmentsJson); }
@@ -261,6 +265,15 @@ final class CodexAppServerBridge {
             params.put("input", input);
             if (model != null && !model.trim().isEmpty()) params.put("model", model);
             if (effort != null && !effort.trim().isEmpty()) params.put("effort", effort);
+            if (collaborationMode != null && !collaborationMode.trim().isEmpty()) {
+                JSONObject settings = new JSONObject();
+                if (model != null && !model.trim().isEmpty()) settings.put("model", model);
+                if (effort != null && !effort.trim().isEmpty()) settings.put("reasoning_effort", effort);
+                settings.put("developer_instructions", JSONObject.NULL);
+                params.put("collaborationMode", new JSONObject()
+                    .put("mode", collaborationMode)
+                    .put("settings", settings));
+            }
             sendRequest("turn/start", params);
         } catch (Exception e) {
             emit("onNativeError", e.getMessage());
@@ -319,6 +332,23 @@ final class CodexAppServerBridge {
             }
             emit("onSubagentHistory", result.toString());
         }, "CodexSubagentHistory").start();
+    }
+
+    void setThreadGoal(String objective) {
+        if (threadId == null || objective == null || objective.trim().isEmpty()) return;
+        try {
+            sendRequest("thread/goal/set", new JSONObject()
+                .put("threadId", threadId)
+                .put("objective", objective.trim())
+                .put("status", "active"));
+        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
+    void clearThreadGoal() {
+        if (threadId == null) return;
+        try {
+            sendRequest("thread/goal/clear", new JSONObject().put("threadId", threadId));
+        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
     @JavascriptInterface public void interruptCurrentTurn() {

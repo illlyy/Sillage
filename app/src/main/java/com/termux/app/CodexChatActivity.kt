@@ -63,6 +63,8 @@ internal class NativeChatState {
     var conversationAnimationKey by mutableStateOf("new-${UUID.randomUUID()}")
     var selectedModel by mutableStateOf("")
     var selectedEffort by mutableStateOf("high")
+    var selectedMode by mutableStateOf("default")
+    var activeGoalObjective by mutableStateOf("")
     var revision by mutableIntStateOf(0)
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
@@ -237,7 +239,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        chatState.input = getSharedPreferences("codex_mobile", MODE_PRIVATE).getString("native_chat_draft_v1", "").orEmpty()
+        val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
+        chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
@@ -255,6 +259,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onNewConversation = ::newConversation,
                     onResumeConversation = ::resumeConversation,
                     onLoadSubagentHistory = ::loadSubagentHistory,
+                    onModeChange = ::setChatMode,
+                    onSetGoal = ::setGoal,
+                    onClearGoal = ::clearGoal,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { chatState.attachments.remove(it) },
@@ -368,7 +375,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
         chatState.turnMessageStartIndex = chatState.messages.size
-        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]")
+        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", chatState.selectedMode)
     }
 
     private fun updateDraft(value: String) {
@@ -389,8 +396,26 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))
             }
         }
-        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, attachments.toString())
+        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, attachments.toString(), chatState.selectedMode)
         chatState.attachments.clear()
+    }
+
+    private fun setChatMode(mode: String) {
+        chatState.selectedMode = if (mode == "plan") "plan" else "default"
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString("native_chat_mode_v1", chatState.selectedMode).apply()
+    }
+
+    private fun setGoal(objective: String) {
+        val value = objective.trim()
+        if (value.isEmpty() || !chatState.ready) return
+        chatState.activeGoalObjective = value
+        bridge?.setThreadGoal(value)
+    }
+
+    private fun clearGoal() {
+        chatState.activeGoalObjective = ""
+        bridge?.clearThreadGoal()
     }
 
     private fun cacheAttachment(uri: Uri, image: Boolean) {

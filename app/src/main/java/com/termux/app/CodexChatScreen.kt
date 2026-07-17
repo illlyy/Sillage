@@ -278,6 +278,9 @@ internal fun NativeChatScreen(
     onNewConversation: () -> Unit,
     onResumeConversation: (String) -> Unit,
     onLoadSubagentHistory: (String) -> Unit,
+    onModeChange: (String) -> Unit,
+    onSetGoal: (String) -> Unit,
+    onClearGoal: () -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -310,6 +313,7 @@ internal fun NativeChatScreen(
     var elapsedSeconds by remember { mutableStateOf(0L) }
     var editMessage by remember { mutableStateOf<NativeChatMessage?>(null) }
     var previewAttachment by remember { mutableStateOf<NativeAttachment?>(null) }
+    var showGoalDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.busy, state.turnStartedAt) {
         while (state.busy) {
@@ -531,6 +535,11 @@ internal fun NativeChatScreen(
                         effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
                         selectedEffort = state.selectedEffort,
                         onEffortSelected = { state.selectedEffort = it },
+                        selectedMode = state.selectedMode,
+                        activeGoal = state.activeGoalObjective,
+                        onModeSelected = onModeChange,
+                        onRequestGoal = { showGoalDialog = true },
+                        onClearGoal = onClearGoal,
                         attachments = state.attachments,
                         onMoreClick = { showFilesSheet = true },
                         onRemoveAttachment = onRemoveAttachment,
@@ -543,6 +552,16 @@ internal fun NativeChatScreen(
                 }
             }
         }
+    }
+    if (showGoalDialog) {
+        GoalEditorDialog(
+            initialValue = state.activeGoalObjective,
+            onDismiss = { showGoalDialog = false },
+            onConfirm = { objective ->
+                onSetGoal(objective)
+                showGoalDialog = false
+            },
+        )
     }
     previewAttachment?.let { attachment ->
         AttachmentPreviewDialog(attachment = attachment, onDismiss = { previewAttachment = null })
@@ -2365,6 +2384,110 @@ private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
     }
 }
 @Composable
+private fun ComposerModeCapsules(
+    selectedMode: String,
+    activeGoal: String,
+    onModeSelected: (String) -> Unit,
+    onRequestGoal: () -> Unit,
+    onClearGoal: () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box {
+            Surface(
+                modifier = Modifier.clickable { menuExpanded = true },
+                shape = CircleShape,
+                color = if (selectedMode == "plan") MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = if (selectedMode == "plan") MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+            ) {
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(if (selectedMode == "plan") HugeIcons.Zap else HugeIcons.Sparkles, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    AnimatedContent(
+                        targetState = selectedMode,
+                        transitionSpec = {
+                            (fadeIn(tween(150)) + slideInVertically(tween(190, easing = FastOutSlowInEasing)) { it / 3 }) togetherWith
+                                (fadeOut(tween(90)) + slideOutVertically(tween(140, easing = FastOutSlowInEasing)) { -it / 3 })
+                        },
+                        label = "composerModeLabel",
+                    ) { mode ->
+                        Text(if (mode == "plan") "\u8ba1\u5212\u6a21\u5f0f" else "\u9ed8\u8ba4\u6a21\u5f0f", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.width(3.dp))
+                    Icon(HugeIcons.ArrowDown01, null, Modifier.size(13.dp))
+                }
+            }
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("\u9ed8\u8ba4\u6a21\u5f0f") },
+                    leadingIcon = { Icon(HugeIcons.Sparkles, null, Modifier.size(18.dp)) },
+                    onClick = { onModeSelected("default"); menuExpanded = false },
+                )
+                DropdownMenuItem(
+                    text = { Text("\u8ba1\u5212\u6a21\u5f0f") },
+                    leadingIcon = { Icon(HugeIcons.Zap, null, Modifier.size(18.dp)) },
+                    onClick = { onModeSelected("plan"); menuExpanded = false },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (activeGoal.isBlank()) "\u8bbe\u7f6e\u76ee\u6807" else "\u7f16\u8f91\u76ee\u6807") },
+                    leadingIcon = { Icon(HugeIcons.LookTop, null, Modifier.size(18.dp)) },
+                    onClick = { menuExpanded = false; onRequestGoal() },
+                )
+            }
+        }
+        AnimatedVisibility(
+            visible = activeGoal.isNotBlank(),
+            enter = fadeIn(tween(150)) + expandHorizontally(tween(230, easing = FastOutSlowInEasing), expandFrom = Alignment.Start),
+            exit = fadeOut(tween(100)) + shrinkHorizontally(tween(180, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Start),
+        ) {
+            Surface(
+                modifier = Modifier.clickable { onClearGoal() },
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            ) {
+                Row(Modifier.padding(start = 10.dp, end = 7.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(HugeIcons.LookTop, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("\u76ee\u6807", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(5.dp))
+                    Icon(HugeIcons.Cancel01, "\u6e05\u9664\u76ee\u6807", Modifier.size(13.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var value by remember(initialValue) { mutableStateOf(initialValue) }
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initialValue.isBlank()) "\u8bbe\u7f6e\u6301\u7eed\u76ee\u6807" else "\u7f16\u8f91\u6301\u7eed\u76ee\u6807") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Codex \u4f1a\u5728\u540e\u7eed\u6bcf\u4e2a\u56de\u5408\u4e2d\u7ee7\u7eed\u8ffd\u8e2a\u8fd9\u4e2a\u76ee\u6807\u3002", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    maxLines = 7,
+                    shape = RoundedCornerShape(18.dp),
+                    placeholder = { Text("\u63cf\u8ff0\u4f60\u60f3\u8ba9 Codex \u6301\u7eed\u5b8c\u6210\u7684\u4e8b\u60c5") },
+                )
+            }
+        },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text("\u542f\u7528\u76ee\u6807") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("\u53d6\u6d88") } },
+    )
+}
+
+@Composable
 private fun RikkaChatInput(
     value: String,
     enabled: Boolean,
@@ -2374,6 +2497,11 @@ private fun RikkaChatInput(
     effortOptions: List<String>,
     selectedEffort: String,
     onEffortSelected: (String) -> Unit,
+    selectedMode: String,
+    activeGoal: String,
+    onModeSelected: (String) -> Unit,
+    onRequestGoal: () -> Unit,
+    onClearGoal: () -> Unit,
     attachments: List<NativeAttachment>,
     onMoreClick: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -2434,6 +2562,13 @@ private fun RikkaChatInput(
                             }
                         }
                     }
+                    ComposerModeCapsules(
+                        selectedMode = selectedMode,
+                        activeGoal = activeGoal,
+                        onModeSelected = onModeSelected,
+                        onRequestGoal = onRequestGoal,
+                        onClearGoal = onClearGoal,
+                    )
                     TextField(
                         value = value,
                         onValueChange = onValueChange,
