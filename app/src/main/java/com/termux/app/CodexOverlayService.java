@@ -39,6 +39,8 @@ public final class CodexOverlayService extends Service {
     static final String ACTION_SHOW = "com.ilyop.codex.overlay.SHOW";
     static final String ACTION_HIDE = "com.ilyop.codex.overlay.HIDE";
     static final String ACTION_TASK_COMPLETED = "com.ilyop.codex.overlay.TASK_COMPLETED";
+    static final String ACTION_SYNC_KEEP_ALIVE = "com.ilyop.codex.overlay.SYNC_KEEP_ALIVE";
+    static final String PREF_NATIVE_TASK_KEEP_ALIVE = "native_task_keep_alive";
     private static final String CHANNEL_BACKGROUND = "codex_background";
     private static final String CHANNEL_COMPLETION = "codex_completion";
     private static final int FOREGROUND_ID = 7411;
@@ -72,6 +74,22 @@ public final class CodexOverlayService extends Service {
         context.startService(new Intent(context, CodexOverlayService.class).setAction(ACTION_HIDE));
     }
 
+    static void syncKeepAlive(Context context) {
+        if (context == null) return;
+        Context app = context.getApplicationContext();
+        SharedPreferences prefs = app.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
+        boolean overlay = prefs.getBoolean("overlay_enabled", false);
+        boolean nativeTask = prefs.getBoolean(PREF_NATIVE_TASK_KEEP_ALIVE, true)
+            && CodexNativeRuntime.exists() && CodexTaskStore.hasRunningTasks(app);
+        Intent intent = new Intent(app, CodexOverlayService.class).setAction(ACTION_SYNC_KEEP_ALIVE);
+        if (overlay || nativeTask) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) app.startForegroundService(intent);
+            else app.startService(intent);
+        } else {
+            app.stopService(intent);
+        }
+    }
+
     static void notifyTaskCompleted(Context context) {
         SharedPreferences prefs = context.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
         if (prefs.getBoolean("overlay_enabled", false)) {
@@ -86,15 +104,12 @@ public final class CodexOverlayService extends Service {
     static void showCompletionNotification(Context context) {
         ensureChannels(context);
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-        Intent open = new Intent(context, CodexHomeActivity.class)
-            .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pending = PendingIntent.getActivity(context, 7412, open, pendingFlags());
+        PendingIntent pending = PendingIntent.getActivity(context, 7412, openCodexIntent(context), pendingFlags());
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(context, CHANNEL_COMPLETION) : new Notification.Builder(context);
         builder.setSmallIcon(com.termux.R.drawable.ic_service_notification)
             .setContentTitle("Codex \u4efb\u52a1\u5df2\u5b8c\u6210")
-            .setContentText("\u70b9\u51fb\u8fd4\u56de WebUI \u67e5\u770b\u7ed3\u679c")
+            .setContentText(CodexNativeRuntime.exists() ? "\u70b9\u51fb\u8fd4\u56de\u539f\u751f\u5bf9\u8bdd\u67e5\u770b\u7ed3\u679c" : "\u70b9\u51fb\u8fd4\u56de WebUI \u67e5\u770b\u7ed3\u679c")
             .setColor(Color.rgb(42, 119, 81))
             .setAutoCancel(true)
             .setContentIntent(pending);
@@ -111,22 +126,25 @@ public final class CodexOverlayService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? ACTION_SHOW : intent.getAction();
+        String action = intent == null ? ACTION_SYNC_KEEP_ALIVE : intent.getAction();
         if (ACTION_HIDE.equals(action)) {
             prefs.edit().putBoolean("overlay_enabled", false).apply();
-            stopSelfSafely();
-            return START_NOT_STICKY;
+            removeOverlayViews();
         }
-        if (!prefs.getBoolean("overlay_enabled", false)) {
+        boolean overlayEnabled = prefs.getBoolean("overlay_enabled", false);
+        boolean nativeTaskKeepAlive = prefs.getBoolean(PREF_NATIVE_TASK_KEEP_ALIVE, true)
+            && CodexNativeRuntime.exists() && CodexTaskStore.hasRunningTasks(this);
+        if (!overlayEnabled && !nativeTaskKeepAlive) {
             if (ACTION_TASK_COMPLETED.equals(action) && prefs.getBoolean("completion_notification", false)) {
                 showCompletionNotification(this);
             }
             stopSelfSafely();
             return START_NOT_STICKY;
         }
-        showOverlay();
+        if (overlayEnabled) showOverlay(); else removeOverlayViews();
+        startForeground(FOREGROUND_ID, foregroundNotification());
         if (ACTION_TASK_COMPLETED.equals(action)) {
-            if (prefs.getBoolean("completion_bubble", true)) showTaskBubble(true);
+            if (overlayEnabled && prefs.getBoolean("completion_bubble", true)) showTaskBubble(true);
             if (prefs.getBoolean("completion_notification", false)) showCompletionNotification(this);
         }
         return START_STICKY;
@@ -140,20 +158,20 @@ public final class CodexOverlayService extends Service {
     }
 
     private Notification foregroundNotification() {
-        Intent open = new Intent(this, CodexHomeActivity.class)
-            .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent pending = PendingIntent.getActivity(this, 7411, open, pendingFlags());
+        boolean nativeTask = prefs.getBoolean(PREF_NATIVE_TASK_KEEP_ALIVE, true)
+            && CodexNativeRuntime.exists() && CodexTaskStore.hasRunningTasks(this);
+        PendingIntent pending = PendingIntent.getActivity(this, 7411, openCodexIntent(this), pendingFlags());
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_BACKGROUND) : new Notification.Builder(this);
         return builder.setSmallIcon(com.termux.R.drawable.ic_service_notification)
-            .setContentTitle("Codex \u6b63\u5728\u540e\u53f0\u8fd0\u884c")
-            .setContentText("\u5df2\u4fdd\u6301 WebUI \u8fde\u63a5\u548c\u5185\u7f6e\u4ee3\u7406")
+            .setContentTitle(nativeTask ? "Codex \u539f\u751f\u4efb\u52a1\u6b63\u5728\u540e\u53f0\u8fd0\u884c" : "Codex \u6b63\u5728\u540e\u53f0\u8fd0\u884c")
+            .setContentText(nativeTask ? "\u70b9\u51fb\u8fd4\u56de\u539f\u751f\u5bf9\u8bdd\uff1b\u5df2\u542f\u7528 CPU \u548c Wi-Fi \u4fdd\u6301" : "\u5df2\u4fdd\u6301 WebUI \u8fde\u63a5\u548c\u5185\u7f6e\u4ee3\u7406")
             .setColor(Color.rgb(42, 119, 81))
             .setOngoing(true)
             .setContentIntent(pending)
             .build();
     }
+
 
     private static void ensureChannels(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
@@ -242,12 +260,17 @@ public final class CodexOverlayService extends Service {
         if (bubbleView != null) { try { windowManager.removeView(bubbleView); } catch (Exception ignored) {} bubbleView = null; bubbleParams = null; }
     }
 
-    private void openCodex() {
-        Intent intent = new Intent(this, CodexHomeActivity.class)
-            .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        startActivity(intent);
+    private static Intent openCodexIntent(Context context) {
+        Intent intent;
+        if (CodexNativeRuntime.exists()) {
+            intent = new Intent(context, CodexChatActivity.class);
+        } else {
+            intent = new Intent(context, CodexHomeActivity.class).setAction(CodexHomeActivity.ACTION_OPEN_WEBUI);
+        }
+        return intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
     }
+
+    private void openCodex() { startActivity(openCodexIntent(this)); }
 
     private void performGesture(String key, String fallback) {
         String action = prefs.getString(key, fallback);
@@ -255,7 +278,13 @@ public final class CodexOverlayService extends Service {
         else if ("open".equals(action)) { removeBubble(); openCodex(); }
         else if ("snap".equals(action)) snapToEdge();
         else if ("toggle_bubble".equals(action)) { if (bubbleView == null) showTaskBubble(false); else removeBubble(); }
-        else if ("hide_overlay".equals(action)) { prefs.edit().putBoolean("overlay_enabled", false).apply(); stopSelfSafely(); }
+        else if ("hide_overlay".equals(action)) {
+            prefs.edit().putBoolean("overlay_enabled", false).apply();
+            removeOverlayViews();
+            if (!CodexNativeRuntime.exists() || !prefs.getBoolean(PREF_NATIVE_TASK_KEEP_ALIVE, true)
+                    || !CodexTaskStore.hasRunningTasks(this)) stopSelfSafely();
+            else startForeground(FOREGROUND_ID, foregroundNotification());
+        }
     }
 
     private final class GestureTouchListener implements View.OnTouchListener {
@@ -338,12 +367,16 @@ public final class CodexOverlayService extends Service {
         wakeLock = null; wifiLock = null;
     }
 
-    private void stopSelfSafely() {
+    private void removeOverlayViews() {
         removeBubble();
         if (iconView != null) {
             try { windowManager.removeView(iconView); } catch (Exception ignored) {}
             iconView = null;
         }
+    }
+
+    private void stopSelfSafely() {
+        removeOverlayViews();
         releaseKeepAliveLocks();
         stopForeground(true);
         stopSelf();

@@ -1,6 +1,7 @@
 package com.termux.app;
 
 import android.app.Activity;
+import android.content.Context;
 
 import java.util.Map;
 
@@ -8,6 +9,7 @@ import java.util.Map;
 final class CodexNativeRuntime {
     private static CodexAppServerBridge bridge;
     private static String fingerprint;
+    private static Context appContext;
 
     private CodexNativeRuntime() {}
 
@@ -30,6 +32,7 @@ final class CodexNativeRuntime {
             String.valueOf(ultraSubagentLimit), String.valueOf(normalSubagentLimit),
             String.valueOf(transportEfforts), String.valueOf(preventRecursiveSubagents));
         if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
+        appContext = activity.getApplicationContext();
         if (bridge == null) {
             CodexTaskStore.markInterruptedTasks(activity.getApplicationContext());
             bridge = new CodexAppServerBridge(activity, listener);
@@ -40,6 +43,7 @@ final class CodexNativeRuntime {
         } else {
             bridge.rebind(activity, listener);
         }
+        CodexOverlayService.syncKeepAlive(appContext);
         return bridge;
     }
 
@@ -58,9 +62,15 @@ final class CodexNativeRuntime {
     }
 
     static synchronized void shutdown() {
+        Context context = appContext;
         if (bridge != null) bridge.stop();
         bridge = null;
         fingerprint = null;
+        if (context != null) {
+            CodexTaskStore.markInterruptedTasks(context);
+            CodexOverlayService.syncKeepAlive(context);
+        }
+        appContext = null;
     }
 
     private static String value(String value) { return value == null ? "" : value; }

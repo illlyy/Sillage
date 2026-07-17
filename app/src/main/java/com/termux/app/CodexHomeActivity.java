@@ -98,6 +98,7 @@ import org.json.JSONObject;
 public final class CodexHomeActivity extends Activity {
     static final String ACTION_OPEN_WEBUI = "com.ilyop.codex.OPEN_WEBUI";
     static final String ACTION_OPEN_TERMUX = "com.ilyop.codex.OPEN_TERMUX";
+    static final String ACTION_OPEN_SETTINGS = "com.ilyop.codex.OPEN_SETTINGS";
     private static final int OVERLAY_PERMISSION_REQUEST = 4111;
     private static final int STORAGE_PERMISSION_REQUEST = 4112;
     private ScrollView overlaySettingsPage;
@@ -305,6 +306,8 @@ public final class CodexHomeActivity extends Activity {
             startWebUi();
         } else if (ACTION_OPEN_TERMUX.equals(action)) {
             openInternalTerminal();
+        } else if (ACTION_OPEN_SETTINGS.equals(action)) {
+            showSettings();
         } else if (CodexShareActivity.ACTION_SHARE_TO_CURRENT_UI.equals(action)
             || CodexShareActivity.ACTION_SHARE_TO_NEW_UI.equals(action)) {
             startWebUi();
@@ -2058,6 +2061,15 @@ public final class CodexHomeActivity extends Activity {
         panel.addView(settingsAction("\u6dfb\u52a0 WebUI \u5230\u684c\u9762", "\u4ece\u684c\u9762\u4e00\u952e\u8fdb\u5165 Codex WebUI", "WebUI", () -> pinLauncherShortcut(false)));
         panel.addView(settingsAction("\u6dfb\u52a0 Termux \u5230\u684c\u9762", "\u4ece\u684c\u9762\u4e00\u952e\u542f\u52a8\u5185\u7f6e\u7ec8\u7aef", "CLI", () -> pinLauncherShortcut(true)));
         addSettingsSection(panel, "\u540e\u53f0\u4e0e\u63d0\u9192");
+        SettingToggle nativeKeepAlive = settingSwitch("\u539f\u751f\u4efb\u52a1\u540e\u53f0\u4fdd\u6301",
+            "\u4efb\u52a1\u6267\u884c\u65f6\u542f\u7528\u524d\u53f0\u670d\u52a1\u3001CPU \u5524\u9192\u9501\u548c Wi-Fi \u9501\uff1b\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u505c\u6b62",
+            prefs.getBoolean(CodexOverlayService.PREF_NATIVE_TASK_KEEP_ALIVE, true));
+        nativeKeepAlive.setOnCheckedChangeListener((button, checked) -> {
+            prefs.edit().putBoolean(CodexOverlayService.PREF_NATIVE_TASK_KEEP_ALIVE, checked).apply();
+            CodexOverlayService.syncKeepAlive(this);
+            Toast.makeText(this, checked ? "\u5df2\u5f00\u542f\u539f\u751f\u4efb\u52a1\u540e\u53f0\u4fdd\u6301" : "\u5df2\u5173\u95ed\u539f\u751f\u4efb\u52a1\u540e\u53f0\u4fdd\u6301", Toast.LENGTH_SHORT).show();
+        });
+        panel.addView(nativeKeepAlive, new LinearLayout.LayoutParams(RAISED, dp(88)));
         panel.addView(settingsAction("Codex \u60ac\u6d6e\u7a97", "\u53ef\u79fb\u52a8\u56fe\u6807\u3001\u540e\u53f0\u4fdd\u6d3b\u4e0e\u4efb\u52a1\u5b8c\u6210\u63d0\u9192",
             prefs.getBoolean("overlay_enabled", false) ? "\u5df2\u5f00\u542f" : "\u672a\u5f00\u542f", this::showOverlaySettings));
         addSettingsSection(panel, "\u6570\u636e");

@@ -451,7 +451,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onRenameConversation = ::renameConversation,
                     onDeleteConversation = ::deleteConversation,
                     onToggleFavorite = ::toggleFavorite,
-                    onBackHome = ::finish,
+                    onBackHome = ::openHomeSettings,
                     onOpenLegacyWebUi = ::openLegacyWebUi,
                 )
             }
@@ -793,6 +793,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.ready = false
         chatState.connectionLabel = "正在创建新对话…"
         bridge?.newConversation()
+    }
+
+    private fun openHomeSettings() {
+        startActivity(
+            Intent(this, CodexHomeActivity::class.java)
+                .setAction(CodexHomeActivity.ACTION_OPEN_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        )
+        finish()
     }
 
     private fun openLegacyWebUi() {

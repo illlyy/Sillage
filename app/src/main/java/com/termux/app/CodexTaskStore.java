@@ -2,6 +2,8 @@ package com.termux.app;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -87,6 +89,11 @@ final class CodexTaskStore {
         return tasks;
     }
 
+    static synchronized boolean hasRunningTasks(Context context) {
+        for (Task task : read(context)) if (RUNNING.equals(task.state)) return true;
+        return false;
+    }
+
     private static void update(Context context, String threadId, String title, String state) {
         List<Task> tasks = read(context);
         tasks.removeIf(task -> threadId.equals(task.threadId));
@@ -121,6 +128,8 @@ final class CodexTaskStore {
                 .put("state", task.state).put("updatedAt", task.updatedAt));
         } catch (Exception ignored) {}
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, array.toString()).apply();
+        Context appContext = context.getApplicationContext();
+        new Handler(Looper.getMainLooper()).post(() -> CodexOverlayService.syncKeepAlive(appContext));
     }
 
     private static String cleanTitle(String title, String threadId) {
