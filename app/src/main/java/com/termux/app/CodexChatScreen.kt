@@ -1067,7 +1067,7 @@ private fun RikkaEmptyState(
 @Composable
 private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatState, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}) {
     when (message.role) {
-        NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
+        NativeChatRole.USER -> RikkaUserMessage(message.content, message.skills, onEdit)
         NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onLoadSubagentHistory, onQuote, onReasoningAutoCollapse)
         NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
@@ -1075,10 +1075,31 @@ private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatSt
 }
 
 @Composable
-private fun RikkaUserMessage(text: String, onEdit: () -> Unit) {
+private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, onEdit: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        if (skills.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                skills.forEach { skill ->
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.82f),
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    ) {
+                        Row(Modifier.padding(horizontal = 9.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.Sparkles, null, Modifier.size(13.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(skill.name, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+        }
         Box {
             Surface(
                 modifier = Modifier.widthIn(max = 360.dp).combinedClickable(onClick = {}, onLongClick = { menuExpanded = true }),

@@ -928,10 +928,17 @@ final class CodexAppServerBridge {
                 JSONArray content = payload.optJSONArray("content");
                 if (content == null) continue;
                 StringBuilder text = new StringBuilder();
+                JSONArray referencedSkills = new JSONArray();
                 for (int i = 0; i < content.length(); i++) {
                     JSONObject part = content.optJSONObject(i);
                     if (part == null) continue;
                     String type = part.optString("type", "");
+                    if ("skill".equals(type)) {
+                        String name = part.optString("name", "");
+                        String path = part.optString("path", "");
+                        if (!name.isEmpty()) referencedSkills.put(new JSONObject().put("name", name).put("path", path));
+                        continue;
+                    }
                     if (!"input_text".equals(type) && !"output_text".equals(type)) continue;
                     text.append(part.optString("text", ""));
                 }
@@ -945,7 +952,11 @@ final class CodexAppServerBridge {
                     lastProcessIndex = messages.length() - 1;
                     reasoning.setLength(0); command.setLength(0); tools = new JSONArray();
                 }
-                if (!value.isEmpty()) messages.put(new JSONObject().put("role", role).put("content", value));
+                if (!value.isEmpty()) {
+                    JSONObject historyMessage = new JSONObject().put("role", role).put("content", value);
+                    if (referencedSkills.length() > 0) historyMessage.put("skills", referencedSkills);
+                    messages.put(historyMessage);
+                }
             }
         }
         return messages;

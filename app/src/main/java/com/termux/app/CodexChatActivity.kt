@@ -45,6 +45,7 @@ internal data class NativeChatMessage(
     val streaming: Boolean = false,
     val revealStartedAt: Long = 0L,
     val finalOnlyReveal: Boolean = false,
+    val skills: List<NativeSkill> = emptyList(),
 )
 
 internal class NativeChatState {
@@ -89,8 +90,8 @@ internal class NativeChatState {
         revision++
     }
 
-    fun addUser(text: String) {
-        messages.add(NativeChatMessage(role = NativeChatRole.USER, content = text))
+    fun addUser(text: String, skills: List<NativeSkill> = emptyList()) {
+        messages.add(NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList()))
         turnMessageStartIndex = messages.size
         busy = true
         processingLabel = "处理中"
@@ -169,6 +170,15 @@ internal class NativeChatState {
                 else -> continue
             }
             val content = item.optString("content").trim()
+            val messageSkills = buildList {
+                val skillArray = item.optJSONArray("skills") ?: JSONArray()
+                for (skillIndex in 0 until skillArray.length()) {
+                    val skill = skillArray.optJSONObject(skillIndex) ?: continue
+                    val name = skill.optString("name").trim()
+                    val path = skill.optString("path").trim()
+                    if (name.isNotEmpty()) add(NativeSkill(name, skill.optString("description"), path))
+                }
+            }
             if (role == NativeChatRole.ACTIVITY && content.startsWith("PLAN|")) {
                 runCatching {
                     val decoded = String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8)
@@ -178,7 +188,7 @@ internal class NativeChatState {
                 }
                 continue
             }
-            if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content))
+            if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content, skills = messageSkills))
         }
         // One snapshot mutation avoids recomposing the chat once for every historical item.
         messages.clear()
@@ -411,7 +421,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (chatState.conversationTitle == "新对话" && value.isNotBlank()) {
             chatState.conversationTitle = value.lineSequence().firstOrNull().orEmpty().trim().let { if (it.length > 28) it.take(27) + "…" else it }.ifBlank { "新对话" }
         }
-        chatState.addUser(value)
+        val referencedSkills = chatState.selectedSkills.toList()
+        chatState.addUser(value, referencedSkills)
         val attachments = JSONArray().also { array ->
             chatState.attachments.forEach { attachment ->
                 array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))
