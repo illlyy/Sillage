@@ -250,6 +250,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private val chatState = NativeChatState()
     private var bridge: CodexAppServerBridge? = null
     private var pendingConversationAnimationKey: String? = null
+    private var currentThreadId: String? = null
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -430,14 +431,28 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .putString("native_chat_mode_v1", chatState.selectedMode).apply()
     }
 
+    private fun goalPreferenceKey(threadId: String): String = "native_thread_goal_v1_$threadId"
+
+    private fun restoreGoalForThread(threadId: String) {
+        chatState.activeGoalObjective = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+            .getString(goalPreferenceKey(threadId), "").orEmpty()
+    }
+
     private fun setGoal(objective: String) {
         val value = objective.trim()
-        if (value.isEmpty() || !chatState.ready) return
+        val threadId = currentThreadId
+        if (value.isEmpty() || !chatState.ready || threadId.isNullOrBlank()) return
         chatState.activeGoalObjective = value
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(goalPreferenceKey(threadId), value).apply()
         bridge?.setThreadGoal(value)
     }
 
     private fun clearGoal() {
+        currentThreadId?.let { threadId ->
+            getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+                .remove(goalPreferenceKey(threadId)).apply()
+        }
         chatState.activeGoalObjective = ""
         bridge?.clearThreadGoal()
     }
@@ -545,6 +560,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     override fun onEvent(function: String, value: String) {
         when (function) {
             "onReady" -> {
+                currentThreadId = value
+                restoreGoalForThread(value)
                 chatState.ready = true
                 bridge?.loadSkills()
                 chatState.connectionLabel = "已连接"

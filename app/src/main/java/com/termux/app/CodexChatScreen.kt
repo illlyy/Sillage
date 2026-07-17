@@ -572,6 +572,8 @@ internal fun NativeChatScreen(
         WorkPanelDialog(
             state = state,
             onLoadSubagentHistory = onLoadSubagentHistory,
+            onEditGoal = { showGoalDialog = true },
+            onClearGoal = onClearGoal,
             onDismiss = { showWorkPanel = false },
         )
     }
@@ -1969,6 +1971,8 @@ private fun collectSubagentItems(state: NativeChatState, current: JSONObject): L
 private fun WorkPanelDialog(
     state: NativeChatState,
     onLoadSubagentHistory: (String) -> Unit,
+    onEditGoal: () -> Unit,
+    onClearGoal: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var entered by remember { mutableStateOf(false) }
@@ -2031,7 +2035,7 @@ private fun WorkPanelDialog(
                                         selectedAgentId = subagentKey(agent)
                                         if (thread.isNotBlank() && state.subagentHistories[thread] == null) onLoadSubagentHistory(thread)
                                     }
-                                } else WorkPlanView(state.planJson, state.planExplanation)
+                                } else WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, onEditGoal, onClearGoal)
                             }
                         } else {
                             val agent = agents.firstOrNull { subagentKey(it) == selectedAgentId }
@@ -2067,13 +2071,35 @@ private fun parsePlanItems(raw: String): List<JSONObject> = runCatching {
 }.getOrDefault(emptyList())
 
 @Composable
-private fun WorkPlanView(raw: String, explanation: String) {
+private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditGoal: () -> Unit, onClearGoal: () -> Unit) {
     val plan = remember(raw) { parsePlanItems(raw) }
-    if (plan.isEmpty()) {
+    if (plan.isEmpty() && goal.isBlank()) {
         WorkPanelEmpty("\u8fd8\u6ca1\u6709\u8ba1\u5212", "\u5207\u6362\u5230\u8ba1\u5212\u6a21\u5f0f\u5e76\u53d1\u9001\u4efb\u52a1\uff0cCodex \u7684\u6267\u884c\u8ba1\u5212\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002")
         return
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (goal.isNotBlank()) item(key = "active-goal") {
+            Surface(
+                modifier = Modifier.fillMaxWidth().clickable { onEditGoal() },
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            ) {
+                Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.Top) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)) {
+                        Icon(HugeIcons.LookTop, null, Modifier.padding(8.dp).size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                    Spacer(Modifier.width(11.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("\u6301\u7eed\u76ee\u6807", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                        Text(goal, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp, modifier = Modifier.padding(top = 3.dp))
+                    }
+                    IconButton(onClick = onClearGoal, modifier = Modifier.size(34.dp)) {
+                        Icon(HugeIcons.Cancel01, "\u6e05\u9664\u76ee\u6807", Modifier.size(16.dp))
+                    }
+                }
+            }
+        }
         if (explanation.isNotBlank()) item(key = "explanation") { Text(explanation, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 21.sp, modifier = Modifier.padding(bottom = 4.dp)) }
         itemsIndexed(plan, key = { index, item -> item.optString("step").ifBlank { index.toString() } }) { index, item ->
             val status = item.optString("status", "pending")
