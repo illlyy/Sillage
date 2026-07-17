@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -347,12 +348,16 @@ internal fun NativeChatScreen(
         snapshotFlow {
             val layout = listState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull()
-            Triple(listState.canScrollForward, layout.totalItemsCount, last?.offset?.plus(last.size) ?: 0)
-        }.collect { (canScrollForward, _, _) ->
-            if (followOutput && !listState.isScrollInProgress && canScrollForward && state.messages.isNotEmpty()) {
-                val visibleCount = minOf(historyLimit, state.messages.size)
-                val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-                listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
+            val overflow = (last?.offset?.plus(last.size) ?: 0) - layout.viewportEndOffset
+            Triple(listState.canScrollForward, layout.totalItemsCount, overflow)
+        }.collect { (canScrollForward, _, overflow) ->
+            if (followOutput && canScrollForward && overflow > 0 && state.messages.isNotEmpty()) {
+                // Follow the same physical distance by which the last item grew. Jumping
+                // to Int.MAX_VALUE on every wrapped line made output advance in 24dp steps.
+                listState.animateScrollBy(
+                    overflow.toFloat(),
+                    animationSpec = tween(durationMillis = 115, easing = LinearOutSlowInEasing),
+                )
             }
         }
     }
@@ -1060,8 +1065,17 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
             warmupMs += 30L
         }
 
-        while (latestStreaming.value || displayedText.length < latestText.value.length) {
+        // Some providers publish completion immediately before their last UI delta.
+        // Keep a short quiet-period drain so those late chunks cannot strand the UI at
+        // the first one or two characters.
+        var observedLength = latestText.value.length
+        var quietSince = android.os.SystemClock.uptimeMillis()
+        while (true) {
             val target = latestText.value
+            if (target.length != observedLength) {
+                observedLength = target.length
+                quietSince = android.os.SystemClock.uptimeMillis()
+            }
             if (!target.startsWith(displayedText)) {
                 // A server correction replaces the pending buffer without briefly drawing
                 // the stale completed paragraph above it.
@@ -1084,6 +1098,8 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
                 tailGeneration++
             }
             val remaining = latestText.value.length - displayedText.length
+            val quietFor = android.os.SystemClock.uptimeMillis() - quietSince
+            if (!latestStreaming.value && remaining <= 0 && quietFor >= 360L) break
             delay(if (remaining > 300) 38L else if (remaining > 80) 46L else 58L)
         }
 
