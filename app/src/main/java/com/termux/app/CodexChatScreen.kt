@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -1618,7 +1619,16 @@ private fun CollabAgentCapsule(item: JSONObject) {
             Spacer(Modifier.width(7.dp))
             Text(name, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(8.dp))
-            Text(status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.68f))
+            AnimatedContent(
+                targetState = status,
+                transitionSpec = {
+                    (fadeIn(tween(140)) + slideInVertically(tween(180, easing = LinearOutSlowInEasing)) { it / 3 }) togetherWith
+                        (fadeOut(tween(90)) + slideOutVertically(tween(120, easing = FastOutSlowInEasing)) { -it / 3 })
+                },
+                label = "subagentStatus",
+            ) { value ->
+                Text(value, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.68f))
+            }
             Spacer(Modifier.width(5.dp))
             Icon(HugeIcons.ArrowRight01, null, modifier = Modifier.size(14.dp))
         }
@@ -1629,8 +1639,13 @@ private fun CollabAgentCapsule(item: JSONObject) {
             properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = false),
         ) {
             LaunchedEffect(Unit) { panelEntered = true }
+            val scrimAlpha by animateFloatAsState(
+                targetValue = if (panelEntered) 0.16f else 0f,
+                animationSpec = tween(if (panelEntered) 180 else 150, easing = LinearEasing),
+                label = "subagentScrim",
+            )
             Box(Modifier.fillMaxSize()) {
-                Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.16f)).clickable(onClick = closePanel))
+                Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = scrimAlpha)).clickable(onClick = closePanel))
                 AnimatedVisibility(
                     visible = panelEntered,
                     modifier = Modifier.align(Alignment.CenterEnd),
@@ -1712,13 +1727,16 @@ private fun CollabAgentCapsule(item: JSONObject) {
 
 @Composable
 private fun AgentTimelineSection(title: String, value: String, monospace: Boolean = false) {
-    Row(modifier = Modifier.fillMaxWidth()) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+        Column(
+            modifier = Modifier.fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             Surface(modifier = Modifier.size(9.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {}
-            Box(Modifier.width(1.dp).height(42.dp).background(MaterialTheme.colorScheme.outlineVariant))
+            Box(Modifier.padding(top = 4.dp).width(1.dp).weight(1f).background(MaterialTheme.colorScheme.outlineVariant))
         }
         Spacer(Modifier.width(11.dp))
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).padding(bottom = 3.dp)) {
             Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(7.dp))
             if (monospace) {
