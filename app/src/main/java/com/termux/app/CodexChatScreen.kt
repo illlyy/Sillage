@@ -386,11 +386,13 @@ internal fun NativeChatScreen(
             val overflow = maxOf(measuredOverflow, unseenRunway)
             if (!listState.canScrollForward || overflow < 0.5f) continue
 
-            val baseVelocity = with(density) { 520.dp.toPx() }
-            val catchUpVelocity = (baseVelocity + overflow * 5.5f)
-                .coerceAtMost(with(density) { 1_900.dp.toPx() })
-            val distance = (catchUpVelocity * elapsedSeconds).coerceAtMost(overflow)
-            if (distance > 0f) listState.scrollBy(distance)
+            // Interpolate toward the growing bottom instead of moving by a fixed chunk.
+            // This makes the viewport track the same cadence as the text reveal and avoids
+            // the staircase motion caused by one scroll jump per incoming network delta.
+            val interpolation = (1f - kotlin.math.exp(-7.2f * elapsedSeconds)).coerceIn(0f, 1f)
+            val maxFrameDistance = with(density) { 1_080.dp.toPx() } * elapsedSeconds
+            val distance = (overflow * interpolation).coerceAtMost(maxFrameDistance).coerceAtMost(overflow)
+            if (distance > 0.25f) listState.scrollBy(distance)
         }
     }
 
@@ -504,6 +506,14 @@ internal fun NativeChatScreen(
                             }
                             if (state.busy && liveAssistantId == null) {
                                 item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory, {}) }
+                            }
+                            // A temporary runway lets streamed lines grow upward instead of
+                            // being pinned under the composer. It remains part of LazyColumn,
+                            // so manual scrolling and follow cancellation keep normal semantics.
+                            if (state.busy) {
+                                item(key = "stream-runway", contentType = "stream-runway") {
+                                    Spacer(Modifier.height(88.dp))
+                                }
                             }
                         }
                         AnimatedVisibility(
@@ -1164,8 +1174,8 @@ private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachment
 private fun FinalOnlyAnswerReveal(text: String, revealStartedAt: Long) {
     val shouldAnimate = revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 2_000L
     var revealed by remember(revealStartedAt) { mutableStateOf(!shouldAnimate) }
-    val alpha by animateFloatAsState(if (revealed) 1f else 0f, tween(360, easing = LinearOutSlowInEasing), label = "finalAnswerAlpha")
-    val blurRadius by animateDpAsState(if (revealed) 0.dp else 12.dp, tween(420, easing = FastOutSlowInEasing), label = "finalAnswerBlur")
+    val alpha by animateFloatAsState(if (revealed) 1f else 0f, tween(560, easing = LinearOutSlowInEasing), label = "finalAnswerAlpha")
+    val blurRadius by animateDpAsState(if (revealed) 0.dp else 12.dp, tween(640, easing = FastOutSlowInEasing), label = "finalAnswerBlur")
     LaunchedEffect(revealStartedAt) { revealed = true }
     Box(Modifier.fillMaxWidth().graphicsLayer { this.alpha = alpha }.blur(blurRadius)) {
         RichResponseText(text)
@@ -1249,10 +1259,10 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
     // continuous deltas cannot flash an entire line/paragraph as the old mask did.
     LaunchedEffect(tailGeneration) {
         if (tailGeneration == 0) return@LaunchedEffect
-        tailAlpha = 0.12f
-        repeat(14) { frame ->
-            delay(30L)
-            tailAlpha = 0.12f + 0.88f * ((frame + 1) / 14f)
+        tailAlpha = 0.08f
+        repeat(20) { frame ->
+            delay(32L)
+            tailAlpha = 0.08f + 0.92f * ((frame + 1) / 20f)
         }
     }
 
@@ -1393,6 +1403,38 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
 }
 
 @Composable
+private fun LiveReasoningText(text: String) {
+    var previousText by remember { mutableStateOf(text) }
+    var tailStart by remember { mutableIntStateOf(text.length) }
+    var tailAlpha by remember { mutableFloatStateOf(1f) }
+
+    LaunchedEffect(text) {
+        tailStart = if (text.startsWith(previousText)) previousText.length else 0
+        previousText = text
+        tailAlpha = 0.08f
+        repeat(20) { frame ->
+            delay(32L)
+            tailAlpha = 0.08f + 0.92f * ((frame + 1) / 20f)
+        }
+    }
+
+    val safeTailStart = tailStart.coerceIn(0, text.length)
+    val animatedText = androidx.compose.ui.text.buildAnnotatedString {
+        if (safeTailStart > 0) append(text.substring(0, safeTailStart))
+        withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = tailAlpha))) {
+            append(text.substring(safeTailStart))
+        }
+    }
+    Text(
+        text = animatedText,
+        modifier = Modifier.fillMaxWidth(),
+        style = MaterialTheme.typography.bodyMedium,
+        lineHeight = 22.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
@@ -1435,13 +1477,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
                         } else {
                             // Read the live snapshot directly. Buffering this text in a long-lived
                             // coroutine can miss replacement updates while the panel stays composed.
-                            Text(
-                                text = state.reasoningText,
-                                modifier = Modifier.fillMaxWidth(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                lineHeight = 22.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            LiveReasoningText(state.reasoningText)
                         }
                     }
                 }
