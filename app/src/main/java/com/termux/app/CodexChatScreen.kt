@@ -1398,6 +1398,8 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     } else elapsedSeconds
     val statusText = if (state.reasoningComplete) {
         "\u601d\u8003\u4e86 ${reasoningSeconds}s"
+    } else if (state.reasoningText.isBlank() && state.commandText.isBlank() && elapsedSeconds >= 12L) {
+        "\u7b49\u5f85\u6a21\u578b\u54cd\u5e94 ${elapsedSeconds}s"
     } else {
         "${state.processingLabel.ifBlank { "\u5904\u7406\u4e2d" }} ${elapsedSeconds}s"
     }

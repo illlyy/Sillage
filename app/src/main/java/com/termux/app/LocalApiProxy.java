@@ -30,6 +30,7 @@ import java.util.Map;
 final class LocalApiProxy {
     static final String CODEX_WIRE_API = "responses";
     private static final String TAG = "IlyopApiProxy";
+    static final int UPSTREAM_FIRST_BYTE_TIMEOUT_MS = 60_000;
     static final int UPSTREAM_IDLE_TIMEOUT_MS = 300_000;
     static final int MAX_CONCURRENT_UPSTREAM_REQUESTS = 32;
     private final String upstreamBase;
@@ -180,6 +181,10 @@ final class LocalApiProxy {
                 toolSummary, adaptChat ? "chat" : "responses", false, 0);
             HttpURLConnection connection = openUpstreamConnection(method, targetPath, headers, body, adaptChat ? "Responses->Chat" : "");
             int code = connection.getResponseCode();
+            // Headers arrived. From this point a reasoning model may legitimately spend
+            // longer between SSE events, so switch from the short connection/first-byte
+            // watchdog to the normal streaming idle timeout.
+            connection.setReadTimeout(UPSTREAM_IDLE_TIMEOUT_MS);
 
             // Many OpenAI-compatible providers (including DeepSeek endpoints) expose only
             // /chat/completions. If a selected Responses endpoint is absent, retry through
@@ -290,7 +295,9 @@ final class LocalApiProxy {
             }
             connection.disconnect();
             } catch (java.net.SocketTimeoutException timeout) {
-                Log.w(TAG, "upstream idle timeout after " + UPSTREAM_IDLE_TIMEOUT_MS + "ms responseStarted=" + responseStarted);
+                Log.w(TAG, (responseStarted ? "upstream stream idle timeout after " + UPSTREAM_IDLE_TIMEOUT_MS
+                    : "upstream first-byte timeout after " + UPSTREAM_FIRST_BYTE_TIMEOUT_MS)
+                    + "ms responseStarted=" + responseStarted);
                 if (!responseStarted) writeProxyError(client, 504, "upstream_timeout", "Model upstream stopped responding");
             } catch (Exception e) {
                 Log.e(TAG, "proxy request failed responseStarted=" + responseStarted, e);
@@ -310,7 +317,7 @@ final class LocalApiProxy {
             : target.openConnection());
         connection.setRequestMethod(method);
         connection.setConnectTimeout(30_000);
-        connection.setReadTimeout(UPSTREAM_IDLE_TIMEOUT_MS);
+        connection.setReadTimeout(UPSTREAM_FIRST_BYTE_TIMEOUT_MS);
         connection.setInstanceFollowRedirects(true);
         for (String[] header : headers) {
             String lower = header[0].toLowerCase(Locale.US);
