@@ -41,6 +41,7 @@ internal data class NativeChatMessage(
     val content: String,
     val streaming: Boolean = false,
     val revealStartedAt: Long = 0L,
+    val finalOnlyReveal: Boolean = false,
 )
 
 internal class NativeChatState {
@@ -98,6 +99,20 @@ internal class NativeChatState {
                 ),
             )
         }
+        revision++
+    }
+
+    fun appendAssistantFinal(text: String) {
+        if (text.isBlank()) return
+        messages.add(
+            NativeChatMessage(
+                role = NativeChatRole.ASSISTANT,
+                content = text,
+                streaming = false,
+                revealStartedAt = System.currentTimeMillis(),
+                finalOnlyReveal = true,
+            ),
+        )
         revision++
     }
 
@@ -450,6 +465,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 pendingConversationAnimationKey = null
             }
             "onDelta" -> chatState.appendAssistant(value)
+            "onFinalAnswer" -> chatState.appendAssistantFinal(value)
             "onReasoningDelta" -> { chatState.reasoningText += value; chatState.revision++ }
             "onReasoningComplete" -> { if (value.length > chatState.reasoningText.length) chatState.reasoningText = value; chatState.revision++ }
             "onCommandDelta" -> { chatState.commandText += value; chatState.revision++ }

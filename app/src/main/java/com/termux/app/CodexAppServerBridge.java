@@ -489,7 +489,7 @@ final class CodexAppServerBridge {
             String itemId = item == null ? "" : item.optString("id", "");
             if (itemId.isEmpty() || !streamedAgentItemIds.remove(itemId)) {
                 String finalText = extractAgentMessageText(item);
-                if (!finalText.isEmpty()) emit("onDelta", finalText);
+                if (!finalText.isEmpty()) emit("onFinalAnswer", finalText);
             }
             scheduleMissingTurnCompletion(params);
         } else if (("item/reasoning/summaryTextDelta".equals(method) || "item/reasoning/textDelta".equals(method)) && params != null) {

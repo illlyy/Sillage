@@ -7,6 +7,7 @@ import android.util.Base64
 import android.os.Build
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.blur
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -303,7 +304,11 @@ internal fun NativeChatScreen(
     }
 
     LaunchedEffect(listDragged) {
-        if (!listDragged) followOutput = !listState.canScrollForward
+        if (listDragged) {
+            followOutput = false
+        } else if (!listState.canScrollForward) {
+            followOutput = true
+        }
     }
 
     LaunchedEffect(state.conversationAnimationKey) {
@@ -321,6 +326,14 @@ internal fun NativeChatScreen(
             val visibleCount = minOf(historyLimit, state.messages.size)
             val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
             listState.animateScrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
+        }
+    }
+
+    LaunchedEffect(inputHeightPx) {
+        if (followOutput && !listDragged && state.messages.isNotEmpty()) {
+            val visibleCount = minOf(historyLimit, state.messages.size)
+            val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
+            listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
         }
     }
 
@@ -958,7 +971,7 @@ private fun RikkaEmptyState(
 private fun RikkaMessageItem(message: NativeChatMessage, onEdit: () -> Unit, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     when (message.role) {
         NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
-        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, message.revealStartedAt, onRetry, onQuote)
+        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, onRetry, onQuote)
         NativeChatRole.ACTIVITY -> RikkaActivityMessage(message.content)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
@@ -998,7 +1011,23 @@ private fun RikkaUserMessage(text: String, onEdit: () -> Unit) {
 
 
 @Composable
-private fun StreamingResponseText(text: String, streaming: Boolean, revealStartedAt: Long) {
+private fun FinalOnlyAnswerReveal(text: String, revealStartedAt: Long) {
+    val shouldAnimate = revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 2_000L
+    var revealed by remember(revealStartedAt) { mutableStateOf(!shouldAnimate) }
+    val alpha by animateFloatAsState(if (revealed) 1f else 0f, tween(360, easing = LinearOutSlowInEasing), label = "finalAnswerAlpha")
+    val blurRadius by animateDpAsState(if (revealed) 0.dp else 12.dp, tween(420, easing = FastOutSlowInEasing), label = "finalAnswerBlur")
+    LaunchedEffect(revealStartedAt) { revealed = true }
+    Box(Modifier.fillMaxWidth().graphicsLayer { this.alpha = alpha }.blur(blurRadius)) {
+        RichResponseText(text)
+    }
+}
+
+@Composable
+private fun StreamingResponseText(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean) {
+    if (finalOnlyReveal) {
+        FinalOnlyAnswerReveal(text, revealStartedAt)
+        return
+    }
     val latestText = rememberUpdatedState(text)
     val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
     var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
@@ -1067,7 +1096,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
 }
 
 @Composable
-private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStartedAt: Long, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1078,7 +1107,7 @@ private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStarte
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
-                StreamingResponseText(text, streaming, revealStartedAt)
+                StreamingResponseText(text, streaming, revealStartedAt, finalOnlyReveal)
                 if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(7.dp))
