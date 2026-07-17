@@ -1311,6 +1311,17 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
             Column {
                 if (state.reasoningText.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { SmoothReasoningText(state.reasoningText) }
                 if (state.commandText.isNotBlank()) Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) { SelectionContainer { Text(state.commandText, modifier = Modifier.padding(10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
+                if (state.liveSubagents.isNotEmpty()) {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp),
+                    ) {
+                        state.liveSubagents.forEach { raw ->
+                            runCatching { JSONObject(raw) }.getOrNull()?.let { CollabAgentCapsule(it) }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1561,8 +1572,21 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
 
 @Composable
 private fun CollabAgentCapsule(item: JSONObject) {
-    val name = item.optString("agentName", item.optString("name", item.optString("agent", "???")))
-    val status = item.optString("status", "??").ifBlank { "??" }
+    val tool = item.optString("tool", "")
+    val agentId = item.optString("agentThreadId", item.optJSONArray("receiverThreadIds")?.optString(0).orEmpty())
+    val fallbackName = when (tool) {
+        "spawn_agent", "spawnAgent" -> "????"
+        "wait", "wait_agent" -> "?????"
+        "send_input", "sendInput" -> "?????"
+        else -> if (agentId.isNotBlank()) "??? ${agentId.take(6)}" else "???"
+    }
+    val name = item.optString("agentName", item.optString("name", item.optString("agent", fallbackName)))
+    val rawStatus = item.optString("status", "completed")
+    val status = when (rawStatus.lowercase()) {
+        "inprogress", "running", "started" -> "???"
+        "failed", "error" -> "??"
+        else -> "??"
+    }
     val detail = item.optString("reasoning", item.optString("detail", item.optString("output", "")))
         .ifBlank { item.toString(2) }
     var panelVisible by remember { mutableStateOf(false) }

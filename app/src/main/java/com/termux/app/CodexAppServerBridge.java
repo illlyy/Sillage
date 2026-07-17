@@ -470,6 +470,13 @@ final class CodexAppServerBridge {
         String method = message.optString("method", "");
         JSONObject params = message.optJSONObject("params");
         logCollabAgentEvent(method, params);
+        if (("item/started".equals(method) || "item/completed".equals(method)) && params != null) {
+            JSONObject liveItem = params.optJSONObject("item");
+            String liveType = liveItem == null ? "" : liveItem.optString("type", "");
+            if ("collabAgentToolCall".equals(liveType) || "subAgentActivity".equals(liveType)) {
+                emit("onSubagentEvent", liveItem.toString());
+            }
+        }
         if ("item/agentMessage/delta".equals(method) && params != null) {
             String itemId = params.optString("itemId", "");
             if (!itemId.isEmpty()) streamedAgentItemIds.add(itemId);

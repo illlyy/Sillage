@@ -50,6 +50,7 @@ internal class NativeChatState {
     val modelOptions = mutableStateListOf<NativeModelOption>()
     val attachments = mutableStateListOf<NativeAttachment>()
     val toolDetails = mutableStateListOf<String>()
+    val liveSubagents = mutableStateListOf<String>()
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
     var ready by mutableStateOf(false)
@@ -84,6 +85,7 @@ internal class NativeChatState {
         reasoningCompletedAt = 0L
         commandText = ""
         toolDetails.clear()
+        liveSubagents.clear()
         turnStartedAt = System.currentTimeMillis()
         revision++
     }
@@ -168,6 +170,19 @@ internal class NativeChatState {
             "webSearch" -> "正在搜索"
             else -> "处理中"
         }
+        revision++
+    }
+
+    fun updateSubagent(raw: String) {
+        val item = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val key = item.optString("id", item.optString("agentThreadId", item.optString("tool", raw)))
+        val index = liveSubagents.indexOfFirst { existing ->
+            runCatching {
+                val value = JSONObject(existing)
+                value.optString("id", value.optString("agentThreadId", value.optString("tool", existing))) == key
+            }.getOrDefault(false)
+        }
+        if (index >= 0) liveSubagents[index] = item.toString() else liveSubagents.add(item.toString())
         revision++
     }
 
@@ -327,6 +342,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
         chatState.toolDetails.clear()
+        chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
         chatState.turnMessageStartIndex = chatState.messages.size
         bridge?.editTurn(value, chatState.selectedModel, chatState.selectedEffort, rollbackTurns)
@@ -345,6 +361,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
         chatState.toolDetails.clear()
+        chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
         chatState.turnMessageStartIndex = chatState.messages.size
         bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]")
@@ -492,6 +509,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.revision++
             }
             "onToolComplete" -> { chatState.toolDetails.add(value); chatState.revision++ }
+            "onSubagentEvent" -> chatState.updateSubagent(value)
             "onItem" -> chatState.addActivity(value)
             "onTurnComplete" -> {
                 chatState.completeTurn()
