@@ -40,6 +40,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -969,7 +971,9 @@ private fun RikkaUserMessage(text: String, onEdit: () -> Unit) {
                 shape = RoundedCornerShape(22.dp, 22.dp, 6.dp, 22.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
             ) {
-                SelectionContainer { Text(text, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), lineHeight = 21.sp) }
+                SelectionContainer {
+                    Text(text, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.bodyLarge, lineHeight = 24.sp, letterSpacing = 0.1.sp)
+                }
             }
             DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                 DropdownMenuItem(
@@ -1028,6 +1032,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean) {
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodyLarge,
             lineHeight = 24.sp,
+            letterSpacing = 0.1.sp,
             color = MaterialTheme.colorScheme.onSurface,
         )
     } else {
@@ -1044,15 +1049,14 @@ private fun RikkaAssistantMessage(text: String, streaming: Boolean, onRetry: (()
         Column(
             modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp).combinedClickable(onClick = {}, onLongClick = { menuExpanded = true }),
         ) {
-            Row(verticalAlignment = Alignment.Top) {
-                Surface(modifier = Modifier.size(32.dp), shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) { Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, modifier = Modifier.size(18.dp)) } }
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("默认助手", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(6.dp)); StreamingResponseText(text, streaming)
-                    if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp); Spacer(Modifier.width(7.dp)); Text("正在生成", style = MaterialTheme.typography.labelSmall)
-                    }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+                StreamingResponseText(text, streaming)
+                if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(7.dp))
+                    Text("\u6b63\u5728\u751f\u6210", style = MaterialTheme.typography.labelSmall)
                 }
             }
             MessageActions(text = text, onRetry = onRetry, allowShare = true)
@@ -1238,7 +1242,11 @@ private fun RichMarkdownText(text: String) {
         factory = { android.widget.TextView(it).apply {
             setTextIsSelectable(true)
             textSize = 16f
-            setLineSpacing(0f, 1.25f)
+            includeFontPadding = false
+            letterSpacing = 0.01f
+            setLineSpacing(resources.displayMetrics.density * 4f, 1f)
+            breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
+            hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
             linksClickable = true
             setTextColor(android.graphics.Color.rgb(45, 40, 42))
         } },
@@ -1569,18 +1577,19 @@ private fun RikkaChatInput(
     onSend: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val inputShape = if (imeVisible) RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = 0.dp, bottomStart = 0.dp) else MaterialTheme.shapes.largeIncreased
+    val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
     Surface(modifier = modifier, color = Color.Transparent) {
         Column(
-            modifier = Modifier
-                .imePadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+            modifier = insetModifier.padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = if (imeVisible) 0.dp else 8.dp),
         ) {
             Surface(
                 modifier = Modifier.fillMaxWidth().animateContentSize(
                     animationSpec = spring(dampingRatio = 0.90f, stiffness = 520f),
                 ),
-                shape = MaterialTheme.shapes.largeIncreased,
+                shape = inputShape,
                 tonalElevation = 0.dp,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
