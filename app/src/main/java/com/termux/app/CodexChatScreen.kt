@@ -391,6 +391,15 @@ internal fun NativeChatScreen(
                             onPrompt = onInputChange,
                         )
                     } else {
+                        val retryPrompts = remember(state.messages.size, state.conversationAnimationKey) {
+                            buildMap<String, String> {
+                                var lastUser: String? = null
+                                state.messages.forEach { message ->
+                                    if (message.role == NativeChatRole.USER) lastUser = message.content
+                                    else if (message.role == NativeChatRole.ASSISTANT || message.role == NativeChatRole.ERROR) lastUser?.let { put(message.id, it) }
+                                }
+                            }
+                        }
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
@@ -398,8 +407,12 @@ internal fun NativeChatScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            itemsIndexed(state.messages, key = { _, message -> message.id }) { index, message ->
-                                val previousUser = if (message.role == NativeChatRole.ASSISTANT || message.role == NativeChatRole.ERROR) state.messages.subList(0, index).lastOrNull { it.role == NativeChatRole.USER }?.content else null
+                            itemsIndexed(
+                                items = state.messages,
+                                key = { _, message -> message.id },
+                                contentType = { _, message -> message.role },
+                            ) { _, message ->
+                                val previousUser = retryPrompts[message.id]
                                 RikkaMessageItem(
                                     message = message,
                                     onEdit = { editMessage = message },
@@ -978,22 +991,22 @@ private fun StreamingResponseText(text: String, streaming: Boolean) {
                 }
                 displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
             }
-            delay(24L)
+            delay(32L)
         }
     }
 
     if (streaming) {
         // Full Markwon/LaTeX parsing on every token is expensive and causes repeated remeasure.
         // Render a stable lightweight surface while streaming, then promote to rich Markdown once.
-        SelectionContainer {
-            Text(
-                text = displayedText,
-                modifier = Modifier.fillMaxWidth(),
-                style = MaterialTheme.typography.bodyLarge,
-                lineHeight = 24.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        }
+        // Match RikkaHub's approach: do not register selectable text while its layout is
+        // changing every frame. Selection is restored automatically after completion.
+        Text(
+            text = displayedText,
+            modifier = Modifier.fillMaxWidth(),
+            style = MaterialTheme.typography.bodyLarge,
+            lineHeight = 24.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     } else {
         RichResponseText(text)
     }
@@ -1180,17 +1193,23 @@ private fun RikkaCodeBlock(language: String, code: String) {
     }
 }
 
-@Composable
-private fun RichMarkdownText(text: String) {
-    val context = LocalContext.current
-    val markwon = remember(context) {
-        Markwon.builder(context)
+private object NativeMarkdownRenderer {
+    @Volatile private var renderer: Markwon? = null
+    fun get(context: android.content.Context): Markwon = renderer ?: synchronized(this) {
+        renderer ?: Markwon.builder(context)
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(LinkifyPlugin.create())
             .usePlugin(MarkwonInlineParserPlugin.create())
             .usePlugin(JLatexMathPlugin.create(42f) { builder -> builder.inlinesEnabled(true) })
             .build()
+            .also { renderer = it }
     }
+}
+
+@Composable
+private fun RichMarkdownText(text: String) {
+    val context = LocalContext.current
+    val markwon = remember(context.applicationContext) { NativeMarkdownRenderer.get(context.applicationContext) }
     AndroidView(
         modifier = Modifier.fillMaxWidth(),
         factory = { android.widget.TextView(it).apply {
@@ -1200,7 +1219,12 @@ private fun RichMarkdownText(text: String) {
             linksClickable = true
             setTextColor(android.graphics.Color.rgb(45, 40, 42))
         } },
-        update = { view -> markwon.setMarkdown(view, text) },
+        update = { view ->
+            if (view.tag != text) {
+                view.tag = text
+                markwon.setMarkdown(view, text)
+            }
+        },
     )
 }
 
@@ -1879,13 +1903,7 @@ private fun LiquidEffortSlider(
             val trackWidthPx = constraints.maxWidth.toFloat()
             val segmentPx = trackWidthPx / steps
             val progress = (visualIndex / steps).coerceIn(0f, 1f)
-            Box(Modifier.fillMaxWidth().height(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f)).pointerInput(options) {
-                detectTapGestures { offset ->
-                    val target = ((offset.x / size.width) * steps).coerceIn(0f, steps.toFloat())
-                    onPreview(options[target.roundToInt().coerceIn(options.indices)])
-                    settle(target, commit = true)
-                }
-            })
+            Box(Modifier.fillMaxWidth().height(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f)))
             Box(Modifier.fillMaxWidth(progress.coerceAtLeast(0.02f)).height(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 options.forEachIndexed { index, _ -> Box(Modifier.size(if (index == previewIndex) 7.dp else 5.dp).clip(CircleShape).background(if (index <= visualIndex + 0.01f) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f))) }
@@ -1894,27 +1912,54 @@ private fun LiquidEffortSlider(
                 modifier = Modifier.size(42.dp, 28.dp).graphicsLayer {
                     translationX = (progress * (trackWidthPx - size.width)).coerceIn(0f, (trackWidthPx - size.width).coerceAtLeast(0f))
                     scaleX = thumbScale; scaleY = if (dragging) 1.10f else thumbScale
-                }.pointerInput(options) {
-                    detectDragGestures(
-                        onDragStart = { updateDragging(true) },
-                        onDragCancel = { updateDragging(false); settle(options.indexOf(selected).coerceAtLeast(0).toFloat(), commit = false) },
-                        onDragEnd = { updateDragging(false); settle(visualIndex, commit = true) },
-                    ) { change, amount ->
-                        change.consume()
-                        visualIndex = (visualIndex + amount.x / segmentPx).coerceIn(0f, steps.toFloat())
-                        onPreview(options[visualIndex.roundToInt().coerceIn(options.indices)])
-                    }
                 },
                 shape = CircleShape, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = if (dragging) 0.18f else 0.10f)),
                 shadowElevation = if (dragging) 7.dp else 3.dp,
             ) { Box(contentAlignment = Alignment.Center) { Box(Modifier.size(25.dp, 12.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = if (dragging) 0.22f else 0.14f))) } }
+            // Keep the gesture target fixed across the full track. A translated graphicsLayer does
+            // not move hit-testing bounds, which made the visually moved thumb fail on the next drag.
+            Box(
+                Modifier.fillMaxWidth().height(46.dp)
+                    .pointerInput(options, selected) {
+                        detectTapGestures { offset ->
+                            val target = ((offset.x / size.width) * steps).coerceIn(0f, steps.toFloat())
+                            onPreview(options[target.roundToInt().coerceIn(options.indices)])
+                            settle(target, commit = true)
+                        }
+                    }
+                    .pointerInput(options, selected) {
+                        var gestureIndex = visualIndex
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                settleJob?.cancel()
+                                updateDragging(true)
+                                gestureIndex = ((offset.x / size.width) * steps).coerceIn(0f, steps.toFloat())
+                                visualIndex = gestureIndex
+                                onPreview(options[gestureIndex.roundToInt().coerceIn(options.indices)])
+                            },
+                            onDragCancel = {
+                                updateDragging(false)
+                                settle(options.indexOf(selected).coerceAtLeast(0).toFloat(), commit = false)
+                            },
+                            onDragEnd = {
+                                updateDragging(false)
+                                settle(gestureIndex, commit = true)
+                            },
+                        ) { change, _ ->
+                            change.consume()
+                            gestureIndex = ((change.position.x / size.width) * steps).coerceIn(0f, steps.toFloat())
+                            visualIndex = gestureIndex
+                            onPreview(options[gestureIndex.roundToInt().coerceIn(options.indices)])
+                        }
+                    },
+            )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             options.forEachIndexed { index, effort ->
                 val active = index == previewIndex
-                val scale by animateFloatAsState(if (active && dragging) 1.10f else 1f, spring(dampingRatio = 0.76f, stiffness = 540f), label = "effortTickScale")
-                Text(effortLabel(effort), modifier = Modifier.graphicsLayer { scaleX = scale; scaleY = scale }, style = MaterialTheme.typography.labelSmall, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                val tickScale = if (active && dragging) 1.08f else 1f
+                Text(effortLabel(effort), modifier = Modifier.graphicsLayer { scaleX = tickScale; scaleY = tickScale }, style = MaterialTheme.typography.labelSmall, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
