@@ -62,6 +62,7 @@ internal class NativeChatState {
     var revision by mutableIntStateOf(0)
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
+    var reasoningComplete by mutableStateOf(false)
     var commandText by mutableStateOf("")
     var turnStartedAt by mutableStateOf(0L)
     var turnMessageStartIndex by mutableIntStateOf(0)
@@ -78,6 +79,7 @@ internal class NativeChatState {
         busy = true
         processingLabel = "处理中"
         reasoningText = ""
+        reasoningComplete = false
         commandText = ""
         toolDetails.clear()
         turnStartedAt = System.currentTimeMillis()
@@ -174,7 +176,7 @@ internal class NativeChatState {
                 .toString()
             val process = "PROCESS2|" + Base64.encodeToString(payload.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
             val assistantIndex = (turnMessageStartIndex until messages.size).firstOrNull { messages[it].role == NativeChatRole.ASSISTANT } ?: messages.size
-            messages.add(assistantIndex, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process))
+            messages.add(assistantIndex, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process, revealStartedAt = System.currentTimeMillis()))
         }
         val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT }
         if (lastAssistant >= 0) {
@@ -467,7 +469,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             "onDelta" -> chatState.appendAssistant(value)
             "onFinalAnswer" -> chatState.appendAssistantFinal(value)
             "onReasoningDelta" -> { chatState.reasoningText += value; chatState.revision++ }
-            "onReasoningComplete" -> { if (value.length > chatState.reasoningText.length) chatState.reasoningText = value; chatState.revision++ }
+            "onReasoningComplete" -> {
+                if (value.length > chatState.reasoningText.length) chatState.reasoningText = value
+                chatState.reasoningComplete = true
+                chatState.revision++
+            }
             "onCommandDelta" -> { chatState.commandText += value; chatState.revision++ }
             "onCommandComplete" -> {
                 chatState.toolDetails.add(value)

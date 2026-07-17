@@ -147,7 +147,6 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -412,6 +411,7 @@ internal fun NativeChatScreen(
                             state.messages.takeLast(historyLimit)
                         }
                         val hiddenMessageCount = state.messages.size - visibleMessages.size
+                        val liveAssistantId = if (state.busy) visibleMessages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }?.id else null
                         val retryPrompts = remember(visibleMessages, state.conversationAnimationKey) {
                             buildMap<String, String> {
                                 var lastUser: String? = null
@@ -444,6 +444,8 @@ internal fun NativeChatScreen(
                                 val previousUser = retryPrompts[message.id]
                                 RikkaMessageItem(
                                     message = message,
+                                    liveState = state.takeIf { message.id == liveAssistantId },
+                                    elapsedSeconds = elapsedSeconds,
                                     onEdit = { editMessage = message },
                                     onRetry = previousUser?.let { prompt -> { onRetry(prompt) } },
                                     onQuote = { quoted ->
@@ -452,7 +454,7 @@ internal fun NativeChatScreen(
                                     },
                                 )
                             }
-                            if (state.busy) {
+                            if (state.busy && liveAssistantId == null) {
                                 item("processing") { ProcessingPanel(state, elapsedSeconds) }
                             }
                         }
@@ -973,11 +975,11 @@ private fun RikkaEmptyState(
 }
 
 @Composable
-private fun RikkaMessageItem(message: NativeChatMessage, onEdit: () -> Unit, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaMessageItem(message: NativeChatMessage, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     when (message.role) {
         NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
-        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, onRetry, onQuote)
-        NativeChatRole.ACTIVITY -> RikkaActivityMessage(message.content)
+        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onQuote)
+        NativeChatRole.ACTIVITY -> RikkaActivityMessage(message)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
 }
@@ -1036,9 +1038,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
     val latestText = rememberUpdatedState(text)
     val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
     var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
-    var revealedTailLength by remember { mutableIntStateOf(0) }
     var showRichText by remember { mutableStateOf(!animateReveal) }
-    val tailAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
 
     LaunchedEffect(streaming, animateReveal) {
         if (!animateReveal) {
@@ -1062,7 +1062,6 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
                     else -> 2
                 }
                 val nextLength = (displayedText.length + step).coerceAtMost(target.length)
-                revealedTailLength = nextLength - displayedText.length
                 displayedText = target.take(nextLength)
             }
             delay(if (streaming) 48L else 36L)
@@ -1072,23 +1071,9 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
         showRichText = true
     }
 
-    LaunchedEffect(displayedText) {
-        if (displayedText.isNotEmpty() && !showRichText) {
-            tailAlpha.snapTo(0.42f)
-            tailAlpha.animateTo(1f, tween(150, easing = LinearOutSlowInEasing))
-        }
-    }
-
     if (!showRichText) {
-        val stableEnd = (displayedText.length - revealedTailLength).coerceAtLeast(0)
-        val animatedText = androidx.compose.ui.text.buildAnnotatedString {
-            append(displayedText.substring(0, stableEnd))
-            withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = tailAlpha.value))) {
-                append(displayedText.substring(stableEnd))
-            }
-        }
         Text(
-            text = animatedText,
+            text = displayedText,
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodyLarge,
             lineHeight = 24.sp,
@@ -1101,7 +1086,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
 }
 
 @Composable
-private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1110,6 +1095,10 @@ private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStarte
             modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp).combinedClickable(onClick = {}, onLongClick = { menuExpanded = true }),
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
+                if (liveState != null) {
+                    ProcessingPanel(liveState, elapsedSeconds)
+                    Spacer(Modifier.height(6.dp))
+                }
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
                 StreamingResponseText(text, streaming, revealStartedAt, finalOnlyReveal)
@@ -1182,8 +1171,33 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
 }
 
 @Composable
+private fun SmoothReasoningText(text: String) {
+    val latest = rememberUpdatedState(text)
+    var displayed by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val target = latest.value
+            if (!target.startsWith(displayed)) displayed = target
+            else if (displayed.length < target.length) {
+                val pending = target.length - displayed.length
+                val step = when { pending > 160 -> 10; pending > 64 -> 6; pending > 20 -> 4; else -> 2 }
+                displayed = target.take((displayed.length + step).coerceAtMost(target.length))
+            }
+            delay(32L)
+        }
+    }
+    Text(displayed, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium, lineHeight = 22.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long) {
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(true) }
+    LaunchedEffect(state.reasoningComplete) {
+        if (state.reasoningComplete) {
+            delay(140L)
+            expanded = false
+        }
+    }
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp),
@@ -1196,7 +1210,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long) {
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
             Column {
-                if (state.reasoningText.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(state.reasoningText) }
+                if (state.reasoningText.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { SmoothReasoningText(state.reasoningText) }
                 if (state.commandText.isNotBlank()) Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) { SelectionContainer { Text(state.commandText, modifier = Modifier.padding(10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
             }
         }
@@ -1342,7 +1356,8 @@ private fun MarkdownLikeText(text: String) {
 }
 
 @Composable
-private fun RikkaActivityMessage(text: String) {
+private fun RikkaActivityMessage(message: NativeChatMessage) {
+    val text = message.content
     if (text.startsWith("NOTICE|")) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)) {
@@ -1362,7 +1377,9 @@ private fun RikkaActivityMessage(text: String) {
     val reasoning = payload?.optString("reasoning").orEmpty()
     val command = payload?.optString("command").orEmpty()
     val tools = payload?.optJSONArray("tools")
-    var expanded by remember { mutableStateOf(false) }
+    val autoCollapse = message.revealStartedAt > 0L && System.currentTimeMillis() - message.revealStartedAt < 2_000L
+    var expanded by remember(message.id) { mutableStateOf(autoCollapse) }
+    LaunchedEffect(message.id) { if (autoCollapse) { delay(220L); expanded = false } }
     Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
         Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(HugeIcons.Zap, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
