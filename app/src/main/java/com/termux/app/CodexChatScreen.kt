@@ -1271,11 +1271,12 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
             label = "streamToMarkdown",
         ) { rich ->
             if (!rich) {
-                FadingTailText(
+                ChunkedLiveText(
                     text = displayedText,
                     tailStart = tailStart,
                     generation = tailGeneration,
                     reasoning = false,
+                    animateTail = true,
                 )
             } else {
                 RichResponseText(text)
@@ -1381,11 +1382,42 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
     }
 }
 
+private data class LiveTextChunk(val start: Int, val text: String)
+
+private fun splitLiveText(text: String, targetSize: Int = 520, maxSize: Int = 760): List<LiveTextChunk> {
+    if (text.isEmpty()) return emptyList()
+    val chunks = ArrayList<LiveTextChunk>((text.length / targetSize) + 1)
+    var start = 0
+    while (text.length - start > maxSize) {
+        val target = (start + targetSize).coerceAtMost(text.length)
+        val ceiling = (start + maxSize).coerceAtMost(text.length)
+        var end = text.indexOf('\n', target).let { if (it in target until ceiling) it + 1 else -1 }
+        if (end < 0) {
+            end = text.lastIndexOf('\n', ceiling - 1).let { if (it > start + targetSize / 2) it + 1 else ceiling }
+        }
+        // Never split between a UTF-16 surrogate pair.
+        if (end < text.length && end > start && Character.isHighSurrogate(text[end - 1])) end--
+        chunks.add(LiveTextChunk(start, text.substring(start, end)))
+        start = end
+    }
+    if (start < text.length) chunks.add(LiveTextChunk(start, text.substring(start)))
+    return chunks
+}
+
+@Composable
+private fun StableLiveTextChunk(text: String, reasoning: Boolean) {
+    Text(
+        text = text,
+        modifier = Modifier.fillMaxWidth(),
+        style = if (reasoning) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
+        lineHeight = if (reasoning) 22.sp else 24.sp,
+        letterSpacing = if (reasoning) 0.sp else 0.1.sp,
+        color = if (reasoning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+    )
+}
+
 @Composable
 private fun FadingTailText(text: String, tailStart: Int, generation: Int, reasoning: Boolean) {
-    // Recreating only this keyed animation starts the new tail dimmed on its very first
-    // frame. The previous implementation drew it opaque once and dimmed it one frame
-    // later from LaunchedEffect, which was the visible flash.
     androidx.compose.runtime.key(generation) {
         var visible by remember { mutableStateOf(false) }
         val tailAlpha by animateFloatAsState(
@@ -1416,26 +1448,42 @@ private fun FadingTailText(text: String, tailStart: Int, generation: Int, reason
 }
 
 @Composable
-private fun LiveReasoningText(text: String) {
-    var previousText by remember { mutableStateOf(text) }
-    val tailStart = if (text.startsWith(previousText)) previousText.length else 0
-    val generation = text.length
-    androidx.compose.runtime.SideEffect { previousText = text }
-
-    // Rebuilding and animating a multi-thousand-character AnnotatedString every frame is
-    // expensive on Android's text stack. Past this threshold correctness and scrolling
-    // win: render the accumulated summary once per incoming snapshot without a 60 Hz fade.
-    if (text.length > 1_600) {
-        Text(
-            text = text,
-            modifier = Modifier.fillMaxWidth(),
-            style = MaterialTheme.typography.bodyMedium,
-            lineHeight = 22.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    } else {
-        FadingTailText(text, tailStart, generation, reasoning = true)
+private fun ChunkedLiveText(text: String, tailStart: Int, generation: Int, reasoning: Boolean, animateTail: Boolean) {
+    val chunks = remember(text) { splitLiveText(text) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        chunks.forEachIndexed { index, chunk ->
+            androidx.compose.runtime.key(chunk.start) {
+                val isTail = index == chunks.lastIndex
+                if (isTail && animateTail) {
+                    FadingTailText(
+                        text = chunk.text,
+                        tailStart = (tailStart - chunk.start).coerceIn(0, chunk.text.length),
+                        generation = generation,
+                        reasoning = reasoning,
+                    )
+                } else {
+                    // Extracted into a restartable composable: unchanged completed chunks
+                    // are skipped by Compose while only the final chunk is remeasured.
+                    StableLiveTextChunk(chunk.text, reasoning)
+                }
+            }
+        }
     }
+}
+
+@Composable
+private fun LiveReasoningText(text: String) {
+    var previousLength by remember { mutableIntStateOf(text.length) }
+    val tailStart = previousLength.coerceAtMost(text.length)
+    androidx.compose.runtime.SideEffect { previousLength = text.length }
+    ChunkedLiveText(
+        text = text,
+        tailStart = tailStart,
+        generation = text.length,
+        reasoning = true,
+        // Keep animation on the bounded final chunk; completed chunks never animate again.
+        animateTail = true,
+    )
 }
 
 @Composable
