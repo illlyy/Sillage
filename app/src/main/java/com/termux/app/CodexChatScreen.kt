@@ -1032,8 +1032,6 @@ private fun FinalOnlyAnswerReveal(text: String, revealStartedAt: Long) {
     }
 }
 
-private data class TextRevealSpan(val start: Int, val end: Int, val startedAt: Long)
-
 @Composable
 private fun StreamingResponseText(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean) {
     if (finalOnlyReveal) {
@@ -1043,10 +1041,12 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
     val latestText = rememberUpdatedState(text)
     val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
     var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
-    var revealSpans by remember { mutableStateOf(emptyList<TextRevealSpan>()) }
-    var revealClock by remember { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
+    var maskGeneration by remember { mutableIntStateOf(0) }
+    var maskVisible by remember { mutableStateOf(false) }
     var showRichText by remember { mutableStateOf(!animateReveal) }
 
+    // Keep layout work bounded: normal output advances gently, while a backlog is
+    // consumed in increasingly large batches instead of scheduling one frame per token.
     LaunchedEffect(streaming, animateReveal) {
         if (!animateReveal) {
             displayedText = latestText.value
@@ -1059,61 +1059,68 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
             val target = latestText.value
             if (!target.startsWith(displayedText)) {
                 displayedText = ""
-                revealSpans = emptyList()
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 400 -> 14
-                    pending > 160 -> 9
-                    pending > 64 -> 6
-                    pending > 20 -> 4
-                    else -> 2
+                    pending > 1_200 -> 160
+                    pending > 600 -> 96
+                    pending > 300 -> 56
+                    pending > 140 -> 32
+                    pending > 60 -> 18
+                    pending > 24 -> 10
+                    else -> 5
                 }
-                val previousLength = displayedText.length
-                val nextLength = (previousLength + step).coerceAtMost(target.length)
-                val now = android.os.SystemClock.uptimeMillis()
-                revealSpans = (revealSpans.filter { now - it.startedAt < 300L } + TextRevealSpan(previousLength, nextLength, now))
-                revealClock = now
-                displayedText = target.take(nextLength)
+                displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
+                maskGeneration++
             }
-            delay(if (streaming) 48L else 36L)
+            delay(if (latestText.value.length - displayedText.length > 140) 28L else 56L)
         }
         displayedText = latestText.value
-        delay(300L)
+        delay(560L)
         showRichText = true
     }
 
-    LaunchedEffect(revealSpans) {
-        while (!showRichText && revealSpans.any { revealClock - it.startedAt < 280L }) {
-            revealClock = android.os.SystemClock.uptimeMillis()
-            delay(32L)
-        }
+    // The answer is laid out only once per batch. A cheap surface-coloured mask then
+    // reveals the last line; unlike per-character spans it does not relayout glyphs
+    // on every animation tick. The one-frame delay also prevents a raw hard pop.
+    LaunchedEffect(maskGeneration) {
+        if (maskGeneration == 0) return@LaunchedEffect
+        maskVisible = true
+        delay(72L)
+        maskVisible = false
     }
+    val maskAlpha by animateFloatAsState(
+        targetValue = if (maskVisible) 0.92f else 0f,
+        animationSpec = if (maskVisible) tween(35, easing = LinearEasing) else tween(520, easing = LinearEasing),
+        label = "streamTailMask",
+    )
 
     if (!showRichText) {
-        val animatedText = androidx.compose.ui.text.buildAnnotatedString {
-            var cursor = 0
-            revealSpans.sortedBy { it.start }.forEach { span ->
-                val safeStart = span.start.coerceIn(cursor, displayedText.length)
-                val safeEnd = span.end.coerceIn(safeStart, displayedText.length)
-                if (cursor < safeStart) append(displayedText.substring(cursor, safeStart))
-                val progress = ((revealClock - span.startedAt).toFloat() / 280f).coerceIn(0f, 1f)
-                val alpha = 0.16f + 0.84f * progress
-                withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha))) {
-                    append(displayedText.substring(safeStart, safeEnd))
-                }
-                cursor = safeEnd
+        Box(Modifier.fillMaxWidth()) {
+            Text(
+                text = displayedText,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyLarge,
+                lineHeight = 24.sp,
+                letterSpacing = 0.1.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (maskAlpha > 0.001f) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(31.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                0f to MaterialTheme.colorScheme.surface.copy(alpha = 0f),
+                                0.30f to MaterialTheme.colorScheme.surface.copy(alpha = maskAlpha * 0.45f),
+                                1f to MaterialTheme.colorScheme.surface.copy(alpha = maskAlpha),
+                            )
+                        )
+                )
             }
-            if (cursor < displayedText.length) append(displayedText.substring(cursor))
         }
-        Text(
-            text = animatedText,
-            modifier = Modifier.fillMaxWidth(),
-            style = MaterialTheme.typography.bodyLarge,
-            lineHeight = 24.sp,
-            letterSpacing = 0.1.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
     } else {
         RichResponseText(text)
     }
