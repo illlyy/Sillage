@@ -1931,69 +1931,99 @@ private fun SubagentOverviewRow(agent: JSONObject, onSelect: (JSONObject) -> Uni
     }
 }
 
+private fun parseSubagentMessages(history: String?): List<JSONObject> {
+    if (history.isNullOrBlank()) return emptyList()
+    return runCatching {
+        val source = JSONArray(history)
+        buildList {
+            for (index in 0 until source.length()) source.optJSONObject(index)?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+}
+
 @Composable
 private fun SubagentDetail(item: JSONObject, history: String?, historyLoading: Boolean) {
     val name = subagentName(item)
     val task = item.optString("task", item.optString("prompt", item.optString("input", item.optString("message", ""))))
     val result = item.optString("output", item.optString("result", ""))
-    val hasHistory = history != null && remember(history) { runCatching { JSONArray(history).length() > 0 }.getOrDefault(false) }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        if (historyLoading) Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(9.dp)); Text("\u6b63\u5728\u52a0\u8f7d\u5b50\u4ee3\u7406\u5bf9\u8bdd", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val messages = remember(history) { parseSubagentMessages(history) }
+    if (messages.isNotEmpty()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            if (historyLoading) {
+                item(key = "loading") { SubagentHistoryLoading() }
+            }
+            itemsIndexed(
+                items = messages,
+                key = { index, message -> message.optString("id").ifBlank { "${message.optString("role")}-${message.optString("content").hashCode()}-$index" } },
+                contentType = { _, message -> message.optString("role") },
+            ) { _, message ->
+                SubagentConversationMessage(message, name)
+            }
+            item(key = "bottom-space") { Spacer(Modifier.height(24.dp)) }
         }
-        if (hasHistory && history != null) SubagentConversationView(history, name) else {
+    } else {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            if (historyLoading) SubagentHistoryLoading()
             if (task.isNotBlank()) AgentTimelineSection("\u59d4\u6d3e\u7684\u4efb\u52a1", task)
             if (result.isNotBlank()) AgentTimelineSection("\u6700\u7ec8\u56de\u590d", result)
             if (!historyLoading && task.isBlank() && result.isBlank()) AgentTimelineSection("\u72b6\u6001", subagentStatus(item))
+            Spacer(Modifier.height(24.dp))
         }
-        Spacer(Modifier.height(24.dp))
     }
 }
 
 @Composable
-private fun SubagentConversationView(history: String, agentName: String) {
-    val messages = remember(history) {
-        runCatching {
-            val source = JSONArray(history)
-            buildList {
-                for (index in 0 until source.length()) source.optJSONObject(index)?.let(::add)
-            }
-        }.getOrDefault(emptyList())
+private fun SubagentHistoryLoading() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(9.dp))
+        Text(
+            "\u6b63\u5728\u52a0\u8f7d\u5b50\u4ee3\u7406\u5bf9\u8bdd",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        messages.forEach { message ->
-            val role = message.optString("role")
-            val content = message.optString("content")
-            when (role) {
-                "user" -> {
-                    Column(Modifier.fillMaxWidth()) {
-                        Text("\u59d4\u6d3e\u7684\u4efb\u52a1", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(6.dp))
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        ) {
-                            Text(content, modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
-                        }
-                    }
+}
+
+@Composable
+private fun SubagentConversationMessage(message: JSONObject, agentName: String) {
+    val role = message.optString("role")
+    val content = message.optString("content")
+    when (role) {
+        "user" -> {
+            Column(Modifier.fillMaxWidth()) {
+                Text("\u59d4\u6d3e\u7684\u4efb\u52a1", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                ) {
+                    Text(content, modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
                 }
-                "assistant" -> {
-                    Column(Modifier.fillMaxWidth()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
-                                Icon(HugeIcons.Sparkles, null, modifier = Modifier.padding(5.dp).size(13.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                            }
-                            Spacer(Modifier.width(7.dp))
-                            Text(agentName, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Spacer(Modifier.height(7.dp))
-                        RichResponseText(content)
-                    }
-                }
-                "activity" -> SubagentActivityView(content)
             }
         }
+        "assistant" -> {
+            Column(Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                        Icon(HugeIcons.Sparkles, null, modifier = Modifier.padding(5.dp).size(13.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                    }
+                    Spacer(Modifier.width(7.dp))
+                    Text(agentName, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(7.dp))
+                RichResponseText(content)
+            }
+        }
+        "activity" -> SubagentActivityView(content)
     }
 }
 
