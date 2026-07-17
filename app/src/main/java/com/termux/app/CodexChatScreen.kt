@@ -13,6 +13,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -126,6 +127,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
@@ -168,6 +170,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import io.noties.markwon.Markwon
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.MarkwonSpansFactory
@@ -351,27 +354,33 @@ internal fun NativeChatScreen(
         }
     }
 
-    // RikkaHub-style follow: react to actual list layout growth, not only backend events.
-    // This also catches the final reveal frames and IME/input-height animation frames.
-    LaunchedEffect(listState, followOutput, state.conversationAnimationKey) {
-        snapshotFlow {
+    // RikkaHub-style follow motor. A new animateScrollBy for every streamed batch causes
+    // animations to queue and then jump when text arrives faster than they finish. Instead,
+    // consume the measured bottom overflow once per display frame with a bounded velocity.
+    // Small wrapped lines glide over a few frames; a large final Markdown reflow catches up
+    // faster without teleporting. Manual dragging turns followOutput off above.
+    LaunchedEffect(listState, followOutput, listDragged, state.conversationAnimationKey) {
+        var previousFrame = withFrameNanos { it }
+        while (isActive) {
+            val frame = withFrameNanos { it }
+            val elapsedSeconds = ((frame - previousFrame).coerceAtMost(50_000_000L)) / 1_000_000_000f
+            previousFrame = frame
+            if (!followOutput || listDragged || state.messages.isEmpty()) continue
+
             val layout = listState.layoutInfo
-            val last = layout.visibleItemsInfo.lastOrNull()
-            // LazyColumn's composer clearance lives in afterContentPadding. Without it,
-            // canScrollForward becomes true while the measured item still appears above
-            // viewportEndOffset, so following stops after the first visible characters.
-            val overflow = (last?.offset?.plus(last.size) ?: 0) +
-                layout.afterContentPadding - layout.viewportEndOffset
-            Triple(listState.canScrollForward, layout.totalItemsCount, overflow)
-        }.collect { (canScrollForward, _, overflow) ->
-            if (followOutput && canScrollForward && overflow > 0 && state.messages.isNotEmpty()) {
-                // Follow the same physical distance by which the last item grew. Jumping
-                // to Int.MAX_VALUE on every wrapped line made output advance in 24dp steps.
-                listState.animateScrollBy(
-                    overflow.toFloat(),
-                    animationSpec = tween(durationMillis = 115, easing = LinearOutSlowInEasing),
-                )
-            }
+            val last = layout.visibleItemsInfo.lastOrNull() ?: continue
+            // Composer clearance is represented by afterContentPadding, so it must be part
+            // of the distance or following stops while the last line is still hidden.
+            val overflow = (last.offset + last.size + layout.afterContentPadding - layout.viewportEndOffset)
+                .coerceAtLeast(0)
+                .toFloat()
+            if (!listState.canScrollForward || overflow < 0.5f) continue
+
+            val baseVelocity = with(density) { 520.dp.toPx() }
+            val catchUpVelocity = (baseVelocity + overflow * 5.5f)
+                .coerceAtMost(with(density) { 1_900.dp.toPx() })
+            val distance = (catchUpVelocity * elapsedSeconds).coerceAtMost(overflow)
+            if (distance > 0f) listState.scrollBy(distance)
         }
     }
 
