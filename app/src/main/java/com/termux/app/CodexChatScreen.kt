@@ -1289,9 +1289,9 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
     } else elapsedSeconds
     val statusText = if (state.reasoningComplete) {
-        "??? ${reasoningSeconds}s"
+        "\u601d\u8003\u4e86 ${reasoningSeconds}s"
     } else {
-        "${state.processingLabel.ifBlank { "???" }} ${elapsedSeconds}s"
+        "${state.processingLabel.ifBlank { "\u5904\u7406\u4e2d" }} ${elapsedSeconds}s"
     }
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(
@@ -1573,24 +1573,28 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
 @Composable
 private fun CollabAgentCapsule(item: JSONObject) {
     val tool = item.optString("tool", "")
-    val agentId = item.optString("agentThreadId", item.optJSONArray("receiverThreadIds")?.optString(0).orEmpty())
+    val receivers = item.optJSONArray("receiverThreadIds")
+    val agentId = item.optString("agentThreadId", receivers?.optString(0).orEmpty())
     val fallbackName = when (tool) {
-        "spawn_agent", "spawnAgent" -> "????"
-        "wait", "wait_agent" -> "?????"
-        "send_input", "sendInput" -> "?????"
-        else -> if (agentId.isNotBlank()) "??? ${agentId.take(6)}" else "???"
+        "spawn_agent", "spawnAgent" -> "\u65b0\u5b50\u4ee3\u7406"
+        "wait", "wait_agent" -> "\u7b49\u5f85\u5b50\u4ee3\u7406"
+        "send_input", "sendInput" -> "\u5b50\u4ee3\u7406\u6d88\u606f"
+        else -> if (agentId.isNotBlank()) "\u5b50\u4ee3\u7406 ${agentId.take(6)}" else "\u5b50\u4ee3\u7406"
     }
     val name = item.optString("agentName", item.optString("name", item.optString("agent", fallbackName)))
     val rawStatus = item.optString("status", "completed")
     val status = when (rawStatus.lowercase()) {
-        "inprogress", "running", "started" -> "???"
-        "failed", "error" -> "??"
-        else -> "??"
+        "inprogress", "running", "started" -> "\u8fd0\u884c\u4e2d"
+        "failed", "error" -> "\u5931\u8d25"
+        else -> "\u5b8c\u6210"
     }
-    val detail = item.optString("reasoning", item.optString("detail", item.optString("output", "")))
-        .ifBlank { item.toString(2) }
+    val task = item.optString("task", item.optString("prompt", item.optString("input", item.optString("message", ""))))
+    val reasoning = item.optString("reasoning", item.optString("thought", ""))
+    val result = item.optString("output", item.optString("result", ""))
+    val detail = item.optString("detail", "")
     var panelVisible by remember { mutableStateOf(false) }
     var panelEntered by remember { mutableStateOf(false) }
+    var rawExpanded by remember { mutableStateOf(false) }
     val panelScope = rememberCoroutineScope()
     val closePanel: () -> Unit = {
         panelEntered = false
@@ -1637,11 +1641,7 @@ private fun CollabAgentCapsule(item: JSONObject) {
                         modifier = Modifier
                             .fillMaxHeight()
                             .widthIn(min = 300.dp, max = 390.dp)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = {},
-                            ),
+                            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}),
                         shape = RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp),
                         color = MaterialTheme.colorScheme.surface,
                         tonalElevation = 6.dp,
@@ -1658,22 +1658,73 @@ private fun CollabAgentCapsule(item: JSONObject) {
                                 Spacer(Modifier.width(11.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                                    Text("??? ? $status", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("\u5b50\u4ee3\u7406 \u00b7 $status", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = closePanel) { Icon(HugeIcons.Cancel01, "??") }
+                                IconButton(onClick = closePanel) { Icon(HugeIcons.Cancel01, "\u5173\u95ed") }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                             Column(
                                 modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(16.dp),
                             ) {
-                                Text("?????", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.height(10.dp))
-                                RichResponseText(detail)
+                                if (task.isNotBlank()) AgentTimelineSection("\u4efb\u52a1", task)
+                                if (receivers != null && receivers.length() > 0) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text("\u53c2\u4e0e\u7ebf\u7a0b", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            for (index in 0 until receivers.length()) {
+                                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                                                    Text(receivers.optString(index).take(10), modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (reasoning.isNotBlank()) AgentTimelineSection("\u601d\u8003", reasoning)
+                                if (detail.isNotBlank() && detail != reasoning && detail != result) AgentTimelineSection("\u6267\u884c", detail)
+                                if (result.isNotBlank()) AgentTimelineSection("\u7ed3\u679c", result)
+                                if (task.isBlank() && reasoning.isBlank() && detail.isBlank() && result.isBlank()) {
+                                    AgentTimelineSection("\u4e8b\u4ef6\u8be6\u60c5", item.toString(2), monospace = true)
+                                }
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth().clickable { rawExpanded = !rawExpanded },
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                ) {
+                                    Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+                                        Text(if (rawExpanded) "\u6536\u8d77\u539f\u59cb\u4e8b\u4ef6" else "\u67e5\u770b\u539f\u59cb\u4e8b\u4ef6", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        QElasticExpand(rawExpanded) {
+                                            SelectionContainer {
+                                                Text(item.toString(2), modifier = Modifier.padding(top = 10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                    }
+                                }
                                 Spacer(Modifier.height(24.dp))
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentTimelineSection(title: String, value: String, monospace: Boolean = false) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Surface(modifier = Modifier.size(9.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {}
+            Box(Modifier.width(1.dp).height(42.dp).background(MaterialTheme.colorScheme.outlineVariant))
+        }
+        Spacer(Modifier.width(11.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(7.dp))
+            if (monospace) {
+                SelectionContainer { Text(value, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+            } else {
+                RichResponseText(value)
             }
         }
     }
