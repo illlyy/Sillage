@@ -1903,7 +1903,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         if (tools != null) for (index in 0 until tools.length()) {
             val item = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
             val type = item.optString("type")
-            if (type == "collabAgentToolCall" && hasThreadBackedAgents && subagentThreadId(item).isBlank()) continue
+            if (type in setOf("collabAgentToolCall", "subAgentActivity") && hasThreadBackedAgents && subagentThreadId(item).isBlank()) continue
             val title = when (type) { "fileChange" -> "文件修改"; "mcpToolCall" -> "MCP 工具"; "webSearch" -> "网页搜索"; "collabAgentToolCall" -> "子代理"; else -> type }
             val detail = when (type) {
                 "commandExecution" -> buildString {
@@ -1927,11 +1927,11 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                     val output = item.optString("output", "")
                     if (output.isNotBlank()) append("\n\n").append(output)
                 }
-                "collabAgentToolCall" -> item.optString("detail", item.toString(2))
+                "collabAgentToolCall", "subAgentActivity" -> item.optString("detail", item.toString(2))
                 else -> item.toString(2)
             }
             if (type == "commandExecution") CommandExecutionCard(item)
-            else if (type == "collabAgentToolCall") {
+            else if (type == "collabAgentToolCall" || type == "subAgentActivity") {
                 val thread = subagentThreadId(item)
                 CollabAgentCapsule(
                     item = item,
@@ -2087,7 +2087,10 @@ private fun subagentKey(item: JSONObject): String = subagentThreadId(item).ifBla
 private fun subagentName(item: JSONObject): String {
     val id = subagentThreadId(item)
     val fallback = if (id.isNotBlank()) "\u5b50\u4ee3\u7406 ${id.take(6)}" else "\u5b50\u4ee3\u7406"
-    return jsonText(item, "agentName", "name", "agent").ifBlank { fallback }
+    val explicit = jsonText(item, "agentName", "agentNickname", "nickname", "agent")
+    if (explicit.isNotBlank() && !explicit.equals("subAgentActivity", true)) return explicit
+    val pathName = jsonText(item, "agentPath").substringAfterLast('/').trim()
+    return pathName.ifBlank { fallback }
 }
 
 private fun subagentStatus(item: JSONObject): String = when (jsonText(item, "status").ifBlank { "completed" }.lowercase()) {
@@ -2095,6 +2098,8 @@ private fun subagentStatus(item: JSONObject): String = when (jsonText(item, "sta
     "failed", "error" -> "\u5931\u8d25"
     else -> "\u5b8c\u6210"
 }
+
+private fun isSubagentItem(item: JSONObject): Boolean = item.optString("type") in setOf("collabAgentToolCall", "subAgentActivity")
 
 private fun collectAllSubagentItems(state: NativeChatState): List<JSONObject> {
     val result = LinkedHashMap<String, JSONObject>()
@@ -2104,7 +2109,7 @@ private fun collectAllSubagentItems(state: NativeChatState): List<JSONObject> {
         runCatching {
             val payload = JSONObject(String(Base64.decode(message.content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
             val tools = payload.optJSONArray("tools") ?: return@runCatching
-            for (index in 0 until tools.length()) tools.optJSONObject(index)?.takeIf { it.optString("type") == "collabAgentToolCall" }?.let(::add)
+            for (index in 0 until tools.length()) tools.optJSONObject(index)?.takeIf(::isSubagentItem)?.let(::add)
         }
     }
     state.liveSubagents.forEach { raw -> runCatching { add(JSONObject(raw)) } }
@@ -2506,7 +2511,7 @@ private fun SubagentActivityView(content: String) {
                         val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
                         when (tool.optString("type")) {
                             "commandExecution" -> CommandExecutionCard(tool)
-                            "collabAgentToolCall" -> Unit
+                            "collabAgentToolCall", "subAgentActivity" -> Unit
                             else -> ToolTextCard(
                                 tool.optString("type", "\u5de5\u5177\u8c03\u7528"),
                                 tool.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))),

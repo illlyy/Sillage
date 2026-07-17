@@ -378,9 +378,14 @@ final class CodexAppServerBridge {
             try {
                 File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
                 File sessionFile = findSessionFile(sessionsRoot, subagentThreadId);
+                JSONArray messages = sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile);
                 result.put("threadId", subagentThreadId);
-                result.put("messages", sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile));
+                result.put("messages", messages);
                 result.put("found", sessionFile != null);
+                NativeChatDiagnostics.record(activity, "subagent_history", new JSONObject()
+                    .put("thread", shortId(subagentThreadId))
+                    .put("threadTail", subagentThreadId.length() > 8 ? subagentThreadId.substring(subagentThreadId.length() - 8) : subagentThreadId)
+                    .put("found", sessionFile != null).put("messages", messages.length()));
             } catch (Exception error) {
                 try {
                     result.put("threadId", subagentThreadId);
