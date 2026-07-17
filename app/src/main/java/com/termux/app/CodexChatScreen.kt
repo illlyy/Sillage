@@ -468,7 +468,7 @@ internal fun NativeChatScreen(
                                 )
                             }
                             if (state.busy && liveAssistantId == null) {
-                                item("processing") { ProcessingPanel(state, elapsedSeconds) }
+                                item("processing") { ProcessingPanel(state, elapsedSeconds, false) }
                             }
                         }
                         AnimatedVisibility(
@@ -1183,7 +1183,7 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
                 if (liveState != null) {
-                    ProcessingPanel(liveState, elapsedSeconds)
+                    ProcessingPanel(liveState, elapsedSeconds, text.isNotBlank())
                     Spacer(Modifier.height(6.dp))
                 }
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1277,22 +1277,34 @@ private fun SmoothReasoningText(text: String) {
 }
 
 @Composable
-private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long) {
+private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean) {
     var expanded by remember { mutableStateOf(true) }
-    LaunchedEffect(state.reasoningComplete) {
-        if (state.reasoningComplete) {
-            delay(140L)
+    LaunchedEffect(state.reasoningComplete, answerStarted) {
+        if (state.reasoningComplete && answerStarted) {
+            delay(180L)
             expanded = false
         }
+    }
+    val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
+        (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
+    } else elapsedSeconds
+    val statusText = if (state.reasoningComplete) {
+        "??? ${reasoningSeconds}s"
+    } else {
+        "${state.processingLabel.ifBlank { "???" }} ${elapsedSeconds}s"
     }
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            if (state.reasoningComplete) {
+                Text("✓", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+            } else {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            }
             Spacer(Modifier.width(8.dp))
-            Text("${state.processingLabel.ifBlank { "处理中" }} ${elapsedSeconds}s", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(statusText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
@@ -1495,9 +1507,9 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
     val reasoning = payload?.optString("reasoning").orEmpty()
     val command = payload?.optString("command").orEmpty()
     val tools = payload?.optJSONArray("tools")
-    val autoCollapse = message.revealStartedAt > 0L && System.currentTimeMillis() - message.revealStartedAt < 2_000L
-    var expanded by remember(message.id) { mutableStateOf(autoCollapse) }
-    LaunchedEffect(message.id) { if (autoCollapse) { delay(220L); expanded = false } }
+    // The live panel owns the expanded reasoning view. When completion inserts this
+    // durable activity row, enter collapsed so the panel is not opened a second time.
+    var expanded by remember(message.id) { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
         Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(HugeIcons.Zap, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1539,8 +1551,89 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
                 else -> item.toString(2)
             }
             if (type == "commandExecution") CommandExecutionCard(item)
+            else if (type == "collabAgentToolCall") CollabAgentCapsule(item)
             else ToolTextCard(title, detail, type == "fileChange")
         }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollabAgentCapsule(item: JSONObject) {
+    val name = item.optString("agentName", item.optString("name", item.optString("agent", "???")))
+    val status = item.optString("status", "??").ifBlank { "??" }
+    val detail = item.optString("reasoning", item.optString("detail", item.optString("output", "")))
+        .ifBlank { item.toString(2) }
+    var panelVisible by remember { mutableStateOf(false) }
+    Surface(
+        modifier = Modifier.padding(top = 8.dp).clickable { panelVisible = true },
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        tonalElevation = 1.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 12.dp, end = 10.dp, top = 7.dp, bottom = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(HugeIcons.Sparkles, null, modifier = Modifier.size(15.dp))
+            Spacer(Modifier.width(7.dp))
+            Text(name, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
+            Text(status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.68f))
+            Spacer(Modifier.width(5.dp))
+            Icon(HugeIcons.ArrowRight01, null, modifier = Modifier.size(14.dp))
+        }
+    }
+    if (panelVisible) {
+        Dialog(
+            onDismissRequest = { panelVisible = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true),
+        ) {
+            var entered by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) { entered = true }
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.16f)).clickable { panelVisible = false }) {
+                AnimatedVisibility(
+                    visible = entered,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    enter = slideInHorizontally(tween(260, easing = LinearOutSlowInEasing)) { it } + fadeIn(tween(180)),
+                    exit = slideOutHorizontally(tween(190, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(120)),
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxHeight().widthIn(min = 300.dp, max = 390.dp).clickable(enabled = false) {},
+                        shape = RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 6.dp,
+                        shadowElevation = 12.dp,
+                    ) {
+                        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 10.dp, top = 14.dp, bottom = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                                    Icon(HugeIcons.Sparkles, null, modifier = Modifier.padding(9.dp).size(18.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                                }
+                                Spacer(Modifier.width(11.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                    Text("??? ? $status", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                IconButton(onClick = { panelVisible = false }) { Icon(HugeIcons.Cancel01, "??") }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                            Column(
+                                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+                            ) {
+                                Text("?????", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.height(10.dp))
+                                RichResponseText(detail)
+                                Spacer(Modifier.height(24.dp))
+                            }
+                        }
+                    }
+                }
             }
         }
     }

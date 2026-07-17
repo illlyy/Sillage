@@ -63,6 +63,7 @@ internal class NativeChatState {
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
     var reasoningComplete by mutableStateOf(false)
+    var reasoningCompletedAt by mutableStateOf(0L)
     var commandText by mutableStateOf("")
     var turnStartedAt by mutableStateOf(0L)
     var turnMessageStartIndex by mutableIntStateOf(0)
@@ -80,6 +81,7 @@ internal class NativeChatState {
         processingLabel = "处理中"
         reasoningText = ""
         reasoningComplete = false
+        reasoningCompletedAt = 0L
         commandText = ""
         toolDetails.clear()
         turnStartedAt = System.currentTimeMillis()
@@ -321,6 +323,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.busy = true
         chatState.processingLabel = "处理中"
         chatState.reasoningText = ""
+        chatState.reasoningComplete = false
+        chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
         chatState.toolDetails.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
@@ -337,6 +341,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.busy = true
         chatState.processingLabel = "处理中"
         chatState.reasoningText = ""
+        chatState.reasoningComplete = false
+        chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
         chatState.toolDetails.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
@@ -476,6 +482,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             "onReasoningComplete" -> {
                 if (value.length > chatState.reasoningText.length) chatState.reasoningText = value
                 chatState.reasoningComplete = true
+                chatState.reasoningCompletedAt = System.currentTimeMillis()
                 chatState.revision++
             }
             "onCommandDelta" -> { chatState.commandText += value; chatState.revision++ }
