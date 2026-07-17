@@ -280,6 +280,8 @@ internal fun NativeChatScreen(
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
     val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
     var showFilesSheet by remember { mutableStateOf(false) }
@@ -402,7 +404,7 @@ internal fun NativeChatScreen(
                         }
                         LazyColumn(
                             state = listState,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().imePadding(),
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = inputBottomPadding),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -437,7 +439,7 @@ internal fun NativeChatScreen(
                         }
                         AnimatedVisibility(
                             visible = showScrollToBottom,
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                            modifier = Modifier.align(Alignment.BottomEnd).then(floatingInsetModifier).padding(end = 16.dp, bottom = inputBottomPadding + 16.dp),
                             enter = fadeIn() + scaleIn(),
                             exit = fadeOut() + scaleOut(),
                         ) {
@@ -469,7 +471,8 @@ internal fun NativeChatScreen(
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
                         onSend = { if (state.busy) onStop() else onSend(state.input) },
-                        modifier = Modifier.align(Alignment.BottomCenter).onSizeChanged { inputHeightPx = it.height },
+                        onHeightChanged = { inputHeightPx = it },
+                        modifier = Modifier.align(Alignment.BottomCenter),
                     )
                 }
             }
@@ -954,7 +957,7 @@ private fun RikkaEmptyState(
 private fun RikkaMessageItem(message: NativeChatMessage, onEdit: () -> Unit, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     when (message.role) {
         NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
-        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, onRetry, onQuote)
+        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.content, message.streaming, message.revealStartedAt, onRetry, onQuote)
         NativeChatRole.ACTIVITY -> RikkaActivityMessage(message.content)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
@@ -994,39 +997,43 @@ private fun RikkaUserMessage(text: String, onEdit: () -> Unit) {
 
 
 @Composable
-private fun StreamingResponseText(text: String, streaming: Boolean) {
+private fun StreamingResponseText(text: String, streaming: Boolean, revealStartedAt: Long) {
     val latestText = rememberUpdatedState(text)
-    var displayedText by remember { mutableStateOf(if (streaming) "" else text) }
+    val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
+    var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
+    var showRichText by remember { mutableStateOf(!animateReveal) }
 
-    LaunchedEffect(streaming) {
-        if (!streaming) {
+    LaunchedEffect(streaming, animateReveal) {
+        if (!animateReveal) {
             displayedText = latestText.value
+            showRichText = true
             return@LaunchedEffect
         }
+        showRichText = false
         if (!latestText.value.startsWith(displayedText)) displayedText = ""
-        while (true) {
+        while (streaming || displayedText.length < latestText.value.length) {
             val target = latestText.value
             if (!target.startsWith(displayedText)) {
-                displayedText = target
+                displayedText = ""
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
-                    pending > 160 -> 18
+                    pending > 320 -> 24
+                    pending > 160 -> 16
                     pending > 72 -> 10
                     pending > 24 -> 6
                     else -> 3
                 }
                 displayedText = target.take((displayedText.length + step).coerceAtMost(target.length))
             }
-            delay(32L)
+            delay(if (streaming) 32L else 20L)
         }
+        displayedText = latestText.value
+        delay(24L)
+        showRichText = true
     }
 
-    if (streaming) {
-        // Full Markwon/LaTeX parsing on every token is expensive and causes repeated remeasure.
-        // Render a stable lightweight surface while streaming, then promote to rich Markdown once.
-        // Match RikkaHub's approach: do not register selectable text while its layout is
-        // changing every frame. Selection is restored automatically after completion.
+    if (!showRichText) {
         Text(
             text = displayedText,
             modifier = Modifier.fillMaxWidth(),
@@ -1041,7 +1048,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean) {
 }
 
 @Composable
-private fun RikkaAssistantMessage(text: String, streaming: Boolean, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaAssistantMessage(text: String, streaming: Boolean, revealStartedAt: Long, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1052,7 +1059,7 @@ private fun RikkaAssistantMessage(text: String, streaming: Boolean, onRetry: (()
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
-                StreamingResponseText(text, streaming)
+                StreamingResponseText(text, streaming, revealStartedAt)
                 if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(7.dp))
@@ -1575,18 +1582,22 @@ private fun RikkaChatInput(
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
+    onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    val inputShape = if (imeVisible) RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = 0.dp, bottomStart = 0.dp) else MaterialTheme.shapes.largeIncreased
+    val bottomCorner by animateDpAsState(if (imeVisible) 0.dp else 28.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomCorner")
+    val sidePadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputSidePadding")
+    val bottomPadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomPadding")
+    val inputShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = bottomCorner, bottomStart = bottomCorner)
     val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
     Surface(modifier = modifier, color = Color.Transparent) {
         Column(
-            modifier = insetModifier.padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = if (imeVisible) 0.dp else 8.dp),
+            modifier = insetModifier.padding(start = sidePadding, end = sidePadding, top = 8.dp, bottom = bottomPadding),
         ) {
             Surface(
-                modifier = Modifier.fillMaxWidth().animateContentSize(
+                modifier = Modifier.fillMaxWidth().onSizeChanged { onHeightChanged(it.height) }.animateContentSize(
                     animationSpec = spring(dampingRatio = 0.90f, stiffness = 520f),
                 ),
                 shape = inputShape,
@@ -1907,6 +1918,7 @@ private fun LiquidEffortSlider(
     val scope = rememberCoroutineScope()
     var visualIndex by remember(options) { mutableFloatStateOf(options.indexOf(selected).coerceAtLeast(0).toFloat()) }
     var dragging by remember { mutableStateOf(false) }
+    var settling by remember { mutableStateOf(false) }
     var settleJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val previewIndex = visualIndex.roundToInt().coerceIn(options.indices)
     val thumbScale by animateFloatAsState(if (dragging) 1.22f else 1f, spring(dampingRatio = 0.72f, stiffness = 480f), label = "liquidThumbScale")
@@ -1915,6 +1927,7 @@ private fun LiquidEffortSlider(
     fun settle(index: Float, commit: Boolean) {
         val target = index.roundToInt().coerceIn(options.indices)
         settleJob?.cancel()
+        settling = true
         settleJob = scope.launch {
             animate(visualIndex, target.toFloat(), animationSpec = spring(dampingRatio = 0.78f, stiffness = 500f)) { value, _ ->
                 visualIndex = value
@@ -1923,10 +1936,11 @@ private fun LiquidEffortSlider(
             visualIndex = target.toFloat()
             onPreview(options[target])
             if (commit && options[target] != selected) onSelect(options[target])
+            settling = false
         }
     }
-    LaunchedEffect(selected, options, dragging) {
-        if (!dragging && settleJob?.isActive != true) {
+    LaunchedEffect(selected, options, dragging, settling) {
+        if (!dragging && !settling) {
             visualIndex = options.indexOf(selected).coerceAtLeast(0).toFloat()
             onPreview(options[visualIndex.roundToInt().coerceIn(options.indices)])
         }
@@ -1974,12 +1988,12 @@ private fun LiquidEffortSlider(
                                 onPreview(options[gestureIndex.roundToInt().coerceIn(options.indices)])
                             },
                             onDragCancel = {
-                                updateDragging(false)
                                 settle(options.indexOf(selected).coerceAtLeast(0).toFloat(), commit = false)
+                                updateDragging(false)
                             },
                             onDragEnd = {
-                                updateDragging(false)
                                 settle(gestureIndex, commit = true)
+                                updateDragging(false)
                             },
                         ) { change, _ ->
                             change.consume()

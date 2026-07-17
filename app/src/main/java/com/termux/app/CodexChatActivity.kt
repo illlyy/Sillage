@@ -40,6 +40,7 @@ internal data class NativeChatMessage(
     val role: NativeChatRole,
     val content: String,
     val streaming: Boolean = false,
+    val revealStartedAt: Long = 0L,
 )
 
 internal class NativeChatState {
@@ -93,6 +94,7 @@ internal class NativeChatState {
                     role = NativeChatRole.ASSISTANT,
                     content = delta,
                     streaming = true,
+                    revealStartedAt = System.currentTimeMillis(),
                 ),
             )
         }
