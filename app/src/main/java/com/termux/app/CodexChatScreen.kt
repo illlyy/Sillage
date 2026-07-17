@@ -1958,23 +1958,49 @@ private fun SubagentDetail(item: JSONObject, history: String?, historyLoading: B
             val lastItem = (conversationListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
             conversationListState.scrollToItem(lastItem, Int.MAX_VALUE)
         }
-        LazyColumn(
-            state = conversationListState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            if (historyLoading) {
-                item(key = "loading") { SubagentHistoryLoading() }
+        val panelScope = rememberCoroutineScope()
+        val showLatestButton by remember { derivedStateOf { conversationListState.canScrollForward } }
+        Box(Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = conversationListState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                if (historyLoading) {
+                    item(key = "loading") { SubagentHistoryLoading() }
+                }
+                itemsIndexed(
+                    items = messages,
+                    key = { index, message -> message.optString("id").ifBlank { "${message.optString("role")}-${message.optString("content").hashCode()}-$index" } },
+                    contentType = { _, message -> message.optString("role") },
+                ) { _, message ->
+                    SubagentConversationMessage(message, name)
+                }
+                item(key = "bottom-space") { Spacer(Modifier.height(24.dp)) }
             }
-            itemsIndexed(
-                items = messages,
-                key = { index, message -> message.optString("id").ifBlank { "${message.optString("role")}-${message.optString("content").hashCode()}-$index" } },
-                contentType = { _, message -> message.optString("role") },
-            ) { _, message ->
-                SubagentConversationMessage(message, name)
+            AnimatedVisibility(
+                visible = showLatestButton,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 18.dp),
+                enter = fadeIn(tween(140)) + scaleIn(tween(190, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(100)) + scaleOut(tween(140, easing = FastOutSlowInEasing)),
+            ) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        panelScope.launch {
+                            conversationListState.animateScrollToItem(
+                                (conversationListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0),
+                                Int.MAX_VALUE,
+                            )
+                        }
+                    },
+                    shape = CircleShape,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                ) {
+                    Icon(HugeIcons.ArrowDown01, "\u56de\u5230\u5b50\u4ee3\u7406\u6700\u65b0\u8f93\u51fa", Modifier.size(18.dp))
+                }
             }
-            item(key = "bottom-space") { Spacer(Modifier.height(24.dp)) }
         }
     } else {
         Column(
