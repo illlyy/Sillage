@@ -1779,11 +1779,14 @@ private fun CollabAgentCapsule(
     var panelVisible by remember { mutableStateOf(false) }
     var panelEntered by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(initialId) }
-    val panelScope = rememberCoroutineScope()
-    val closePanel: () -> Unit = {
-        panelEntered = false
-        panelScope.launch { delay(210L); panelVisible = false }
-        Unit
+    val closePanel: () -> Unit = { panelEntered = false }
+    LaunchedEffect(panelVisible, panelEntered) {
+        if (panelVisible && !panelEntered) {
+            // This effect is cancelled automatically if the panel re-enters before the
+            // exit motion finishes, so an old delayed close cannot hide a new panel.
+            delay(210L)
+            panelVisible = false
+        }
     }
     Surface(
         modifier = Modifier.padding(top = 8.dp).clickable {
