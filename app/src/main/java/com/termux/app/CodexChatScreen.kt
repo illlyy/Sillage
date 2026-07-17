@@ -173,6 +173,7 @@ import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.MarkwonSpansFactory
 import io.noties.markwon.core.MarkwonTheme
 import org.commonmark.node.Code
+import org.commonmark.node.BlockQuote
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
@@ -1469,6 +1470,14 @@ private object NativeMarkdownRenderer {
                             textColor = android.graphics.Color.rgb(112, 57, 73),
                         )
                     }
+                    builder.setFactory(BlockQuote::class.java) { _, _ ->
+                        RoundedBlockQuoteSpan(
+                            margin = 16f * density,
+                            barWidth = 4f * density,
+                            radius = 2f * density,
+                            color = android.graphics.Color.rgb(207, 151, 164),
+                        )
+                    }
                 }
             })
             .usePlugin(StrikethroughPlugin.create())
@@ -1503,6 +1512,8 @@ private class RoundedInlineCodeSpan(
         end: Int,
         fm: android.graphics.Paint.FontMetricsInt?,
     ): Int {
+        val oldTypeface = paint.typeface
+        paint.typeface = android.graphics.Typeface.MONOSPACE
         if (fm != null) {
             val source = paint.fontMetricsInt
             fm.ascent = (source.ascent - verticalPadding).roundToInt()
@@ -1510,7 +1521,9 @@ private class RoundedInlineCodeSpan(
             fm.top = fm.ascent
             fm.bottom = fm.descent
         }
-        return (paint.measureText(text, start, end) + horizontalPadding * 2f).roundToInt()
+        val width = (paint.measureText(text, start, end) + horizontalPadding * 2f).roundToInt()
+        paint.typeface = oldTypeface
+        return width
     }
 
     override fun draw(
@@ -1542,6 +1555,36 @@ private class RoundedInlineCodeSpan(
         canvas.drawText(text, start, end, x + horizontalPadding, y.toFloat(), paint)
         paint.color = oldColor
         paint.typeface = oldTypeface
+    }
+}
+
+private class RoundedBlockQuoteSpan(
+    private val margin: Float,
+    private val barWidth: Float,
+    private val radius: Float,
+    private val color: Int,
+) : android.text.style.LeadingMarginSpan {
+    override fun getLeadingMargin(first: Boolean): Int = margin.roundToInt()
+
+    override fun drawLeadingMargin(
+        canvas: android.graphics.Canvas,
+        paint: android.graphics.Paint,
+        x: Int,
+        dir: Int,
+        top: Int,
+        baseline: Int,
+        bottom: Int,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        first: Boolean,
+        layout: android.text.Layout,
+    ) {
+        val oldColor = paint.color
+        val left = if (dir > 0) x.toFloat() else x - barWidth
+        paint.color = color
+        canvas.drawRoundRect(left, top.toFloat(), left + barWidth, bottom.toFloat(), radius, radius, paint)
+        paint.color = oldColor
     }
 }
 
