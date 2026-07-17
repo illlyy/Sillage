@@ -1393,29 +1393,6 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
 }
 
 @Composable
-private fun SmoothReasoningText(text: String, animateUpdates: Boolean) {
-    val latest = rememberUpdatedState(text)
-    var displayed by remember(animateUpdates) { mutableStateOf(if (animateUpdates) "" else text) }
-    LaunchedEffect(animateUpdates) {
-        if (!animateUpdates) {
-            displayed = latest.value
-            return@LaunchedEffect
-        }
-        while (true) {
-            val target = latest.value
-            if (!target.startsWith(displayed)) displayed = target
-            else if (displayed.length < target.length) {
-                val pending = target.length - displayed.length
-                val step = when { pending > 160 -> 10; pending > 64 -> 6; pending > 20 -> 4; else -> 2 }
-                displayed = target.take((displayed.length + step).coerceAtMost(target.length))
-            }
-            delay(32L)
-        }
-    }
-    Text(displayed, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyMedium, lineHeight = 22.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-}
-
-@Composable
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
@@ -1451,7 +1428,23 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
             Column {
-                if (state.reasoningText.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { SmoothReasoningText(state.reasoningText, animateUpdates = !state.reasoningComplete) }
+                if (state.reasoningText.isNotBlank()) {
+                    Box(modifier = Modifier.padding(top = 10.dp)) {
+                        if (state.reasoningComplete) {
+                            RichResponseText(state.reasoningText)
+                        } else {
+                            // Read the live snapshot directly. Buffering this text in a long-lived
+                            // coroutine can miss replacement updates while the panel stays composed.
+                            Text(
+                                text = state.reasoningText,
+                                modifier = Modifier.fillMaxWidth(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                lineHeight = 22.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
                 if (state.commandText.isNotBlank()) Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) { SelectionContainer { Text(state.commandText, modifier = Modifier.padding(10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
                 if (state.liveSubagents.isNotEmpty()) {
                     FlowRow(
