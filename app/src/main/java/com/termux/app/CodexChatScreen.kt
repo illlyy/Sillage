@@ -173,6 +173,7 @@ import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
 import kotlin.math.tanh
@@ -268,6 +269,7 @@ internal fun NativeChatScreen(
     onStop: () -> Unit,
     onNewConversation: () -> Unit,
     onResumeConversation: (String) -> Unit,
+    onLoadSubagentHistory: (String) -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -458,10 +460,12 @@ internal fun NativeChatScreen(
                                 val previousUser = retryPrompts[message.id]
                                 RikkaMessageItem(
                                     message = message,
+                                    chatState = state,
                                     liveState = state.takeIf { message.id == liveAssistantId },
                                     elapsedSeconds = elapsedSeconds,
                                     onEdit = { editMessage = message },
                                     onRetry = previousUser?.let { prompt -> { onRetry(prompt) } },
+                                    onLoadSubagentHistory = onLoadSubagentHistory,
                                     onQuote = { quoted ->
                                         val block = quoted.lineSequence().joinToString("\n") { "> $it" }
                                         onInputChange(listOf(state.input.trimEnd(), block, "").filter { it.isNotEmpty() }.joinToString("\n\n"))
@@ -469,7 +473,7 @@ internal fun NativeChatScreen(
                                 )
                             }
                             if (state.busy && liveAssistantId == null) {
-                                item("processing") { ProcessingPanel(state, elapsedSeconds, false) }
+                                item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory) }
                             }
                         }
                         AnimatedVisibility(
@@ -994,11 +998,11 @@ private fun RikkaEmptyState(
 }
 
 @Composable
-private fun RikkaMessageItem(message: NativeChatMessage, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatState, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit) {
     when (message.role) {
         NativeChatRole.USER -> RikkaUserMessage(message.content, onEdit)
-        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onQuote)
-        NativeChatRole.ACTIVITY -> RikkaActivityMessage(message)
+        NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onLoadSubagentHistory, onQuote)
+        NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
 }
@@ -1174,7 +1178,7 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
 }
 
 @Composable
-private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onQuote: (String) -> Unit) {
+private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1184,7 +1188,7 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
                 if (liveState != null) {
-                    ProcessingPanel(liveState, elapsedSeconds, text.isNotBlank())
+                    ProcessingPanel(liveState, elapsedSeconds, text.isNotBlank(), onLoadSubagentHistory)
                     Spacer(Modifier.height(6.dp))
                 }
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1290,7 +1294,7 @@ private fun SmoothReasoningText(text: String) {
 }
 
 @Composable
-private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean) {
+private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit) {
     var expanded by remember { mutableStateOf(true) }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
         if (state.reasoningComplete && answerStarted) {
@@ -1331,7 +1335,15 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
                         verticalArrangement = Arrangement.spacedBy(7.dp),
                     ) {
                         state.liveSubagents.forEach { raw ->
-                            runCatching { JSONObject(raw) }.getOrNull()?.let { CollabAgentCapsule(it) }
+                            runCatching { JSONObject(raw) }.getOrNull()?.let { item ->
+                                val thread = subagentThreadId(item)
+                                CollabAgentCapsule(
+                                    item = item,
+                                    history = state.subagentHistories[thread],
+                                    historyLoading = thread in state.loadingSubagentHistories,
+                                    onLoadHistory = onLoadSubagentHistory,
+                                )
+                            }
                         }
                     }
                 }
@@ -1510,7 +1522,7 @@ private fun MarkdownLikeText(text: String) {
 }
 
 @Composable
-private fun RikkaActivityMessage(message: NativeChatMessage) {
+private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatState, onLoadSubagentHistory: (String) -> Unit) {
     val text = message.content
     if (text.startsWith("NOTICE|")) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
@@ -1545,9 +1557,13 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
             Column {
         if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(reasoning) }
         if (command.isNotBlank()) ToolTextCard("命令执行", command, false)
+        val hasThreadBackedAgents = tools != null && (0 until tools.length()).any { toolIndex ->
+            runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.let(::subagentThreadId).orEmpty().isNotBlank()
+        }
         if (tools != null) for (index in 0 until tools.length()) {
             val item = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
             val type = item.optString("type")
+            if (type == "collabAgentToolCall" && hasThreadBackedAgents && subagentThreadId(item).isBlank()) continue
             val title = when (type) { "fileChange" -> "文件修改"; "mcpToolCall" -> "MCP 工具"; "webSearch" -> "网页搜索"; "collabAgentToolCall" -> "子代理"; else -> type }
             val detail = when (type) {
                 "commandExecution" -> buildString {
@@ -1575,7 +1591,15 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
                 else -> item.toString(2)
             }
             if (type == "commandExecution") CommandExecutionCard(item)
-            else if (type == "collabAgentToolCall") CollabAgentCapsule(item)
+            else if (type == "collabAgentToolCall") {
+                val thread = subagentThreadId(item)
+                CollabAgentCapsule(
+                    item = item,
+                    history = state.subagentHistories[thread],
+                    historyLoading = thread in state.loadingSubagentHistories,
+                    onLoadHistory = onLoadSubagentHistory,
+                )
+            }
             else ToolTextCard(title, detail, type == "fileChange")
         }
             }
@@ -1583,11 +1607,21 @@ private fun RikkaActivityMessage(message: NativeChatMessage) {
     }
 }
 
+private fun subagentThreadId(item: JSONObject): String = item.optString(
+    "agentThreadId",
+    item.optJSONArray("receiverThreadIds")?.optString(0).orEmpty(),
+)
+
 @Composable
-private fun CollabAgentCapsule(item: JSONObject) {
+private fun CollabAgentCapsule(
+    item: JSONObject,
+    history: String?,
+    historyLoading: Boolean,
+    onLoadHistory: (String) -> Unit,
+) {
     val tool = item.optString("tool", "")
     val receivers = item.optJSONArray("receiverThreadIds")
-    val agentId = item.optString("agentThreadId", receivers?.optString(0).orEmpty())
+    val agentId = subagentThreadId(item)
     val fallbackName = when (tool) {
         "spawn_agent", "spawnAgent" -> "\u65b0\u5b50\u4ee3\u7406"
         "wait", "wait_agent" -> "\u7b49\u5f85\u5b50\u4ee3\u7406"
@@ -1605,6 +1639,9 @@ private fun CollabAgentCapsule(item: JSONObject) {
     val reasoning = item.optString("reasoning", item.optString("thought", ""))
     val result = item.optString("output", item.optString("result", ""))
     val detail = item.optString("detail", "")
+    val hasThreadHistory = remember(history) {
+        history != null && runCatching { JSONArray(history).length() > 0 }.getOrDefault(false)
+    }
     var panelVisible by remember { mutableStateOf(false) }
     var panelEntered by remember { mutableStateOf(false) }
     var rawExpanded by remember { mutableStateOf(false) }
@@ -1617,7 +1654,11 @@ private fun CollabAgentCapsule(item: JSONObject) {
         }
     }
     Surface(
-        modifier = Modifier.padding(top = 8.dp).clickable { panelEntered = false; panelVisible = true },
+        modifier = Modifier.padding(top = 8.dp).clickable {
+            panelEntered = false
+            panelVisible = true
+            if (agentId.isNotBlank() && history == null) onLoadHistory(agentId)
+        },
         shape = CircleShape,
         color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1694,24 +1735,35 @@ private fun CollabAgentCapsule(item: JSONObject) {
                                 modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
                                 verticalArrangement = Arrangement.spacedBy(16.dp),
                             ) {
-                                if (task.isNotBlank()) AgentTimelineSection("\u4efb\u52a1", task)
-                                if (receivers != null && receivers.length() > 0) {
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Text("\u53c2\u4e0e\u7ebf\u7a0b", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            for (index in 0 until receivers.length()) {
-                                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                                                    Text(receivers.optString(index).take(10), modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                                if (historyLoading) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                        Spacer(Modifier.width(9.dp))
+                                        Text("\u6b63\u5728\u52a0\u8f7d\u5b50\u4ee3\u7406\u5bf9\u8bdd", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                if (hasThreadHistory && history != null) {
+                                    SubagentHistoryTimeline(history)
+                                } else {
+                                    if (task.isNotBlank()) AgentTimelineSection("\u4efb\u52a1", task)
+                                    if (receivers != null && receivers.length() > 0) {
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Text("\u53c2\u4e0e\u7ebf\u7a0b", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                for (index in 0 until receivers.length()) {
+                                                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                                                        Text(receivers.optString(index).take(10), modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                                if (reasoning.isNotBlank()) AgentTimelineSection("\u601d\u8003", reasoning)
-                                if (detail.isNotBlank() && detail != reasoning && detail != result) AgentTimelineSection("\u6267\u884c", detail)
-                                if (result.isNotBlank()) AgentTimelineSection("\u7ed3\u679c", result)
-                                if (task.isBlank() && reasoning.isBlank() && detail.isBlank() && result.isBlank()) {
-                                    AgentTimelineSection("\u4e8b\u4ef6\u8be6\u60c5", item.toString(2), monospace = true)
+                                    if (reasoning.isNotBlank()) AgentTimelineSection("\u601d\u8003", reasoning)
+                                    if (detail.isNotBlank() && detail != reasoning && detail != result) AgentTimelineSection("\u6267\u884c", detail)
+                                    if (result.isNotBlank()) AgentTimelineSection("\u7ed3\u679c", result)
+                                    if (!historyLoading && task.isBlank() && reasoning.isBlank() && detail.isBlank() && result.isBlank()) {
+                                        AgentTimelineSection("\u4e8b\u4ef6\u8be6\u60c5", item.toString(2), monospace = true)
+                                    }
                                 }
                                 Surface(
                                     modifier = Modifier.fillMaxWidth().clickable { rawExpanded = !rawExpanded },
@@ -1730,6 +1782,44 @@ private fun CollabAgentCapsule(item: JSONObject) {
                                 Spacer(Modifier.height(24.dp))
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubagentHistoryTimeline(history: String) {
+    val messages = remember(history) {
+        runCatching {
+            val source = JSONArray(history)
+            buildList {
+                for (index in 0 until source.length()) source.optJSONObject(index)?.let(::add)
+            }
+        }.getOrDefault(emptyList())
+    }
+    messages.forEach { message ->
+        val role = message.optString("role")
+        val content = message.optString("content")
+        when (role) {
+            "user" -> AgentTimelineSection("\u4efb\u52a1", content)
+            "assistant" -> AgentTimelineSection("\u5b50\u4ee3\u7406\u8f93\u51fa", content)
+            "activity" -> {
+                val payload = if (content.startsWith("PROCESS2|")) runCatching {
+                    JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+                }.getOrNull() else null
+                if (payload != null) {
+                    val reasoning = payload.optString("reasoning")
+                    val command = payload.optString("command")
+                    if (reasoning.isNotBlank()) AgentTimelineSection("\u601d\u8003", reasoning)
+                    if (command.isNotBlank()) AgentTimelineSection("\u547d\u4ee4\u6267\u884c", command, monospace = true)
+                    val tools = payload.optJSONArray("tools")
+                    if (tools != null) for (index in 0 until tools.length()) {
+                        val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull()
+                        val label = tool?.optString("type", "\u5de5\u5177\u8c03\u7528") ?: "\u5de5\u5177\u8c03\u7528"
+                        val value = tool?.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))).orEmpty()
+                        AgentTimelineSection(label, value.ifBlank { tool?.toString(2).orEmpty() }, monospace = label == "commandExecution")
                     }
                 }
             }

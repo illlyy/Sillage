@@ -300,6 +300,27 @@ final class CodexAppServerBridge {
         }, "CodexConversationResume").start();
     }
 
+    void loadSubagentHistory(String subagentThreadId) {
+        if (subagentThreadId == null || subagentThreadId.trim().isEmpty()) return;
+        new Thread(() -> {
+            JSONObject result = new JSONObject();
+            try {
+                File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
+                File sessionFile = findSessionFile(sessionsRoot, subagentThreadId);
+                result.put("threadId", subagentThreadId);
+                result.put("messages", sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile));
+                result.put("found", sessionFile != null);
+            } catch (Exception error) {
+                try {
+                    result.put("threadId", subagentThreadId);
+                    result.put("messages", new JSONArray());
+                    result.put("error", error.getMessage());
+                } catch (Exception ignored) {}
+            }
+            emit("onSubagentHistory", result.toString());
+        }, "CodexSubagentHistory").start();
+    }
+
     @JavascriptInterface public void interruptCurrentTurn() {
         String thread = threadId;
         String turn = activeTurnId;
@@ -730,6 +751,19 @@ final class CodexAppServerBridge {
                 try { record = new JSONObject(line); } catch (Exception ignored) { continue; }
                 JSONObject payload = record.optJSONObject("payload");
                 if (payload == null) continue;
+                if ("event_msg".equals(record.optString("type")) && "sub_agent_activity".equals(payload.optString("type"))) {
+                    String agentThread = payload.optString("agent_thread_id", "");
+                    String agentPath = payload.optString("agent_path", "");
+                    String kind = payload.optString("kind", "started");
+                    JSONObject agent = new JSONObject().put("type", "collabAgentToolCall")
+                        .put("id", payload.optString("event_id", agentThread))
+                        .put("tool", "subAgentActivity")
+                        .put("agentThreadId", agentThread)
+                        .put("agentName", agentPath.isEmpty() ? "subagent" : agentPath.substring(agentPath.lastIndexOf('/') + 1))
+                        .put("status", "started".equals(kind) ? "completed" : kind);
+                    tools.put(agent);
+                    continue;
+                }
                 if ("event_msg".equals(record.optString("type")) && "task_complete".equals(payload.optString("type"))) {
                     long durationMs = payload.optLong("duration_ms", 0L);
                     if (lastProcessIndex >= 0 && durationMs > 0) {
@@ -828,8 +862,25 @@ final class CodexAppServerBridge {
                 .put("output", output).put("status", "completed");
         }
         if (lower.contains("collab") || lower.contains("agent")) {
-            return new JSONObject().put("type", "collabAgentToolCall").put("name", name)
-                .put("detail", output.isEmpty() ? args.toString(2) : output).put("status", "completed");
+            JSONObject result = new JSONObject().put("type", "collabAgentToolCall").put("name", name)
+                .put("tool", name).put("detail", output.isEmpty() ? args.toString(2) : output).put("status", "completed");
+            String taskName = args.optString("task_name", args.optString("taskName", ""));
+            String taskMessage = args.optString("message", args.optString("task", args.optString("prompt", "")));
+            if (!taskName.isEmpty()) result.put("agentName", taskName);
+            if (!taskMessage.isEmpty()) result.put("task", taskMessage);
+            String agentId = args.optString("agent_id", args.optString("agentId", args.optString("thread_id", args.optString("threadId", ""))));
+            try {
+                JSONObject outputJson = new JSONObject(output);
+                if (agentId.isEmpty()) agentId = outputJson.optString("agent_id", outputJson.optString("agentId", outputJson.optString("thread_id", outputJson.optString("threadId", ""))));
+                String nickname = outputJson.optString("nickname", outputJson.optString("name", ""));
+                if (!nickname.isEmpty()) result.put("agentName", nickname);
+            } catch (Exception ignored) {}
+            if (agentId.isEmpty()) {
+                java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").matcher(output);
+                if (matcher.find()) agentId = matcher.group();
+            }
+            if (!agentId.isEmpty()) result.put("agentThreadId", agentId);
+            return result;
         }
         return new JSONObject().put("type", "mcpToolCall").put("tool", name)
             .put("arguments", args).put("output", output).put("status", "completed");

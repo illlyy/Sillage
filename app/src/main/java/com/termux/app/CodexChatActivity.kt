@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.termux.shared.termux.TermuxConstants
@@ -51,6 +52,8 @@ internal class NativeChatState {
     val attachments = mutableStateListOf<NativeAttachment>()
     val toolDetails = mutableStateListOf<String>()
     val liveSubagents = mutableStateListOf<String>()
+    val subagentHistories = mutableStateMapOf<String, String>()
+    val loadingSubagentHistories = mutableStateListOf<String>()
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
     var ready by mutableStateOf(false)
@@ -251,6 +254,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onStop = ::stopCurrentTurn,
                     onNewConversation = ::newConversation,
                     onResumeConversation = ::resumeConversation,
+                    onLoadSubagentHistory = ::loadSubagentHistory,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { chatState.attachments.remove(it) },
@@ -455,6 +459,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         refreshConversations()
     }
 
+    private fun loadSubagentHistory(threadId: String) {
+        if (threadId.isBlank() || threadId in chatState.loadingSubagentHistories) return
+        if (chatState.subagentHistories.containsKey(threadId)) return
+        chatState.loadingSubagentHistories.add(threadId)
+        bridge?.loadSubagentHistory(threadId)
+    }
+
     private fun resumeConversation(threadId: String) {
         pendingConversationAnimationKey = threadId
         chatState.busy = false
@@ -510,6 +521,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onToolComplete" -> { chatState.toolDetails.add(value); chatState.revision++ }
             "onSubagentEvent" -> chatState.updateSubagent(value)
+            "onSubagentHistory" -> {
+                val payload = runCatching { JSONObject(value) }.getOrNull()
+                val subagentThread = payload?.optString("threadId").orEmpty()
+                if (subagentThread.isNotBlank()) {
+                    chatState.loadingSubagentHistories.remove(subagentThread)
+                    chatState.subagentHistories[subagentThread] = payload?.optJSONArray("messages")?.toString() ?: "[]"
+                }
+            }
             "onItem" -> chatState.addActivity(value)
             "onTurnComplete" -> {
                 chatState.completeTurn()
