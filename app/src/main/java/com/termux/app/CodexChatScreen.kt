@@ -117,6 +117,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
@@ -147,6 +148,7 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -318,7 +320,7 @@ internal fun NativeChatScreen(
         if (state.messages.isNotEmpty()) {
             val visibleCount = minOf(historyLimit, state.messages.size)
             val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-            listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
+            listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
         }
     }
 
@@ -326,7 +328,8 @@ internal fun NativeChatScreen(
         if (followOutput && state.messages.isNotEmpty()) {
             val visibleCount = minOf(historyLimit, state.messages.size)
             val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-            listState.animateScrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
+            delay(16L)
+            listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
         }
     }
 
@@ -334,7 +337,7 @@ internal fun NativeChatScreen(
         if (followOutput && !listDragged && state.messages.isNotEmpty()) {
             val visibleCount = minOf(historyLimit, state.messages.size)
             val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-            listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
+            listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
         }
     }
 
@@ -349,7 +352,7 @@ internal fun NativeChatScreen(
             if (followOutput && !listState.isScrollInProgress && canScrollForward && state.messages.isNotEmpty()) {
                 val visibleCount = minOf(historyLimit, state.messages.size)
                 val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-                listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
+                listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
             }
         }
     }
@@ -1029,6 +1032,8 @@ private fun FinalOnlyAnswerReveal(text: String, revealStartedAt: Long) {
     }
 }
 
+private data class TextRevealSpan(val start: Int, val end: Int, val startedAt: Long)
+
 @Composable
 private fun StreamingResponseText(text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean) {
     if (finalOnlyReveal) {
@@ -1038,6 +1043,8 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
     val latestText = rememberUpdatedState(text)
     val animateReveal = streaming || (revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 30_000L)
     var displayedText by remember { mutableStateOf(if (animateReveal) "" else text) }
+    var revealSpans by remember { mutableStateOf(emptyList<TextRevealSpan>()) }
+    var revealClock by remember { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
     var showRichText by remember { mutableStateOf(!animateReveal) }
 
     LaunchedEffect(streaming, animateReveal) {
@@ -1052,6 +1059,7 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
             val target = latestText.value
             if (!target.startsWith(displayedText)) {
                 displayedText = ""
+                revealSpans = emptyList()
             } else if (displayedText.length < target.length) {
                 val pending = target.length - displayedText.length
                 val step = when {
@@ -1061,19 +1069,45 @@ private fun StreamingResponseText(text: String, streaming: Boolean, revealStarte
                     pending > 20 -> 4
                     else -> 2
                 }
-                val nextLength = (displayedText.length + step).coerceAtMost(target.length)
+                val previousLength = displayedText.length
+                val nextLength = (previousLength + step).coerceAtMost(target.length)
+                val now = android.os.SystemClock.uptimeMillis()
+                revealSpans = (revealSpans.filter { now - it.startedAt < 300L } + TextRevealSpan(previousLength, nextLength, now))
+                revealClock = now
                 displayedText = target.take(nextLength)
             }
             delay(if (streaming) 48L else 36L)
         }
         displayedText = latestText.value
-        delay(24L)
+        delay(300L)
         showRichText = true
     }
 
+    LaunchedEffect(revealSpans) {
+        while (!showRichText && revealSpans.any { revealClock - it.startedAt < 280L }) {
+            revealClock = android.os.SystemClock.uptimeMillis()
+            delay(32L)
+        }
+    }
+
     if (!showRichText) {
+        val animatedText = androidx.compose.ui.text.buildAnnotatedString {
+            var cursor = 0
+            revealSpans.sortedBy { it.start }.forEach { span ->
+                val safeStart = span.start.coerceIn(cursor, displayedText.length)
+                val safeEnd = span.end.coerceIn(safeStart, displayedText.length)
+                if (cursor < safeStart) append(displayedText.substring(cursor, safeStart))
+                val progress = ((revealClock - span.startedAt).toFloat() / 280f).coerceIn(0f, 1f)
+                val alpha = 0.16f + 0.84f * progress
+                withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha))) {
+                    append(displayedText.substring(safeStart, safeEnd))
+                }
+                cursor = safeEnd
+            }
+            if (cursor < displayedText.length) append(displayedText.substring(cursor))
+        }
         Text(
-            text = displayedText,
+            text = animatedText,
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodyLarge,
             lineHeight = 24.sp,
