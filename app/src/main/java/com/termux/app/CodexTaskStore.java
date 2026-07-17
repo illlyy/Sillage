@@ -15,7 +15,7 @@ import java.util.List;
 final class CodexTaskStore {
     private static final String PREFS = "codex_mobile";
     private static final String KEY = "overlay_tasks_v1";
-    private static final int MAX_TASKS = 12;
+    private static final int MAX_TASKS = 100;
 
     static final String RUNNING = "running";
     static final String COMPLETED = "completed";
@@ -63,6 +63,22 @@ final class CodexTaskStore {
         String title = fallbackTitle(threadId);
         for (Task task : tasks) if (threadId.equals(task.threadId)) { title = task.title; break; }
         update(context, threadId, title, failed ? FAILED : COMPLETED);
+    }
+
+    /** A missing process-scoped runtime means persisted running entries are orphaned. */
+    static synchronized void markInterruptedTasks(Context context) {
+        List<Task> tasks = read(context);
+        boolean changed = false;
+        ArrayList<Task> reconciled = new ArrayList<>(tasks.size());
+        for (Task task : tasks) {
+            if (RUNNING.equals(task.state)) {
+                reconciled.add(new Task(task.threadId, task.title, FAILED, task.updatedAt));
+                changed = true;
+            } else {
+                reconciled.add(task);
+            }
+        }
+        if (changed) write(context, reconciled);
     }
 
     static synchronized List<Task> current(Context context) {

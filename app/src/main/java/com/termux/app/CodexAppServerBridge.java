@@ -28,9 +28,9 @@ final class CodexAppServerBridge {
     }
 
     private static final String TAG = "IlyopCodexBridge";
-    private final Activity activity;
+    private volatile Activity activity;
     private final WebView webView;
-    private final EventListener eventListener;
+    private volatile EventListener eventListener;
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final Map<String, Long> turnStartedAtMs = new ConcurrentHashMap<>();
     private final Set<String> pendingFinalTurns = ConcurrentHashMap.newKeySet();
@@ -75,6 +75,18 @@ final class CodexAppServerBridge {
     }
 
     void setDesktopBridge(CodexDesktopBridge bridge) { this.desktopBridge = bridge; }
+
+    void rebind(Activity activity, EventListener listener) {
+        if (activity != null) this.activity = activity;
+        this.eventListener = listener;
+    }
+
+    void detach(EventListener listener) {
+        if (this.eventListener == listener) this.eventListener = null;
+    }
+
+    String currentVisibleThreadId() { return visibleThreadId; }
+    boolean isRunning() { return process != null || writer != null; }
 
     void sendDesktopRequest(JSONObject request) {
         try {
@@ -715,10 +727,12 @@ final class CodexAppServerBridge {
             agentDeltaCount = 0;
             agentDeltaChars = 0;
             String itemId = item == null ? "" : item.optString("id", "");
-            if (itemId.isEmpty() || !streamedAgentItemIds.remove(itemId)) {
-                String finalText = extractAgentMessageText(item);
-                if (!finalText.isEmpty()) emit("onFinalAnswer", finalText);
-            }
+            if (!itemId.isEmpty()) streamedAgentItemIds.remove(itemId);
+            // Always deliver the authoritative completed item. appendAssistantFinal()
+            // merges it with streamed content, and it repairs missing prefixes when the
+            // Activity detached and re-attached in the middle of this item.
+            String finalText = extractAgentMessageText(item);
+            if (!finalText.isEmpty()) emit("onFinalAnswer", finalText);
             scheduleMissingTurnCompletion(params);
         } else if (primaryEvent && ("item/reasoning/summaryTextDelta".equals(method) || "item/reasoning/textDelta".equals(method)) && params != null) {
             emit("onReasoningDelta", params.optString("delta", ""));

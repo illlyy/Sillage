@@ -3426,6 +3426,11 @@ private fun RikkaDrawer(
     onOpenLegacyWebUi: () -> Unit,
 ) {
     var selectedCategory by remember { mutableStateOf("全部") }
+    val conversationListState = rememberLazyListState()
+    val newestRunningThreadId = conversations.firstOrNull { it.state == CodexTaskStore.RUNNING }?.threadId
+    LaunchedEffect(newestRunningThreadId) {
+        if (newestRunningThreadId != null) conversationListState.animateScrollToItem(0)
+    }
     val projectPaths = conversations.map { it.projectPath }.filter { it.isNotBlank() }.distinct()
     val visibleConversations = conversations.filter { conversation ->
         when (selectedCategory) {
@@ -3474,19 +3479,28 @@ private fun RikkaDrawer(
                 }
             }
 
-            LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            LazyColumn(
+                state = conversationListState,
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
                 items(visibleConversations, key = { it.threadId }) { conversation ->
                     NavigationDrawerItem(
                         label = { Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         selected = false,
                         onClick = { onResumeConversation(conversation.threadId) },
                         icon = {
-                            val tint = when (conversation.state) {
-                                "running" -> MaterialTheme.colorScheme.primary
-                                "failed" -> MaterialTheme.colorScheme.error
-                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            if (conversation.state == CodexTaskStore.RUNNING) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            } else {
+                                val tint = if (conversation.state == CodexTaskStore.FAILED) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                Icon(HugeIcons.Sparkles, conversation.state, modifier = Modifier.size(19.dp), tint = tint)
                             }
-                            Icon(HugeIcons.Sparkles, conversation.state, modifier = Modifier.size(19.dp), tint = tint)
                         },
                         badge = { ConversationMenu(conversation, onRenameConversation, onDeleteConversation, onToggleFavorite) },
                         colors = NavigationDrawerItemDefaults.colors(unselectedContainerColor = Color.Transparent),

@@ -270,10 +270,10 @@ public final class CodexHomeActivity extends Activity {
             refreshRuntimeState();
         }
         refreshMihomoUi();
-        if (this.backendSuspendedForNative) {
+        if (this.backendSuspendedForNative && !CodexNativeRuntime.exists()) {
             this.backendSuspendedForNative = false;
-            // Native chat owns a separate stdio app-server. Restart the WebUI backend
-            // only after native chat leaves the foreground, never concurrently.
+            // Restart WebUI only after the process-scoped native runtime is explicitly
+            // shut down. Merely leaving CodexChatActivity must not kill background turns.
             if (this.webUiLoaded && !this.appServerStarted) restartWebUiAndBackend();
         }
         if (this.prefs != null && this.prefs.getBoolean("overlay_enabled", false) && !Settings.canDrawOverlays(this)) {
@@ -4473,6 +4473,10 @@ public final class CodexHomeActivity extends Activity {
 
     public void startWebUi() {
         closeDrawer();
+        if (CodexNativeRuntime.exists()) {
+            CodexNativeRuntime.shutdown();
+            this.backendSuspendedForNative = false;
+        }
         final CodexProviderStore.Profile active = providerStore.active();
         final String url = baseUrl.getText().toString().trim(), key = apiKey.getText().toString().trim(), selectedModel = model.getText().toString().trim();
         if (url.isEmpty() || key.isEmpty()) { showConfiguration(); Toast.makeText(this, "\u8bf7\u5148\u521b\u5efa\u5e76\u542f\u7528 API \u914d\u7f6e", Toast.LENGTH_SHORT).show(); return; }

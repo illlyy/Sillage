@@ -344,6 +344,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private val chatState = NativeChatState()
     private var bridge: CodexAppServerBridge? = null
     private var pendingConversationAnimationKey: String? = null
+    private var conversationRefreshGeneration = 0
+    private val conversationProjectCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val conversationTitleCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val taskPreferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "overlay_tasks_v1") {
+            android.util.Log.d("IlyopCodexTasks", "preference changed")
+            refreshConversations()
+        }
+    }
     private val streamHandler = Handler(Looper.getMainLooper())
     private val pendingReasoning = StringBuilder()
     private val pendingAnswer = StringBuilder()
@@ -448,6 +457,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
         }
 
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(taskPreferenceListener)
         refreshConversations()
         startBackend()
     }
@@ -507,20 +517,26 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false) ||
             (profile.proxyEnabled && profile.proxyWebUi)
-        bridge = CodexAppServerBridge(this, this).also {
-            it.start(
-                profile.baseUrl,
-                profile.apiKey,
-                profile.model,
-                profile.apiFormat.takeUnless { it.isBlank() || it == "auto" } ?: "openai_responses",
-                routeThroughMihomo,
-                profile.forwardReasoningContext,
-                profile.ultraSubagentLimit,
-                profile.normalSubagentLimit,
-                profile.ultraTransportEfforts(),
-                profile.customSubagentStability && profile.hasCustomV2Models(),
-            )
+        val retainedRuntime = CodexNativeRuntime.exists()
+        val retainedThread = CodexNativeRuntime.currentThreadId()
+        bridge = CodexNativeRuntime.attach(
+            this,
+            this,
+            profile.baseUrl,
+            profile.apiKey,
+            profile.model,
+            profile.apiFormat.takeUnless { it.isBlank() || it == "auto" } ?: "openai_responses",
+            routeThroughMihomo,
+            profile.forwardReasoningContext,
+            profile.ultraSubagentLimit,
+            profile.normalSubagentLimit,
+            profile.ultraTransportEfforts(),
+            profile.customSubagentStability && profile.hasCustomV2Models(),
+        )
+        if (retainedRuntime && !retainedThread.isNullOrBlank()) {
+            streamHandler.postDelayed({ resumeConversation(retainedThread) }, 80L)
         }
+
     }
 
     private fun editMessage(messageId: String, text: String) {
@@ -654,23 +670,53 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun refreshConversations() {
+        val generation = ++conversationRefreshGeneration
+        android.util.Log.d("IlyopCodexTasks", "refresh generation=$generation")
+        val favorites = favoriteThreadIds()
+        val snapshot = CodexTaskStore.current(this)
+
+        // Task status and stored titles are cheap SharedPreferences data. Publish them
+        // immediately so a newly running/completed task appears without waiting for a
+        // recursive session-file scan.
+        val immediate = snapshot.map { task ->
+            NativeConversation(
+                task.threadId,
+                conversationTitleCache[task.threadId] ?: task.title,
+                task.state,
+                conversationProjectCache[task.threadId].orEmpty(),
+                task.threadId in favorites,
+            )
+        }.sortedByDescending { it.state == CodexTaskStore.RUNNING }
+        applyConversationSnapshot(generation, immediate)
+
         Thread {
-            val favorites = favoriteThreadIds()
-            val tasks = CodexTaskStore.current(this).mapNotNull { task ->
-                var title = task.title
-                val resolved = CodexAppServerBridge.resolveConversationTitle(task.threadId)
-                if (resolved.isNotBlank() && title.startsWith("Codex 任务")) {
-                    title = resolved
-                    CodexTaskStore.updateTitle(this, task.threadId, resolved)
+            val enriched = snapshot.mapNotNull { task ->
+                var title = conversationTitleCache[task.threadId] ?: task.title
+                val fallbackTitle = title.startsWith("Codex 任务")
+                if (fallbackTitle) {
+                    val resolvedTitle = CodexAppServerBridge.resolveConversationTitle(task.threadId)
+                    if (resolvedTitle.isNotBlank()) {
+                        title = resolvedTitle
+                        conversationTitleCache[task.threadId] = resolvedTitle
+                    }
                 }
-                if (resolved.isBlank() && title.startsWith("Codex 任务")) null
-                else NativeConversation(task.threadId, title, task.state, CodexAppServerBridge.resolveConversationProject(task.threadId), task.threadId in favorites)
-            }
-            runOnUiThread {
-                chatState.conversations.clear()
-                chatState.conversations.addAll(tasks)
-            }
-        }.start()
+                val project = conversationProjectCache[task.threadId] ?: CodexAppServerBridge
+                    .resolveConversationProject(task.threadId)
+                    .also { resolved -> if (resolved.isNotBlank()) conversationProjectCache[task.threadId] = resolved }
+                if (fallbackTitle && title.startsWith("Codex 任务")) null
+                else NativeConversation(task.threadId, title, task.state, project, task.threadId in favorites)
+            }.sortedByDescending { it.state == CodexTaskStore.RUNNING }
+            applyConversationSnapshot(generation, enriched)
+        }.apply { name = "CodexConversationMetadata" }.start()
+    }
+
+    private fun applyConversationSnapshot(generation: Int, conversations: List<NativeConversation>) {
+        runOnUiThread {
+            if (generation != conversationRefreshGeneration || isFinishing || isDestroyed) return@runOnUiThread
+            android.util.Log.d("IlyopCodexTasks", "apply generation=$generation count=${conversations.size} first=${conversations.firstOrNull()?.title}")
+            chatState.conversations.clear()
+            chatState.conversations.addAll(conversations)
+        }
     }
 
     private fun favoriteThreadIds(): Set<String> {
@@ -722,10 +768,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         discardPendingStreamEvents("resume")
         pendingConversationAnimationKey = threadId
         currentThreadId = threadId
+        val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
         chatState.resetConversation()
-        chatState.conversationTitle = chatState.conversations.firstOrNull { it.threadId == threadId }?.title ?: "对话"
+        chatState.conversationTitle = selectedConversation?.title ?: "对话"
+        if (selectedConversation?.state == CodexTaskStore.RUNNING) {
+            chatState.busy = true
+            chatState.processingLabel = "正在重新连接任务"
+            chatState.turnStartedAt = System.currentTimeMillis()
+            chatState.phaseStartedAt = chatState.turnStartedAt
+            startFrameDiagnostics()
+        }
         chatState.ready = false
-        chatState.connectionLabel = "正在恢复对话…"
+        chatState.connectionLabel = "\u6b63\u5728\u6062\u590d\u5bf9\u8bdd\u2026"
         bridge?.resumeConversation(threadId)
     }
 
@@ -742,6 +796,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun openLegacyWebUi() {
+        CodexNativeRuntime.shutdown()
         startActivity(
             Intent(this, CodexHomeActivity::class.java)
                 .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
@@ -789,6 +844,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onHistory" -> {
                 chatState.replaceHistory(value)
+                if (chatState.busy) {
+                    // A resumed running turn starts a fresh live phase after the persisted
+                    // snapshot. Never calculate duration from the reset value 0, and never
+                    // merge the new final answer into an older assistant message.
+                    chatState.turnMessageStartIndex = chatState.messages.size
+                    chatState.phaseMessageStartIndex = chatState.messages.size
+                    if (chatState.phaseStartedAt <= 0L) chatState.phaseStartedAt = System.currentTimeMillis()
+                }
                 pendingConversationAnimationKey?.let { key -> chatState.conversationAnimationKey = key }
                 pendingConversationAnimationKey = null
             }
@@ -882,7 +945,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onDestroy() {
         streamHandler.removeCallbacksAndMessages(null)
-        bridge?.stop()
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(taskPreferenceListener)
+        CodexNativeRuntime.detach(this)
         bridge = null
         super.onDestroy()
     }
