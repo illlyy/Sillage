@@ -106,6 +106,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
@@ -1589,11 +1590,17 @@ private fun RikkaChatInput(
     val bottomCorner by animateDpAsState(if (imeVisible) 0.dp else 28.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomCorner")
     val sidePadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputSidePadding")
     val bottomPadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomPadding")
+    val keyboardOverlap by animateDpAsState(if (imeVisible) 3.dp else 0.dp, tween(180, easing = FastOutSlowInEasing), label = "inputKeyboardOverlap")
+    val inputBorderColor by animateColorAsState(
+        if (imeVisible) MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        tween(160),
+        label = "inputBorderColor",
+    )
     val inputShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = bottomCorner, bottomStart = bottomCorner)
     val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     Surface(modifier = modifier, color = Color.Transparent) {
         Column(
-            modifier = insetModifier.padding(start = sidePadding, end = sidePadding, top = 8.dp, bottom = bottomPadding),
+            modifier = insetModifier.padding(start = sidePadding, end = sidePadding, top = 8.dp, bottom = bottomPadding).offset(y = keyboardOverlap),
         ) {
             Surface(
                 modifier = Modifier.fillMaxWidth().onSizeChanged { onHeightChanged(it.height) }.animateContentSize(
@@ -1601,7 +1608,7 @@ private fun RikkaChatInput(
                 ),
                 shape = inputShape,
                 tonalElevation = 0.dp,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                border = BorderStroke(1.dp, inputBorderColor),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
             ) {
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
