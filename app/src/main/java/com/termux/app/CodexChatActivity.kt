@@ -46,6 +46,7 @@ internal data class NativeChatMessage(
     val revealStartedAt: Long = 0L,
     val finalOnlyReveal: Boolean = false,
     val skills: List<NativeSkill> = emptyList(),
+    val attachments: List<NativeAttachment> = emptyList(),
 )
 
 internal class NativeChatState {
@@ -90,8 +91,8 @@ internal class NativeChatState {
         revision++
     }
 
-    fun addUser(text: String, skills: List<NativeSkill> = emptyList()) {
-        messages.add(NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList()))
+    fun addUser(text: String, skills: List<NativeSkill> = emptyList(), attachments: List<NativeAttachment> = emptyList()) {
+        messages.add(NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList()))
         turnMessageStartIndex = messages.size
         busy = true
         processingLabel = "处理中"
@@ -179,6 +180,14 @@ internal class NativeChatState {
                     if (name.isNotEmpty()) add(NativeSkill(name, skill.optString("description"), path))
                 }
             }
+            val messageAttachments = buildList {
+                val attachmentArray = item.optJSONArray("attachments") ?: JSONArray()
+                for (attachmentIndex in 0 until attachmentArray.length()) {
+                    val attachment = attachmentArray.optJSONObject(attachmentIndex) ?: continue
+                    val path = attachment.optString("path").trim()
+                    if (path.isNotEmpty()) add(NativeAttachment(attachment.optString("name", File(path).name), path, attachment.optBoolean("image")))
+                }
+            }
             if (role == NativeChatRole.ACTIVITY && content.startsWith("PLAN|")) {
                 runCatching {
                     val decoded = String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8)
@@ -188,7 +197,7 @@ internal class NativeChatState {
                 }
                 continue
             }
-            if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content, skills = messageSkills))
+            if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content, skills = messageSkills, attachments = messageAttachments))
         }
         // One snapshot mutation avoids recomposing the chat once for every historical item.
         messages.clear()
@@ -223,12 +232,13 @@ internal class NativeChatState {
 
     fun completeTurn() {
         val duration = ((System.currentTimeMillis() - turnStartedAt).coerceAtLeast(0L) / 1000L)
-        if (reasoningText.isNotBlank() || commandText.isNotBlank() || toolDetails.isNotEmpty()) {
+        run {
             val payload = JSONObject()
                 .put("duration", duration)
                 .put("reasoning", reasoningText.trim())
                 .put("command", commandText.trim())
                 .put("tools", JSONArray(toolDetails))
+                .put("reasoningUnavailable", reasoningText.isBlank())
                 .toString()
             val process = "PROCESS2|" + Base64.encodeToString(payload.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
             val assistantIndex = (turnMessageStartIndex until messages.size).firstOrNull { messages[it].role == NativeChatRole.ASSISTANT } ?: messages.size
@@ -350,6 +360,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.modelLabel = profile.model.ifBlank { "默认模型" }
         chatState.connectionLabel = "正在连接 ${chatState.modelLabel}…"
 
+        // Native chat owns a dedicated reasoning panel, so request summaries from
+        // capable models even if the shared WebUI profile defaults them to off.
+        profile.models.forEach { model ->
+            if (model.reasoningSummaries && model.defaultReasoningSummary.equals("none", ignoreCase = true)) {
+                model.defaultReasoningSummary = "detailed"
+            }
+        }
+        CodexModelCatalog.writeAtomic(
+            File(File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "ilyop-model-catalog.json"),
+            profile.models,
+        )
+
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false) ||
             (profile.proxyEnabled && profile.proxyWebUi)
         bridge = CodexAppServerBridge(this, this).also {
@@ -422,7 +444,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             chatState.conversationTitle = value.lineSequence().firstOrNull().orEmpty().trim().let { if (it.length > 28) it.take(27) + "…" else it }.ifBlank { "新对话" }
         }
         val referencedSkills = chatState.selectedSkills.toList()
-        chatState.addUser(value, referencedSkills)
+        val referencedAttachments = chatState.attachments.toList()
+        chatState.addUser(value, referencedSkills, referencedAttachments)
         val attachments = JSONArray().also { array ->
             chatState.attachments.forEach { attachment ->
                 array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))

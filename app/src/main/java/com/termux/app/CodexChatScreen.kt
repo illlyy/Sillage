@@ -499,6 +499,7 @@ internal fun NativeChatScreen(
                                     onReasoningAutoCollapse = {
                                         followPausedUntil = android.os.SystemClock.uptimeMillis() + 560L
                                     },
+                                    onPreviewAttachment = { previewAttachment = it },
                                 )
                             }
                             if (state.busy && liveAssistantId == null) {
@@ -1066,9 +1067,9 @@ private fun RikkaEmptyState(
 }
 
 @Composable
-private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatState, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}) {
+private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatState, liveState: NativeChatState?, elapsedSeconds: Long, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}, onPreviewAttachment: (NativeAttachment) -> Unit = {}) {
     when (message.role) {
-        NativeChatRole.USER -> RikkaUserMessage(message.content, message.skills, onEdit)
+        NativeChatRole.USER -> RikkaUserMessage(message.content, message.skills, message.attachments, onEdit, onPreviewAttachment)
         NativeChatRole.ASSISTANT -> RikkaAssistantMessage(message.id, message.content, message.streaming, message.revealStartedAt, message.finalOnlyReveal, liveState, elapsedSeconds, onRetry, onLoadSubagentHistory, onQuote, onReasoningAutoCollapse)
         NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
         NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
@@ -1076,10 +1077,40 @@ private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatSt
 }
 
 @Composable
-private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, onEdit: () -> Unit) {
+private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>, onEdit: () -> Unit, onPreviewAttachment: (NativeAttachment) -> Unit) {
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        if (attachments.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                attachments.forEach { attachment ->
+                    Surface(
+                        modifier = Modifier.widthIn(max = 250.dp).clickable { onPreviewAttachment(attachment) },
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        Row(Modifier.padding(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (attachment.image) {
+                                AttachmentThumbnail(attachment.path, Modifier.size(48.dp).clip(RoundedCornerShape(11.dp)))
+                            } else {
+                                Surface(shape = RoundedCornerShape(11.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                                    Icon(HugeIcons.Files02, null, Modifier.padding(12.dp).size(24.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                                }
+                            }
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f, fill = false)) {
+                                Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (skills.isNotEmpty()) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
@@ -1101,7 +1132,7 @@ private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, onEdit: ()
                 }
             }
         }
-        Box {
+        if (text.isNotBlank()) Box {
             Surface(
                 modifier = Modifier.widthIn(max = 360.dp).combinedClickable(onClick = {}, onLongClick = { menuExpanded = true }),
                 shape = RoundedCornerShape(22.dp, 22.dp, 6.dp, 22.dp),
@@ -1774,6 +1805,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
     val duration = payload?.optLong("duration")?.toString() ?: text.substringAfter("PROCESS|", "0").substringBefore('|')
     val reasoning = payload?.optString("reasoning").orEmpty()
     val command = payload?.optString("command").orEmpty()
+    val reasoningUnavailable = payload?.optBoolean("reasoningUnavailable", false) == true
     val tools = payload?.optJSONArray("tools")
     // The live panel owns the expanded reasoning view. When completion inserts this
     // durable activity row, enter collapsed so the panel is not opened a second time.
@@ -1788,6 +1820,12 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         QElasticExpand(expanded) {
             Column {
         if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(reasoning) }
+        else if (reasoningUnavailable) Text(
+            "\u6a21\u578b\u672a\u8fd4\u56de\u53ef\u5c55\u793a\u7684\u601d\u8003\u6458\u8981",
+            modifier = Modifier.padding(top = 10.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (command.isNotBlank()) ToolTextCard("命令执行", command, false)
         val hasThreadBackedAgents = tools != null && (0 until tools.length()).any { toolIndex ->
             runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.let(::subagentThreadId).orEmpty().isNotBlank()

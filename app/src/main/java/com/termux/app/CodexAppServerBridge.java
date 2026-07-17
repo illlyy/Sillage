@@ -867,6 +867,26 @@ final class CodexAppServerBridge {
                 try { record = new JSONObject(line); } catch (Exception ignored) { continue; }
                 JSONObject payload = record.optJSONObject("payload");
                 if (payload == null) continue;
+                if ("event_msg".equals(record.optString("type")) && "user_message".equals(payload.optString("type"))) {
+                    JSONArray localImages = payload.optJSONArray("local_images");
+                    if (localImages != null && localImages.length() > 0) {
+                        for (int messageIndex = messages.length() - 1; messageIndex >= 0; messageIndex--) {
+                            JSONObject userMessage = messages.optJSONObject(messageIndex);
+                            if (userMessage == null || !"user".equals(userMessage.optString("role"))) continue;
+                            JSONArray messageAttachments = userMessage.optJSONArray("attachments");
+                            if (messageAttachments == null) messageAttachments = new JSONArray();
+                            for (int imageIndex = 0; imageIndex < localImages.length(); imageIndex++) {
+                                String path = localImages.optString(imageIndex, "");
+                                if (!path.isEmpty()) messageAttachments.put(new JSONObject()
+                                    .put("name", new File(path).getName()).put("path", path).put("image", true));
+                            }
+                            userMessage.put("attachments", messageAttachments);
+                            messages.put(messageIndex, userMessage);
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if ("event_msg".equals(record.optString("type")) && "plan_update".equals(payload.optString("type"))) {
                     String encodedPlan = android.util.Base64.encodeToString(
                         payload.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
@@ -929,6 +949,7 @@ final class CodexAppServerBridge {
                 if (content == null) continue;
                 StringBuilder text = new StringBuilder();
                 JSONArray referencedSkills = new JSONArray();
+                JSONArray referencedAttachments = new JSONArray();
                 for (int i = 0; i < content.length(); i++) {
                     JSONObject part = content.optJSONObject(i);
                     if (part == null) continue;
@@ -940,13 +961,23 @@ final class CodexAppServerBridge {
                         continue;
                     }
                     if (!"input_text".equals(type) && !"output_text".equals(type)) continue;
-                    text.append(part.optString("text", ""));
+                    String partText = part.optString("text", "");
+                    if ("user".equals(role) && partText.startsWith("Attached local file: ")) {
+                        String attachmentValue = partText.substring("Attached local file: ".length());
+                        int nameStart = attachmentValue.lastIndexOf(" (");
+                        String path = (nameStart >= 0 ? attachmentValue.substring(0, nameStart) : attachmentValue).trim();
+                        String name = partText.contains("(") ? partText.substring(partText.lastIndexOf('(') + 1).replace(")", "").trim() : new File(path).getName();
+                        if (!path.isEmpty()) referencedAttachments.put(new JSONObject().put("name", name).put("path", path).put("image", false));
+                        continue;
+                    }
+                    text.append(partText);
                 }
                 String value = text.toString().trim();
                 if ("user".equals(role) && isInjectedContextMessage(value)) continue;
-                if ("assistant".equals(role) && (reasoning.length() > 0 || command.length() > 0 || tools.length() > 0)) {
+                if ("assistant".equals(role)) {
                     JSONObject process = new JSONObject().put("duration", 0).put("reasoning", reasoning.toString().trim())
-                        .put("command", command.toString().trim()).put("tools", tools);
+                        .put("command", command.toString().trim()).put("tools", tools)
+                        .put("reasoningUnavailable", reasoning.length() == 0);
                     String encoded = android.util.Base64.encodeToString(process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
                     messages.put(new JSONObject().put("role", "activity").put("content", "PROCESS2|" + encoded));
                     lastProcessIndex = messages.length() - 1;
@@ -955,6 +986,7 @@ final class CodexAppServerBridge {
                 if (!value.isEmpty()) {
                     JSONObject historyMessage = new JSONObject().put("role", role).put("content", value);
                     if (referencedSkills.length() > 0) historyMessage.put("skills", referencedSkills);
+                    if (referencedAttachments.length() > 0) historyMessage.put("attachments", referencedAttachments);
                     messages.put(historyMessage);
                 }
             }
