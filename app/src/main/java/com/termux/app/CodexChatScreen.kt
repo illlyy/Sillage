@@ -348,7 +348,11 @@ internal fun NativeChatScreen(
         snapshotFlow {
             val layout = listState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull()
-            val overflow = (last?.offset?.plus(last.size) ?: 0) - layout.viewportEndOffset
+            // LazyColumn's composer clearance lives in afterContentPadding. Without it,
+            // canScrollForward becomes true while the measured item still appears above
+            // viewportEndOffset, so following stops after the first visible characters.
+            val overflow = (last?.offset?.plus(last.size) ?: 0) +
+                layout.afterContentPadding - layout.viewportEndOffset
             Triple(listState.canScrollForward, layout.totalItemsCount, overflow)
         }.collect { (canScrollForward, _, overflow) ->
             if (followOutput && canScrollForward && overflow > 0 && state.messages.isNotEmpty()) {
@@ -475,7 +479,12 @@ internal fun NativeChatScreen(
                             SmallFloatingActionButton(
                                 onClick = {
                                     followOutput = true
-                                    scope.launch { listState.animateScrollToItem(state.messages.lastIndex, Int.MAX_VALUE) }
+                                    scope.launch {
+                                        listState.animateScrollToItem(
+                                            (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0),
+                                            Int.MAX_VALUE,
+                                        )
+                                    }
                                 },
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
