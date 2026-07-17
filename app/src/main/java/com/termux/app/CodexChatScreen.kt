@@ -103,7 +103,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -114,6 +113,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -272,9 +272,12 @@ internal fun NativeChatScreen(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    val conversationOffset = remember { Animatable(0f) }
     val listDragged by listState.interactionSource.collectIsDraggedAsState()
     var followOutput by remember { mutableStateOf(true) }
+    var historyLimit by remember { mutableIntStateOf(40) }
+    var inputHeightPx by remember { mutableIntStateOf(0) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
     val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
     var showFilesSheet by remember { mutableStateOf(false) }
@@ -294,18 +297,25 @@ internal fun NativeChatScreen(
         elapsedSeconds = 0L
     }
 
-    LaunchedEffect(state.conversationAnimationKey) {
-        conversationOffset.snapTo(20f)
-        conversationOffset.animateTo(0f, spring(dampingRatio = 0.52f, stiffness = 360f))
-    }
-
     LaunchedEffect(listDragged) {
         if (!listDragged) followOutput = !listState.canScrollForward
     }
 
+    LaunchedEffect(state.conversationAnimationKey) {
+        historyLimit = 40
+        delay(16L)
+        if (state.messages.isNotEmpty()) {
+            val visibleCount = minOf(historyLimit, state.messages.size)
+            val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
+            listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
+        }
+    }
+
     LaunchedEffect(state.messages.size) {
         if (followOutput && state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.lastIndex, Int.MAX_VALUE)
+            val visibleCount = minOf(historyLimit, state.messages.size)
+            val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
+            listState.animateScrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
         }
     }
 
@@ -314,7 +324,9 @@ internal fun NativeChatScreen(
     LaunchedEffect(state.busy, followOutput) {
         while (state.busy && followOutput) {
             if (state.messages.isNotEmpty() && !listDragged) {
-                listState.scrollToItem(state.messages.lastIndex, Int.MAX_VALUE)
+                val visibleCount = minOf(historyLimit, state.messages.size)
+                val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
+                listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
             }
             delay(96L)
         }
@@ -359,30 +371,12 @@ internal fun NativeChatScreen(
                         onNewConversation = onNewConversation,
                     )
                 },
-                bottomBar = {
-                    RikkaChatInput(
-                        value = state.input,
-                        enabled = state.ready && !state.busy,
-                        loading = state.busy,
-                        modelLabel = state.modelLabel,
-                        onModelClick = { showModelPicker = true },
-                        effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
-                        selectedEffort = state.selectedEffort,
-                        onEffortSelected = { state.selectedEffort = it },
-                        attachments = state.attachments,
-                        onMoreClick = { showFilesSheet = true },
-                        onRemoveAttachment = onRemoveAttachment,
-                        onPreviewAttachment = { previewAttachment = it },
-                        onValueChange = onInputChange,
-                        onSend = { if (state.busy) onStop() else onSend(state.input) },
-                    )
-                },
+                bottomBar = {},
             ) { innerPadding ->
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding)
-                        .offset { IntOffset(conversationOffset.value.roundToInt(), 0) },
+                        .padding(innerPadding),
                 ) {
                     AssistantBackdrop()
                     if (state.messages.isEmpty()) {
@@ -391,10 +385,14 @@ internal fun NativeChatScreen(
                             onPrompt = onInputChange,
                         )
                     } else {
-                        val retryPrompts = remember(state.messages.size, state.conversationAnimationKey) {
+                        val visibleMessages = remember(state.messages.size, state.conversationAnimationKey, historyLimit) {
+                            state.messages.takeLast(historyLimit)
+                        }
+                        val hiddenMessageCount = state.messages.size - visibleMessages.size
+                        val retryPrompts = remember(visibleMessages, state.conversationAnimationKey) {
                             buildMap<String, String> {
                                 var lastUser: String? = null
-                                state.messages.forEach { message ->
+                                visibleMessages.forEach { message ->
                                     if (message.role == NativeChatRole.USER) lastUser = message.content
                                     else if (message.role == NativeChatRole.ASSISTANT || message.role == NativeChatRole.ERROR) lastUser?.let { put(message.id, it) }
                                 }
@@ -403,12 +401,20 @@ internal fun NativeChatScreen(
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = inputBottomPadding),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
+                            if (hiddenMessageCount > 0) {
+                                item(key = "history-loader", contentType = "history-loader") {
+                                    TextButton(
+                                        onClick = { historyLimit = (historyLimit + 40).coerceAtMost(state.messages.size) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text("\u52a0\u8f7d\u66f4\u65e9\u6d88\u606f\uff08\u8fd8\u6709 $hiddenMessageCount \u6761\uff09") }
+                                }
+                            }
                             itemsIndexed(
-                                items = state.messages,
+                                items = visibleMessages,
                                 key = { _, message -> message.id },
                                 contentType = { _, message -> message.role },
                             ) { _, message ->
@@ -446,6 +452,23 @@ internal fun NativeChatScreen(
                             }
                         }
                     }
+                    RikkaChatInput(
+                        value = state.input,
+                        enabled = state.ready && !state.busy,
+                        loading = state.busy,
+                        modelLabel = state.modelLabel,
+                        onModelClick = { showModelPicker = true },
+                        effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
+                        selectedEffort = state.selectedEffort,
+                        onEffortSelected = { state.selectedEffort = it },
+                        attachments = state.attachments,
+                        onMoreClick = { showFilesSheet = true },
+                        onRemoveAttachment = onRemoveAttachment,
+                        onPreviewAttachment = { previewAttachment = it },
+                        onValueChange = onInputChange,
+                        onSend = { if (state.busy) onStop() else onSend(state.input) },
+                        modifier = Modifier.align(Alignment.BottomCenter).onSizeChanged { inputHeightPx = it.height },
+                    )
                 }
             }
         }
@@ -1544,8 +1567,9 @@ private fun RikkaChatInput(
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(color = Color.Transparent) {
+    Surface(modifier = modifier, color = Color.Transparent) {
         Column(
             modifier = Modifier
                 .imePadding()
@@ -1553,7 +1577,9 @@ private fun RikkaChatInput(
                 .padding(horizontal = 8.dp, vertical = 8.dp),
         ) {
             Surface(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().animateContentSize(
+                    animationSpec = spring(dampingRatio = 0.90f, stiffness = 520f),
+                ),
                 shape = MaterialTheme.shapes.largeIncreased,
                 tonalElevation = 0.dp,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),

@@ -100,7 +100,7 @@ internal class NativeChatState {
     }
 
     fun replaceHistory(value: String) {
-        messages.clear()
+        val parsed = ArrayList<NativeChatMessage>()
         val items = JSONArray(value)
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
@@ -111,8 +111,11 @@ internal class NativeChatState {
                 else -> continue
             }
             val content = item.optString("content").trim()
-            if (content.isNotEmpty()) messages.add(NativeChatMessage(role = role, content = content))
+            if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content))
         }
+        // One snapshot mutation avoids recomposing the chat once for every historical item.
+        messages.clear()
+        messages.addAll(parsed)
         revision++
     }
 
