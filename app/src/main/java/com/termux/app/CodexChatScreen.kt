@@ -1339,6 +1339,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
                                 val thread = subagentThreadId(item)
                                 CollabAgentCapsule(
                                     item = item,
+                                    state = state,
                                     history = state.subagentHistories[thread],
                                     historyLoading = thread in state.loadingSubagentHistories,
                                     onLoadHistory = onLoadSubagentHistory,
@@ -1595,6 +1596,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 val thread = subagentThreadId(item)
                 CollabAgentCapsule(
                     item = item,
+                    state = state,
                     history = state.subagentHistories[thread],
                     historyLoading = thread in state.loadingSubagentHistories,
                     onLoadHistory = onLoadSubagentHistory,
@@ -1615,171 +1617,101 @@ private fun subagentThreadId(item: JSONObject): String = item.optString(
 @Composable
 private fun CollabAgentCapsule(
     item: JSONObject,
+    state: NativeChatState,
     history: String?,
     historyLoading: Boolean,
     onLoadHistory: (String) -> Unit,
 ) {
-    val tool = item.optString("tool", "")
-    val receivers = item.optJSONArray("receiverThreadIds")
-    val agentId = subagentThreadId(item)
-    val fallbackName = when (tool) {
-        "spawn_agent", "spawnAgent" -> "\u65b0\u5b50\u4ee3\u7406"
-        "wait", "wait_agent" -> "\u7b49\u5f85\u5b50\u4ee3\u7406"
-        "send_input", "sendInput" -> "\u5b50\u4ee3\u7406\u6d88\u606f"
-        else -> if (agentId.isNotBlank()) "\u5b50\u4ee3\u7406 ${agentId.take(6)}" else "\u5b50\u4ee3\u7406"
+    val initialId = subagentThreadId(item).ifBlank { item.optString("id", item.toString().hashCode().toString()) }
+    val agents = remember(state.revision, state.messages.size, state.liveSubagents.size, item.toString()) {
+        collectSubagentItems(state, item)
     }
-    val name = item.optString("agentName", item.optString("name", item.optString("agent", fallbackName)))
-    val rawStatus = item.optString("status", "completed")
-    val status = when (rawStatus.lowercase()) {
-        "inprogress", "running", "started" -> "\u8fd0\u884c\u4e2d"
-        "failed", "error" -> "\u5931\u8d25"
-        else -> "\u5b8c\u6210"
-    }
-    val task = item.optString("task", item.optString("prompt", item.optString("input", item.optString("message", ""))))
-    val reasoning = item.optString("reasoning", item.optString("thought", ""))
-    val result = item.optString("output", item.optString("result", ""))
-    val detail = item.optString("detail", "")
-    val hasThreadHistory = remember(history) {
-        history != null && runCatching { JSONArray(history).length() > 0 }.getOrDefault(false)
-    }
+    val name = subagentName(item)
+    val status = subagentStatus(item)
     var panelVisible by remember { mutableStateOf(false) }
     var panelEntered by remember { mutableStateOf(false) }
-    var rawExpanded by remember { mutableStateOf(false) }
+    var selectedId by remember { mutableStateOf<String?>(initialId) }
     val panelScope = rememberCoroutineScope()
     val closePanel: () -> Unit = {
         panelEntered = false
-        panelScope.launch {
-            delay(200L)
-            panelVisible = false
-        }
+        panelScope.launch { delay(210L); panelVisible = false }
+        Unit
     }
     Surface(
         modifier = Modifier.padding(top = 8.dp).clickable {
+            selectedId = initialId
             panelEntered = false
             panelVisible = true
-            if (agentId.isNotBlank() && history == null) onLoadHistory(agentId)
+            val thread = subagentThreadId(item)
+            if (thread.isNotBlank() && history == null) onLoadHistory(thread)
         },
         shape = CircleShape,
         color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         tonalElevation = 1.dp,
     ) {
-        Row(
-            modifier = Modifier.padding(start = 12.dp, end = 10.dp, top = 7.dp, bottom = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(HugeIcons.Sparkles, null, modifier = Modifier.size(15.dp))
+        Row(Modifier.padding(start = 12.dp, end = 10.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(HugeIcons.Sparkles, null, Modifier.size(15.dp))
             Spacer(Modifier.width(7.dp))
             Text(name, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(8.dp))
-            AnimatedContent(
-                targetState = status,
-                transitionSpec = {
-                    (fadeIn(tween(140)) + slideInVertically(tween(180, easing = LinearOutSlowInEasing)) { it / 3 }) togetherWith
-                        (fadeOut(tween(90)) + slideOutVertically(tween(120, easing = FastOutSlowInEasing)) { -it / 3 })
-                },
-                label = "subagentStatus",
-            ) { value ->
-                Text(value, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.68f))
-            }
+            Text(status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.68f))
             Spacer(Modifier.width(5.dp))
-            Icon(HugeIcons.ArrowRight01, null, modifier = Modifier.size(14.dp))
+            Icon(HugeIcons.ArrowRight01, null, Modifier.size(14.dp))
         }
     }
     if (panelVisible) {
-        Dialog(
-            onDismissRequest = closePanel,
-            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = false),
-        ) {
-            LaunchedEffect(Unit) { panelEntered = true }
-            val scrimAlpha by animateFloatAsState(
-                targetValue = if (panelEntered) 0.16f else 0f,
-                animationSpec = tween(if (panelEntered) 180 else 150, easing = LinearEasing),
-                label = "subagentScrim",
-            )
+        LaunchedEffect(Unit) { delay(20L); panelEntered = true }
+        Dialog(onDismissRequest = closePanel, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+            val scrimAlpha by animateFloatAsState(if (panelEntered) 0.16f else 0f, tween(170, easing = LinearEasing), label = "agentScrim")
             Box(Modifier.fillMaxSize()) {
                 Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = scrimAlpha)).clickable(onClick = closePanel))
                 AnimatedVisibility(
                     visible = panelEntered,
                     modifier = Modifier.align(Alignment.CenterEnd),
-                    enter = slideInHorizontally(tween(260, easing = LinearOutSlowInEasing)) { it } + fadeIn(tween(180)),
-                    exit = slideOutHorizontally(tween(190, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(120)),
+                    enter = slideInHorizontally(tween(260, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(150)),
+                    exit = slideOutHorizontally(tween(190, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(130)),
                 ) {
                     Surface(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .widthIn(min = 300.dp, max = 390.dp)
-                            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}),
-                        shape = RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp),
+                        modifier = Modifier.fillMaxHeight().fillMaxWidth(0.91f).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+                        shape = RoundedCornerShape(topStart = 26.dp, bottomStart = 26.dp),
                         color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 6.dp,
-                        shadowElevation = 12.dp,
+                        shadowElevation = 14.dp,
                     ) {
-                        Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 10.dp, top = 14.dp, bottom = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
-                                    Icon(HugeIcons.Sparkles, null, modifier = Modifier.padding(9.dp).size(18.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                                }
-                                Spacer(Modifier.width(11.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                                    Text("\u5b50\u4ee3\u7406 \u00b7 $status", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                        Column(Modifier.fillMaxSize()) {
+                            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (selectedId != null) {
+                                    IconButton(onClick = { selectedId = null }) { Icon(HugeIcons.ArrowRight01, "\u8fd4\u56de\u5b50\u4ee3\u7406\u5217\u8868", Modifier.graphicsLayer { rotationZ = 180f }) }
+                                } else Spacer(Modifier.width(48.dp))
+                                Text(
+                                    if (selectedId == null) "\u5b50\u4ee3\u7406" else subagentName(agents.firstOrNull { subagentKey(it) == selectedId } ?: item),
+                                    modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                                )
                                 IconButton(onClick = closePanel) { Icon(HugeIcons.Cancel01, "\u5173\u95ed") }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                            Column(
-                                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
-                                verticalArrangement = Arrangement.spacedBy(16.dp),
-                            ) {
-                                if (historyLoading) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                        Spacer(Modifier.width(9.dp))
-                                        Text("\u6b63\u5728\u52a0\u8f7d\u5b50\u4ee3\u7406\u5bf9\u8bdd", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            AnimatedContent(
+                                targetState = selectedId,
+                                transitionSpec = {
+                                    (fadeIn(tween(180)) + slideInHorizontally(tween(240, easing = FastOutSlowInEasing)) { if (targetState == null) -it / 5 else it / 5 }) togetherWith
+                                        (fadeOut(tween(110)) + slideOutHorizontally(tween(180, easing = FastOutSlowInEasing)) { if (targetState == null) it / 5 else -it / 5 })
+                                }, label = "subagentNavigation",
+                            ) { selected ->
+                                if (selected == null) {
+                                    SubagentOverview(agents) { chosen ->
+                                        val thread = subagentThreadId(chosen)
+                                        selectedId = subagentKey(chosen)
+                                        if (thread.isNotBlank() && state.subagentHistories[thread] == null) onLoadHistory(thread)
                                     }
-                                }
-                                if (hasThreadHistory && history != null) {
-                                    SubagentHistoryTimeline(history)
                                 } else {
-                                    if (task.isNotBlank()) AgentTimelineSection("\u4efb\u52a1", task)
-                                    if (receivers != null && receivers.length() > 0) {
-                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            Text("\u53c2\u4e0e\u7ebf\u7a0b", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                                for (index in 0 until receivers.length()) {
-                                                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                                                        Text(receivers.optString(index).take(10), modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if (reasoning.isNotBlank()) AgentTimelineSection("\u601d\u8003", reasoning)
-                                    if (detail.isNotBlank() && detail != reasoning && detail != result) AgentTimelineSection("\u6267\u884c", detail)
-                                    if (result.isNotBlank()) AgentTimelineSection("\u7ed3\u679c", result)
-                                    if (!historyLoading && task.isBlank() && reasoning.isBlank() && detail.isBlank() && result.isBlank()) {
-                                        AgentTimelineSection("\u4e8b\u4ef6\u8be6\u60c5", item.toString(2), monospace = true)
-                                    }
+                                    val chosen = agents.firstOrNull { subagentKey(it) == selected } ?: item
+                                    val thread = subagentThreadId(chosen)
+                                    SubagentDetail(
+                                        item = chosen,
+                                        history = state.subagentHistories[thread] ?: if (thread == subagentThreadId(item)) history else null,
+                                        historyLoading = thread in state.loadingSubagentHistories || (thread == subagentThreadId(item) && historyLoading),
+                                    )
                                 }
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth().clickable { rawExpanded = !rawExpanded },
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                                ) {
-                                    Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
-                                        Text(if (rawExpanded) "\u6536\u8d77\u539f\u59cb\u4e8b\u4ef6" else "\u67e5\u770b\u539f\u59cb\u4e8b\u4ef6", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        QElasticExpand(rawExpanded) {
-                                            SelectionContainer {
-                                                Text(item.toString(2), modifier = Modifier.padding(top = 10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
-                                        }
-                                    }
-                                }
-                                Spacer(Modifier.height(24.dp))
                             }
                         }
                     }
@@ -1789,8 +1721,89 @@ private fun CollabAgentCapsule(
     }
 }
 
+private fun subagentKey(item: JSONObject): String = subagentThreadId(item).ifBlank { item.optString("id", item.toString().hashCode().toString()) }
+
+private fun subagentName(item: JSONObject): String {
+    val id = subagentThreadId(item)
+    val fallback = if (id.isNotBlank()) "\u5b50\u4ee3\u7406 ${id.take(6)}" else "\u5b50\u4ee3\u7406"
+    return item.optString("agentName", item.optString("name", item.optString("agent", fallback)))
+}
+
+private fun subagentStatus(item: JSONObject): String = when (item.optString("status", "completed").lowercase()) {
+    "inprogress", "running", "started" -> "\u8fd0\u884c\u4e2d"
+    "failed", "error" -> "\u5931\u8d25"
+    else -> "\u5b8c\u6210"
+}
+
+private fun collectSubagentItems(state: NativeChatState, current: JSONObject): List<JSONObject> {
+    val result = LinkedHashMap<String, JSONObject>()
+    fun add(value: JSONObject) { result[subagentKey(value)] = value }
+    state.messages.forEach { message ->
+        if (message.role != NativeChatRole.ACTIVITY || !message.content.startsWith("PROCESS2|")) return@forEach
+        runCatching {
+            val payload = JSONObject(String(Base64.decode(message.content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+            val tools = payload.optJSONArray("tools") ?: return@runCatching
+            for (index in 0 until tools.length()) tools.optJSONObject(index)?.takeIf { it.optString("type") == "collabAgentToolCall" }?.let(::add)
+        }
+    }
+    state.liveSubagents.forEach { raw -> runCatching { add(JSONObject(raw)) } }
+    add(current)
+    return result.values.toList()
+}
+
 @Composable
-private fun SubagentHistoryTimeline(history: String) {
+private fun SubagentOverview(agents: List<JSONObject>, onSelect: (JSONObject) -> Unit) {
+    val active = agents.filter { subagentStatus(it) == "\u8fd0\u884c\u4e2d" }
+    val done = agents.filterNot { it in active }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (active.isNotEmpty()) {
+            item { Text("\u6b63\u5728\u8fd0\u884c", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp, vertical = 5.dp)) }
+            items(active, key = { subagentKey(it) }) { agent -> SubagentOverviewRow(agent, onSelect) }
+        }
+        if (done.isNotEmpty()) {
+            item { Text("\u5df2\u5b8c\u6210 \u00b7 ${done.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp, vertical = 5.dp)) }
+            items(done, key = { subagentKey(it) }) { agent -> SubagentOverviewRow(agent, onSelect) }
+        }
+    }
+}
+
+@Composable
+private fun SubagentOverviewRow(agent: JSONObject, onSelect: (JSONObject) -> Unit) {
+    val task = agent.optString("task", agent.optString("prompt", agent.optString("input", "")))
+    Surface(Modifier.fillMaxWidth().clickable { onSelect(agent) }, shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) { Icon(HugeIcons.Sparkles, null, Modifier.padding(8.dp).size(16.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Text(subagentName(agent), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text(if (task.isBlank()) subagentStatus(agent) else task, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp)
+            }
+            Icon(HugeIcons.ArrowRight01, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun SubagentDetail(item: JSONObject, history: String?, historyLoading: Boolean) {
+    val name = subagentName(item)
+    val task = item.optString("task", item.optString("prompt", item.optString("input", item.optString("message", ""))))
+    val result = item.optString("output", item.optString("result", ""))
+    val hasHistory = history != null && remember(history) { runCatching { JSONArray(history).length() > 0 }.getOrDefault(false) }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        if (historyLoading) Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(9.dp)); Text("\u6b63\u5728\u52a0\u8f7d\u5b50\u4ee3\u7406\u5bf9\u8bdd", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (hasHistory && history != null) SubagentConversationView(history, name) else {
+            if (task.isNotBlank()) AgentTimelineSection("\u59d4\u6d3e\u7684\u4efb\u52a1", task)
+            if (result.isNotBlank()) AgentTimelineSection("\u6700\u7ec8\u56de\u590d", result)
+            if (!historyLoading && task.isBlank() && result.isBlank()) AgentTimelineSection("\u72b6\u6001", subagentStatus(item))
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun SubagentConversationView(history: String, agentName: String) {
     val messages = remember(history) {
         runCatching {
             val source = JSONArray(history)
@@ -1799,27 +1812,95 @@ private fun SubagentHistoryTimeline(history: String) {
             }
         }.getOrDefault(emptyList())
     }
-    messages.forEach { message ->
-        val role = message.optString("role")
-        val content = message.optString("content")
-        when (role) {
-            "user" -> AgentTimelineSection("\u4efb\u52a1", content)
-            "assistant" -> AgentTimelineSection("\u5b50\u4ee3\u7406\u8f93\u51fa", content)
-            "activity" -> {
-                val payload = if (content.startsWith("PROCESS2|")) runCatching {
-                    JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
-                }.getOrNull() else null
-                if (payload != null) {
-                    val reasoning = payload.optString("reasoning")
-                    val command = payload.optString("command")
-                    if (reasoning.isNotBlank()) AgentTimelineSection("\u601d\u8003", reasoning)
-                    if (command.isNotBlank()) AgentTimelineSection("\u547d\u4ee4\u6267\u884c", command, monospace = true)
-                    val tools = payload.optJSONArray("tools")
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        messages.forEach { message ->
+            val role = message.optString("role")
+            val content = message.optString("content")
+            when (role) {
+                "user" -> {
+                    Column(Modifier.fillMaxWidth()) {
+                        Text("\u59d4\u6d3e\u7684\u4efb\u52a1", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(6.dp))
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        ) {
+                            Text(content, modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
+                        }
+                    }
+                }
+                "assistant" -> {
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                                Icon(HugeIcons.Sparkles, null, modifier = Modifier.padding(5.dp).size(13.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                            }
+                            Spacer(Modifier.width(7.dp))
+                            Text(agentName, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(Modifier.height(7.dp))
+                        RichResponseText(content)
+                    }
+                }
+                "activity" -> SubagentActivityView(content)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubagentActivityView(content: String) {
+    val payload = if (content.startsWith("PROCESS2|")) runCatching {
+        JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+    }.getOrNull() else null
+    if (payload == null) return
+    val duration = payload.optLong("duration", 0L)
+    val reasoning = payload.optString("reasoning")
+    val command = payload.optString("command")
+    val tools = payload.optJSONArray("tools")
+    var expanded by remember(content) { mutableStateOf(true) }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 13.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(HugeIcons.Zap, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (duration > 0) "\u601d\u8003\u4e86 ${duration}s" else "\u601d\u8003\u4e0e\u6267\u884c",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Icon(
+                    HugeIcons.ArrowDown01,
+                    null,
+                    modifier = Modifier.size(15.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f },
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            QElasticExpand(expanded) {
+                Column(Modifier.padding(start = 13.dp, end = 13.dp, bottom = 13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    if (reasoning.isNotBlank()) RichResponseText(reasoning)
+                    if (command.isNotBlank()) ToolTextCard("\u547d\u4ee4\u6267\u884c", command, false)
                     if (tools != null) for (index in 0 until tools.length()) {
-                        val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull()
-                        val label = tool?.optString("type", "\u5de5\u5177\u8c03\u7528") ?: "\u5de5\u5177\u8c03\u7528"
-                        val value = tool?.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))).orEmpty()
-                        AgentTimelineSection(label, value.ifBlank { tool?.toString(2).orEmpty() }, monospace = label == "commandExecution")
+                        val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
+                        when (tool.optString("type")) {
+                            "commandExecution" -> CommandExecutionCard(tool)
+                            "collabAgentToolCall" -> Unit
+                            else -> ToolTextCard(
+                                tool.optString("type", "\u5de5\u5177\u8c03\u7528"),
+                                tool.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))),
+                                tool.optString("type") == "fileChange",
+                            )
+                        }
                     }
                 }
             }

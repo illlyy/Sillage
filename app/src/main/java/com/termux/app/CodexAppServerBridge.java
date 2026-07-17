@@ -752,16 +752,7 @@ final class CodexAppServerBridge {
                 JSONObject payload = record.optJSONObject("payload");
                 if (payload == null) continue;
                 if ("event_msg".equals(record.optString("type")) && "sub_agent_activity".equals(payload.optString("type"))) {
-                    String agentThread = payload.optString("agent_thread_id", "");
-                    String agentPath = payload.optString("agent_path", "");
-                    String kind = payload.optString("kind", "started");
-                    JSONObject agent = new JSONObject().put("type", "collabAgentToolCall")
-                        .put("id", payload.optString("event_id", agentThread))
-                        .put("tool", "subAgentActivity")
-                        .put("agentThreadId", agentThread)
-                        .put("agentName", agentPath.isEmpty() ? "subagent" : agentPath.substring(agentPath.lastIndexOf('/') + 1))
-                        .put("status", "started".equals(kind) ? "completed" : kind);
-                    tools.put(agent);
+                    tools.put(historySubagentActivityCard(payload));
                     continue;
                 }
                 if ("event_msg".equals(record.optString("type")) && "task_complete".equals(payload.optString("type"))) {
@@ -837,6 +828,18 @@ final class CodexAppServerBridge {
         return messages;
     }
 
+
+    static JSONObject historySubagentActivityCard(JSONObject payload) throws Exception {
+        String agentThread = payload.optString("agent_thread_id", "");
+        String agentPath = payload.optString("agent_path", "");
+        String kind = payload.optString("kind", "started");
+        return new JSONObject().put("type", "collabAgentToolCall")
+            .put("id", payload.optString("event_id", agentThread))
+            .put("tool", "subAgentActivity")
+            .put("agentThreadId", agentThread)
+            .put("agentName", agentPath.isEmpty() ? "subagent" : agentPath.substring(agentPath.lastIndexOf('/') + 1))
+            .put("status", "started".equals(kind) ? "completed" : kind);
+    }
 
     private static JSONObject historyToolCard(JSONObject call, String output) throws Exception {
         String name = call.optString("name", "tool");

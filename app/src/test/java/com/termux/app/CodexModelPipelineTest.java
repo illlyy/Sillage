@@ -916,4 +916,22 @@ public class CodexModelPipelineTest {
         return completedResponse(result.body);
     }
 
+
+    @Test
+    public void historicalSubagentActivityKeepsThreadIdentity() throws Exception {
+        String threadId = "019f6f24-83f6-70f2-80b6-0af81033832a";
+        JSONObject card = CodexAppServerBridge.historySubagentActivityCard(new JSONObject()
+            .put("type", "sub_agent_activity")
+            .put("event_id", "call_52ab2f42")
+            .put("agent_thread_id", threadId)
+            .put("agent_path", "/root/list_files")
+            .put("kind", "started"));
+
+        assertEquals("collabAgentToolCall", card.getString("type"));
+        assertEquals("subAgentActivity", card.getString("tool"));
+        assertEquals(threadId, card.getString("agentThreadId"));
+        assertEquals("list_files", card.getString("agentName"));
+        assertEquals("completed", card.getString("status"));
+    }
+
 }
