@@ -1948,7 +1948,18 @@ private fun SubagentDetail(item: JSONObject, history: String?, historyLoading: B
     val result = item.optString("output", item.optString("result", ""))
     val messages = remember(history) { parseSubagentMessages(history) }
     if (messages.isNotEmpty()) {
+        val conversationListState = rememberLazyListState(
+            initialFirstVisibleItemIndex = (messages.lastIndex + if (historyLoading) 1 else 0).coerceAtLeast(0),
+        )
+        LaunchedEffect(history) {
+            // Like WebUI, enter a child thread at its latest output. Waiting for one
+            // layout frame lets Int.MAX_VALUE align a tall final response to the bottom.
+            withFrameNanos { }
+            val lastItem = (conversationListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+            conversationListState.scrollToItem(lastItem, Int.MAX_VALUE)
+        }
         LazyColumn(
+            state = conversationListState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
