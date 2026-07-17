@@ -1144,13 +1144,11 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
     // Keep both renderers alive for a short hand-off. Markwon's AndroidView needs a
     // layout pass; replacing Compose Text in one frame can otherwise show a blank flash
     // and suddenly change the message height when lists/headings gain Markdown spacing.
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .animateContentSize(
-                animationSpec = tween(durationMillis = 150, easing = LinearOutSlowInEasing),
-            ),
-    ) {
+    // Do not animate the whole message height while chunks arrive. Doing so starts a
+    // new layout interpolation for every batch and makes the paragraph and list below it
+    // visibly wobble. The one-time AnimatedContent hand-off below still softens the
+    // transition to final Markwon output.
+    Box(modifier = Modifier.fillMaxWidth()) {
         AnimatedContent(
             targetState = showRichText,
             transitionSpec = {
