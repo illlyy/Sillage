@@ -1590,8 +1590,17 @@ private fun CollabAgentCapsule(item: JSONObject) {
     val detail = item.optString("reasoning", item.optString("detail", item.optString("output", "")))
         .ifBlank { item.toString(2) }
     var panelVisible by remember { mutableStateOf(false) }
+    var panelEntered by remember { mutableStateOf(false) }
+    val panelScope = rememberCoroutineScope()
+    val closePanel: () -> Unit = {
+        panelEntered = false
+        panelScope.launch {
+            delay(200L)
+            panelVisible = false
+        }
+    }
     Surface(
-        modifier = Modifier.padding(top = 8.dp).clickable { panelVisible = true },
+        modifier = Modifier.padding(top = 8.dp).clickable { panelEntered = false; panelVisible = true },
         shape = CircleShape,
         color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1612,20 +1621,27 @@ private fun CollabAgentCapsule(item: JSONObject) {
     }
     if (panelVisible) {
         Dialog(
-            onDismissRequest = { panelVisible = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true),
+            onDismissRequest = closePanel,
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = false),
         ) {
-            var entered by remember { mutableStateOf(false) }
-            LaunchedEffect(Unit) { entered = true }
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.16f)).clickable { panelVisible = false }) {
+            LaunchedEffect(Unit) { panelEntered = true }
+            Box(Modifier.fillMaxSize()) {
+                Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.16f)).clickable(onClick = closePanel))
                 AnimatedVisibility(
-                    visible = entered,
+                    visible = panelEntered,
                     modifier = Modifier.align(Alignment.CenterEnd),
                     enter = slideInHorizontally(tween(260, easing = LinearOutSlowInEasing)) { it } + fadeIn(tween(180)),
                     exit = slideOutHorizontally(tween(190, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(120)),
                 ) {
                     Surface(
-                        modifier = Modifier.fillMaxHeight().widthIn(min = 300.dp, max = 390.dp).clickable(enabled = false) {},
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .widthIn(min = 300.dp, max = 390.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = {},
+                            ),
                         shape = RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp),
                         color = MaterialTheme.colorScheme.surface,
                         tonalElevation = 6.dp,
@@ -1644,7 +1660,7 @@ private fun CollabAgentCapsule(item: JSONObject) {
                                     Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                                     Text("??? ? $status", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = { panelVisible = false }) { Icon(HugeIcons.Cancel01, "??") }
+                                IconButton(onClick = closePanel) { Icon(HugeIcons.Cancel01, "??") }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                             Column(
