@@ -918,7 +918,7 @@ public class CodexModelPipelineTest {
 
 
     @Test
-    public void historicalSubagentActivityKeepsThreadIdentity() throws Exception {
+    public void historicalSubagentActivityKeepsThreadIdentityAndWorkingState() throws Exception {
         String threadId = "019f6f24-83f6-70f2-80b6-0af81033832a";
         JSONObject card = CodexAppServerBridge.historySubagentActivityCard(new JSONObject()
             .put("type", "sub_agent_activity")
@@ -931,7 +931,41 @@ public class CodexModelPipelineTest {
         assertEquals("subAgentActivity", card.getString("tool"));
         assertEquals(threadId, card.getString("agentThreadId"));
         assertEquals("list_files", card.getString("agentName"));
-        assertEquals("completed", card.getString("status"));
+        assertEquals("working", card.getString("status"));
+    }
+
+    @Test
+    public void spawnedAgentHistoryCardKeepsTaskAndCallIdentity() throws Exception {
+        JSONObject card = CodexAppServerBridge.historyToolCard(
+            new JSONObject().put("id", "call_spawn_1").put("name", "spawn_agent")
+                .put("arguments", new JSONObject().put("task_name", "inspector")
+                    .put("message", "Inspect the project")),
+            new JSONObject().put("task_name", "/root/inspector").put("nickname", "Newton").toString());
+
+        assertEquals("call_spawn_1", card.getString("id"));
+        assertEquals("Inspect the project", card.getString("task"));
+        assertEquals("Newton", card.getString("agentName"));
+        assertEquals("working", card.getString("status"));
+    }
+
+    @Test
+    public void subagentRolloutStatusChangesOnlyAfterTaskComplete() throws Exception {
+        assertEquals("waiting", CodexAppServerBridge.subagentSessionStatus(null));
+        File session = File.createTempFile("subagent-status", ".jsonl");
+        try {
+            try (FileWriter writer = new FileWriter(session)) {
+                writer.write(new JSONObject().put("type", "event_msg")
+                    .put("payload", new JSONObject().put("type", "task_started")).toString() + "\n");
+            }
+            assertEquals("working", CodexAppServerBridge.subagentSessionStatus(session));
+            try (FileWriter writer = new FileWriter(session, true)) {
+                writer.write(new JSONObject().put("type", "event_msg")
+                    .put("payload", new JSONObject().put("type", "task_complete")).toString() + "\n");
+            }
+            assertEquals("done", CodexAppServerBridge.subagentSessionStatus(session));
+        } finally {
+            assertTrue(session.delete() || !session.exists());
+        }
     }
 
     @Test

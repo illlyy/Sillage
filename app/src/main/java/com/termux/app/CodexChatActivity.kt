@@ -62,6 +62,8 @@ internal class NativeChatState {
     val toolDetails = mutableStateListOf<String>()
     val liveSubagents = mutableStateListOf<String>()
     val subagentHistories = mutableStateMapOf<String, String>()
+    val subagentStatuses = mutableStateMapOf<String, String>()
+    val subagentHistoryErrors = mutableStateMapOf<String, String>()
     val loadingSubagentHistories = mutableStateListOf<String>()
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
@@ -101,6 +103,8 @@ internal class NativeChatState {
         toolDetails.clear()
         liveSubagents.clear()
         subagentHistories.clear()
+        subagentStatuses.clear()
+        subagentHistoryErrors.clear()
         loadingSubagentHistories.clear()
         turnStartedAt = 0L
         turnMessageStartIndex = 0
@@ -289,25 +293,47 @@ internal class NativeChatState {
         revision++
     }
 
-    fun updateSubagent(raw: String) {
-        val item = runCatching { JSONObject(raw) }.getOrNull() ?: return
-        fun safe(key: String): String = if (item.has(key) && !item.isNull(key)) item.optString(key, "").trim().takeUnless { it.equals("null", true) }.orEmpty() else ""
-        val receiver = item.optJSONArray("receiverThreadIds")?.let { array ->
-            (0 until array.length()).firstNotNullOfOrNull { index -> array.optString(index, "").trim().takeIf { it.isNotEmpty() && !it.equals("null", true) } }
-        }.orEmpty()
-        val key = safe("agentThreadId").ifBlank { receiver }.ifBlank { safe("id") }.ifBlank { safe("tool") }.ifBlank { raw.hashCode().toString() }
-        val index = liveSubagents.indexOfFirst { existing ->
-            runCatching {
-                val value = JSONObject(existing)
-                val existingReceiver = value.optJSONArray("receiverThreadIds")?.optString(0, "").orEmpty().takeUnless { it.equals("null", true) }.orEmpty()
-                val existingKey = listOf("agentThreadId", "id", "tool").firstNotNullOfOrNull { field ->
-                    if (value.has(field) && !value.isNull(field)) value.optString(field, "").trim().takeIf { it.isNotEmpty() && !it.equals("null", true) } else null
-                } ?: existingReceiver.ifBlank { existing.hashCode().toString() }
-                existingKey == key
-            }.getOrDefault(false)
+    private fun subagentAliases(item: JSONObject): Set<String> = buildSet {
+        fun addSafe(value: String) {
+            val normalized = value.trim()
+            if (normalized.isNotEmpty() && !normalized.equals("null", true)) add(normalized)
         }
-        if (index >= 0) liveSubagents[index] = item.toString() else liveSubagents.add(item.toString())
+        addSafe(item.optString("agentThreadId", ""))
+        addSafe(item.optString("id", ""))
+        addSafe(item.optString("callId", ""))
+        val receivers = item.optJSONArray("receiverThreadIds")
+        if (receivers != null) for (index in 0 until receivers.length()) addSafe(receivers.optString(index, ""))
+    }
+
+    private fun normalizedSubagentStatus(value: String): String = when (value.trim().lowercase()) {
+        "inprogress", "in_progress", "running", "started", "working" -> "working"
+        "waiting", "pending", "queued" -> "waiting"
+        "failed", "error", "cancelled", "canceled", "stopped", "interrupted" -> "failed"
+        "done", "complete", "completed", "success" -> "done"
+        else -> ""
+    }
+
+    fun updateSubagent(raw: String): String {
+        val incoming = runCatching { JSONObject(raw) }.getOrNull() ?: return ""
+        val incomingAliases = subagentAliases(incoming)
+        val index = liveSubagents.indexOfFirst { existing ->
+            runCatching { subagentAliases(JSONObject(existing)).any(incomingAliases::contains) }.getOrDefault(false)
+        }
+        val merged = if (index >= 0) {
+            val existing = runCatching { JSONObject(liveSubagents[index]) }.getOrElse { JSONObject() }
+            incoming.keys().forEach { key ->
+                val value = incoming.opt(key)
+                if (value != null && value != JSONObject.NULL && (!(value is String) || value.isNotBlank())) existing.put(key, value)
+            }
+            existing
+        } else incoming
+        if (index >= 0) liveSubagents[index] = merged.toString() else liveSubagents.add(merged.toString())
+        val thread = subagentAliases(merged).firstOrNull { it.matches(Regex("[0-9a-fA-F-]{32,}")) }
+            ?: merged.optString("agentThreadId", "").takeUnless { it.equals("null", true) }.orEmpty()
+        val status = normalizedSubagentStatus(merged.optString("status", ""))
+        if (thread.isNotBlank() && status.isNotBlank()) subagentStatuses[thread] = status
         revision++
+        return thread
     }
 
     fun completeTurn() {
@@ -341,11 +367,17 @@ internal class NativeChatState {
 }
 
 class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
+    companion object {
+        private val subagentRouteCounter = java.util.concurrent.atomic.AtomicInteger(0)
+    }
+
     private val chatState = NativeChatState()
     private var bridge: CodexAppServerBridge? = null
     private var activeProfileId: String = ""
     private var pendingConversationAnimationKey: String? = null
     private var conversationRefreshGeneration = 0
+    private var subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
+    private val subagentHistoryAttempts = HashMap<String, Int>()
     private val conversationProjectCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val conversationTitleCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val taskPreferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -843,11 +875,59 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         refreshConversations()
     }
 
+    private fun subagentMessageCount(raw: String?): Int = runCatching {
+        if (raw.isNullOrBlank()) 0 else JSONArray(raw).length()
+    }.getOrDefault(0)
+
     private fun loadSubagentHistory(threadId: String) {
         if (threadId.isBlank() || threadId in chatState.loadingSubagentHistories) return
-        if (chatState.subagentHistories.containsKey(threadId)) return
+        val status = chatState.subagentStatuses[threadId].orEmpty()
+        if (status in setOf("done", "failed") && subagentMessageCount(chatState.subagentHistories[threadId]) > 0) return
+        subagentHistoryAttempts[threadId] = 0
+        chatState.subagentHistoryErrors.remove(threadId)
         chatState.loadingSubagentHistories.add(threadId)
-        bridge?.loadSubagentHistory(threadId)
+        bridge?.loadSubagentHistory(threadId, subagentRouteGeneration)
+            ?: chatState.loadingSubagentHistories.remove(threadId)
+    }
+
+    private fun handleSubagentHistory(value: String) {
+        val payload = runCatching { JSONObject(value) }.getOrNull() ?: return
+        val generation = payload.optInt("generation", -1)
+        if (generation != subagentRouteGeneration) return
+        val thread = payload.optString("threadId").trim()
+        if (thread.isBlank()) return
+        val messages = payload.optJSONArray("messages") ?: JSONArray()
+        chatState.subagentHistories[thread] = messages.toString()
+        val status = payload.optString("status", "").trim().lowercase()
+        if (status in setOf("waiting", "working", "done", "failed")) chatState.subagentStatuses[thread] = status
+        val error = payload.optString("error", "").trim()
+        if (error.isBlank()) chatState.subagentHistoryErrors.remove(thread) else chatState.subagentHistoryErrors[thread] = error
+
+        val attempt = (subagentHistoryAttempts[thread] ?: 0) + 1
+        subagentHistoryAttempts[thread] = attempt
+        val terminal = status == "done" || status == "failed"
+        val shouldRetry = when {
+            !terminal -> attempt < 120
+            messages.length() == 0 -> attempt < 9
+            else -> false
+        }
+        if (!shouldRetry) {
+            chatState.loadingSubagentHistories.remove(thread)
+            subagentHistoryAttempts.remove(thread)
+            return
+        }
+        val delayMs = when {
+            attempt <= 4 -> 650L
+            attempt <= 20 -> 1_500L
+            else -> 3_500L
+        }
+        if (thread !in chatState.loadingSubagentHistories) chatState.loadingSubagentHistories.add(thread)
+        streamHandler.postDelayed({
+            if (generation == subagentRouteGeneration && thread in chatState.loadingSubagentHistories) {
+                bridge?.loadSubagentHistory(thread, generation)
+                    ?: chatState.loadingSubagentHistories.remove(thread)
+            }
+        }, delayMs)
     }
 
     private fun discardPendingStreamEvents(reason: String) {
@@ -866,6 +946,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
         discardPendingStreamEvents("resume")
+        subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
+        subagentHistoryAttempts.clear()
         pendingConversationAnimationKey = threadId
         currentThreadId = threadId
         val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
@@ -886,6 +968,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun newConversation() {
         discardPendingStreamEvents("new")
+        subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
+        subagentHistoryAttempts.clear()
         pendingConversationAnimationKey = null
         currentThreadId = null
         chatState.conversationAnimationKey = "new-${UUID.randomUUID()}"
@@ -1018,15 +1102,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.planExplanation = payload?.optString("explanation").orEmpty()
                 chatState.revision++
             }
-            "onSubagentEvent" -> chatState.updateSubagent(value)
-            "onSubagentHistory" -> {
-                val payload = runCatching { JSONObject(value) }.getOrNull()
-                val subagentThread = payload?.optString("threadId").orEmpty()
-                if (subagentThread.isNotBlank()) {
-                    chatState.loadingSubagentHistories.remove(subagentThread)
-                    chatState.subagentHistories[subagentThread] = payload?.optJSONArray("messages")?.toString() ?: "[]"
-                }
+            "onSubagentEvent" -> {
+                val thread = chatState.updateSubagent(value)
+                if (thread.isNotBlank()) loadSubagentHistory(thread)
             }
+            "onSubagentHistory" -> handleSubagentHistory(value)
             "onItem" -> chatState.addActivity(value)
             "onTurnComplete" -> {
                 flushReasoningDeltas()

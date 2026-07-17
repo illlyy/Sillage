@@ -398,7 +398,7 @@ final class CodexAppServerBridge {
         }, "CodexConversationResume").start();
     }
 
-    void loadSubagentHistory(String subagentThreadId) {
+    void loadSubagentHistory(String subagentThreadId, int generation) {
         if (subagentThreadId == null || subagentThreadId.trim().isEmpty()) return;
         new Thread(() -> {
             JSONObject result = new JSONObject();
@@ -407,8 +407,10 @@ final class CodexAppServerBridge {
                 File sessionFile = findSessionFile(sessionsRoot, subagentThreadId);
                 JSONArray messages = sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile);
                 result.put("threadId", subagentThreadId);
+                result.put("generation", generation);
                 result.put("messages", messages);
                 result.put("found", sessionFile != null);
+                result.put("status", subagentSessionStatus(sessionFile));
                 NativeChatDiagnostics.record(activity, "subagent_history", new JSONObject()
                     .put("thread", shortId(subagentThreadId))
                     .put("threadTail", subagentThreadId.length() > 8 ? subagentThreadId.substring(subagentThreadId.length() - 8) : subagentThreadId)
@@ -416,12 +418,35 @@ final class CodexAppServerBridge {
             } catch (Exception error) {
                 try {
                     result.put("threadId", subagentThreadId);
+                    result.put("generation", generation);
                     result.put("messages", new JSONArray());
+                    result.put("status", "failed");
                     result.put("error", error.getMessage());
                 } catch (Exception ignored) {}
             }
             emit("onSubagentHistory", result.toString());
         }, "CodexSubagentHistory").start();
+    }
+
+    static String subagentSessionStatus(File sessionFile) {
+        if (sessionFile == null || !sessionFile.isFile()) return "waiting";
+        String status = "working";
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(sessionFile), java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                JSONObject record;
+                try { record = new JSONObject(line); } catch (Exception ignored) { continue; }
+                if (!"event_msg".equals(record.optString("type"))) continue;
+                JSONObject payload = record.optJSONObject("payload");
+                if (payload == null) continue;
+                String type = payload.optString("type", "");
+                if ("task_complete".equals(type)) status = "done";
+                else if ("task_failed".equals(type) || "turn_aborted".equals(type)
+                        || "task_cancelled".equals(type)) status = "failed";
+            }
+        } catch (Exception ignored) {}
+        return status;
     }
 
     void loadSkills() {
@@ -707,7 +732,11 @@ final class CodexAppServerBridge {
             boolean hasAgentIdentity = liveItem != null && (!liveItem.optString("agentThreadId", "").isEmpty()
                 || (liveReceivers != null && liveReceivers.length() > 0));
             if ("subAgentActivity".equals(liveType) || ("collabAgentToolCall".equals(liveType) && hasAgentIdentity)) {
-                emit("onSubagentEvent", liveItem.toString());
+                JSONObject presentationItem = new JSONObject(liveItem.toString());
+                if ("subAgentActivity".equals(liveType) || "item/started".equals(method)) {
+                    presentationItem.put("status", "working");
+                }
+                emit("onSubagentEvent", presentationItem.toString());
                 NativeChatDiagnostics.record(activity, "subagent_capsule", new JSONObject()
                     .put("method", method).put("type", liveType)
                     .put("thread", shortId(params.optString("threadId", ""))));
@@ -1064,7 +1093,7 @@ final class CodexAppServerBridge {
                     JSONObject args;
                     try { args = new JSONObject(arguments); }
                     catch (Exception ignored) { args = new JSONObject().put("raw", arguments); }
-                    calls.put(callId, new JSONObject().put("name", name).put("arguments", args));
+                    calls.put(callId, new JSONObject().put("id", callId).put("name", name).put("arguments", args));
                     continue;
                 }
                 if ("function_call_output".equals(payloadType)) {
@@ -1144,10 +1173,10 @@ final class CodexAppServerBridge {
             .put("tool", "subAgentActivity")
             .put("agentThreadId", agentThread)
             .put("agentName", agentPath.isEmpty() ? "subagent" : agentPath.substring(agentPath.lastIndexOf('/') + 1))
-            .put("status", "started".equals(kind) ? "completed" : kind);
+            .put("status", "started".equals(kind) ? "working" : kind);
     }
 
-    private static JSONObject historyToolCard(JSONObject call, String output) throws Exception {
+    static JSONObject historyToolCard(JSONObject call, String output) throws Exception {
         String name = call.optString("name", "tool");
         JSONObject args = call.optJSONObject("arguments");
         if (args == null) args = new JSONObject();
@@ -1171,8 +1200,10 @@ final class CodexAppServerBridge {
                 .put("output", output).put("status", "completed");
         }
         if (lower.contains("collab") || lower.contains("agent")) {
-            JSONObject result = new JSONObject().put("type", "collabAgentToolCall").put("name", name)
-                .put("tool", name).put("detail", output.isEmpty() ? args.toString(2) : output).put("status", "completed");
+            JSONObject result = new JSONObject().put("type", "collabAgentToolCall")
+                .put("id", call.optString("id", "")).put("name", name)
+                .put("tool", name).put("detail", output.isEmpty() ? args.toString(2) : output)
+                .put("status", lower.contains("spawn") ? "working" : "completed");
             String taskName = args.optString("task_name", args.optString("taskName", ""));
             String taskMessage = args.optString("message", args.optString("task", args.optString("prompt", "")));
             if (!taskName.isEmpty()) result.put("agentName", taskName);
