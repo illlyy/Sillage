@@ -362,10 +362,18 @@ internal fun NativeChatScreen(
     LaunchedEffect(listState, followOutput, listDragged, state.conversationAnimationKey) {
         var previousFrame = withFrameNanos { it }
         while (isActive) {
+            // Do not keep a frame callback alive for an idle conversation. Poll slowly
+            // until generation/layout growth needs the smooth 60/120 Hz follow motor.
+            if (!followOutput || listDragged || state.messages.isEmpty() ||
+                (!state.busy && !listState.canScrollForward)
+            ) {
+                delay(72L)
+                previousFrame = withFrameNanos { it }
+                continue
+            }
             val frame = withFrameNanos { it }
             val elapsedSeconds = ((frame - previousFrame).coerceAtMost(50_000_000L)) / 1_000_000_000f
             previousFrame = frame
-            if (!followOutput || listDragged || state.messages.isEmpty()) continue
 
             val layout = listState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull() ?: continue
