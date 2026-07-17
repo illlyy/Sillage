@@ -2037,7 +2037,14 @@ private fun SubagentActivityView(content: String) {
     val reasoning = payload.optString("reasoning")
     val command = payload.optString("command")
     val tools = payload.optJSONArray("tools")
-    var expanded by remember(content) { mutableStateOf(true) }
+    // Completed historical activity starts folded like WebUI; an in-progress item
+    // remains open so its newest reasoning and tools are visible immediately.
+    var expanded by remember(content) { mutableStateOf(duration <= 0L) }
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(190, easing = FastOutSlowInEasing),
+        label = "subagentReasoningArrow",
+    )
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -2059,7 +2066,7 @@ private fun SubagentActivityView(content: String) {
                 Icon(
                     HugeIcons.ArrowDown01,
                     null,
-                    modifier = Modifier.size(15.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f },
+                    modifier = Modifier.size(15.dp).graphicsLayer { rotationZ = arrowRotation },
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
