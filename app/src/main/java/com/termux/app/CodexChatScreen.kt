@@ -119,6 +119,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -282,7 +283,8 @@ internal fun NativeChatScreen(
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
-    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val imeVisible = imeBottomPx > 0
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -329,7 +331,7 @@ internal fun NativeChatScreen(
         }
     }
 
-    LaunchedEffect(inputHeightPx) {
+    LaunchedEffect(inputHeightPx, imeBottomPx) {
         if (followOutput && !listDragged && state.messages.isNotEmpty()) {
             val visibleCount = minOf(historyLimit, state.messages.size)
             val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
@@ -337,16 +339,19 @@ internal fun NativeChatScreen(
         }
     }
 
-    // Streaming deltas can arrive many times per second. Follow them at a stable frame rate
-    // instead of launching a new scroll animation for every token.
-    LaunchedEffect(state.busy, followOutput) {
-        while (state.busy && followOutput) {
-            if (state.messages.isNotEmpty() && !listDragged) {
+    // RikkaHub-style follow: react to actual list layout growth, not only backend events.
+    // This also catches the final reveal frames and IME/input-height animation frames.
+    LaunchedEffect(listState, followOutput, state.conversationAnimationKey) {
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            val last = layout.visibleItemsInfo.lastOrNull()
+            Triple(listState.canScrollForward, layout.totalItemsCount, last?.offset?.plus(last.size) ?: 0)
+        }.collect { (canScrollForward, _, _) ->
+            if (followOutput && !listState.isScrollInProgress && canScrollForward && state.messages.isNotEmpty()) {
                 val visibleCount = minOf(historyLimit, state.messages.size)
                 val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
                 listState.scrollToItem((visibleCount - 1 + loaderOffset + if (state.busy) 1 else 0).coerceAtLeast(0), Int.MAX_VALUE)
             }
-            delay(96L)
         }
     }
 
@@ -1983,7 +1988,7 @@ private fun LiquidEffortSlider(
         settleJob?.cancel()
         settling = true
         settleJob = scope.launch {
-            animate(visualIndex, target.toFloat(), animationSpec = spring(dampingRatio = 0.78f, stiffness = 500f)) { value, _ ->
+            animate(visualIndex, target.toFloat(), animationSpec = tween(150, easing = FastOutSlowInEasing)) { value, _ ->
                 visualIndex = value
                 onPreview(options[value.roundToInt().coerceIn(options.indices)])
             }
