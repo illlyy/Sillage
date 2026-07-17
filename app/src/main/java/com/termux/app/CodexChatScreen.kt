@@ -1130,24 +1130,44 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
         }
     }
 
-    if (!showRichText) {
-        val safeTailStart = tailStart.coerceIn(0, displayedText.length)
-        val animatedText = androidx.compose.ui.text.buildAnnotatedString {
-            if (safeTailStart > 0) append(displayedText.substring(0, safeTailStart))
-            withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = tailAlpha))) {
-                append(displayedText.substring(safeTailStart))
+    // Keep both renderers alive for a short hand-off. Markwon's AndroidView needs a
+    // layout pass; replacing Compose Text in one frame can otherwise show a blank flash
+    // and suddenly change the message height when lists/headings gain Markdown spacing.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = tween(durationMillis = 150, easing = LinearOutSlowInEasing),
+            ),
+    ) {
+        AnimatedContent(
+            targetState = showRichText,
+            transitionSpec = {
+                fadeIn(tween(150, easing = LinearOutSlowInEasing)) togetherWith
+                    fadeOut(tween(90, easing = LinearEasing))
+            },
+            label = "streamToMarkdown",
+        ) { rich ->
+            if (!rich) {
+                val safeTailStart = tailStart.coerceIn(0, displayedText.length)
+                val animatedText = androidx.compose.ui.text.buildAnnotatedString {
+                    if (safeTailStart > 0) append(displayedText.substring(0, safeTailStart))
+                    withStyle(androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = tailAlpha))) {
+                        append(displayedText.substring(safeTailStart))
+                    }
+                }
+                Text(
+                    text = animatedText,
+                    modifier = Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.bodyLarge,
+                    lineHeight = 24.sp,
+                    letterSpacing = 0.1.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            } else {
+                RichResponseText(text)
             }
         }
-        Text(
-            text = animatedText,
-            modifier = Modifier.fillMaxWidth(),
-            style = MaterialTheme.typography.bodyLarge,
-            lineHeight = 24.sp,
-            letterSpacing = 0.1.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-    } else {
-        RichResponseText(text)
     }
 }
 
