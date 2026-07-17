@@ -357,7 +357,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 profile.baseUrl,
                 profile.apiKey,
                 profile.model,
-                profile.apiFormat,
+                profile.apiFormat.takeUnless { it.isBlank() || it == "auto" } ?: "openai_responses",
                 routeThroughMihomo,
                 profile.forwardReasoningContext,
                 profile.ultraSubagentLimit,
@@ -563,7 +563,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun openLegacyWebUi() {
         startActivity(
             Intent(this, CodexHomeActivity::class.java)
-                .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI),
+                .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         )
         finish()
     }

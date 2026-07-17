@@ -126,6 +126,7 @@ public final class CodexHomeActivity extends Activity {
     private EditText apiKey;
     private CodexAppServerBridge appServerBridge;
     private boolean appServerStarted;
+    private boolean backendSuspendedForNative;
     private EditText baseUrl;
     private MaterialButton configFab;
     private ScrollView configPage;
@@ -269,6 +270,12 @@ public final class CodexHomeActivity extends Activity {
             refreshRuntimeState();
         }
         refreshMihomoUi();
+        if (this.backendSuspendedForNative) {
+            this.backendSuspendedForNative = false;
+            // Native chat owns a separate stdio app-server. Restart the WebUI backend
+            // only after native chat leaves the foreground, never concurrently.
+            if (this.webUiLoaded && !this.appServerStarted) restartWebUiAndBackend();
+        }
         if (this.prefs != null && this.prefs.getBoolean("overlay_enabled", false) && !Settings.canDrawOverlays(this)) {
             this.prefs.edit().putBoolean("overlay_enabled", false).apply(); CodexOverlayService.stop(this);
         }
@@ -4452,6 +4459,14 @@ public final class CodexHomeActivity extends Activity {
             Toast.makeText(this, "请先安装 Codex CLI", Toast.LENGTH_SHORT).show();
             showOnboardingFromMain();
             return;
+        }
+        // Do not leave the WebUI app-server/proxy alive behind native chat. Two Codex
+        // stdio servers in the same Android process race over profile/session state and
+        // can leave one /responses request waiting forever while the other succeeds.
+        if (this.appServerStarted && this.appServerBridge != null) {
+            this.appServerStarted = false;
+            this.backendSuspendedForNative = true;
+            this.appServerBridge.stop();
         }
         startActivity(new Intent(this, CodexChatActivity.class));
     }
