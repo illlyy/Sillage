@@ -448,9 +448,10 @@ internal fun NativeChatScreen(
                             onPrompt = onInputChange,
                         )
                     } else {
-                        val visibleMessages = remember(state.messages.size, state.conversationAnimationKey, historyLimit) {
-                            state.messages.takeLast(historyLimit)
-                        }
+                        // Do not cache by list size: streamed deltas replace the current
+                        // message without changing size. A size-keyed snapshot permanently
+                        // retained the first tiny delta and its streaming=true flag.
+                        val visibleMessages = state.messages.takeLast(historyLimit)
                         val hiddenMessageCount = state.messages.size - visibleMessages.size
                         val liveAssistantId = if (state.busy) visibleMessages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }?.id else null
                         val retryPrompts = remember(visibleMessages, state.conversationAnimationKey) {
