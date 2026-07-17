@@ -132,6 +132,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -1169,6 +1170,11 @@ private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachment
 
 @Composable
 private fun FinalOnlyAnswerReveal(text: String, revealStartedAt: Long) {
+    // Do not promote an unbounded document to one blur/alpha GPU layer.
+    if (!NativeUiRenderSafety.canAnimateDocument(text)) {
+        RichResponseText(text)
+        return
+    }
     val shouldAnimate = revealStartedAt > 0L && System.currentTimeMillis() - revealStartedAt < 2_000L
     var revealed by remember(revealStartedAt) { mutableStateOf(!shouldAnimate) }
     val alpha by animateFloatAsState(if (revealed) 1f else 0f, tween(560, easing = LinearOutSlowInEasing), label = "finalAnswerAlpha")
@@ -1201,29 +1207,18 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
         }
     }
 
-    AnimatedContent(
-        targetState = showRichText,
-        transitionSpec = {
-            fadeIn(tween(150, easing = LinearOutSlowInEasing)) togetherWith
-                fadeOut(tween(90, easing = LinearEasing))
-        },
-        label = "streamToMarkdown",
-    ) { rich ->
-        if (rich) {
-            RichResponseText(text)
-        } else {
-            // Network deltas are already coalesced by the Activity. Render each stable
-            // chunk once and let the 120 Hz viewport motor provide motion; a per-glyph
-            // 620 ms alpha animation rebuilt AnnotatedString every frame and dominated
-            // long-answer frame time.
-            ChunkedLiveText(
-                text = text,
-                tailStart = tailStart,
-                generation = text.length,
-                reasoning = false,
-                animateTail = false,
-            )
-        }
+    // AnimatedContent temporarily promotes the complete document to a hardware layer.
+    // Keep the unbounded answer layer-free; the live tail already owns reveal motion.
+    if (showRichText) {
+        RichResponseText(text)
+    } else {
+        ChunkedLiveText(
+            text = text,
+            tailStart = tailStart,
+            generation = text.length,
+            reasoning = false,
+            animateTail = false,
+        )
     }
 }
 
@@ -1321,6 +1316,19 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
             enter = fadeIn(tween(75, easing = LinearEasing)) + slideInVertically(initialOffsetY = { -it / 8 }, animationSpec = tween(130, easing = LinearEasing)),
             exit = fadeOut(tween(65, easing = LinearEasing)) + slideOutVertically(targetOffsetY = { -it / 10 }, animationSpec = tween(105, easing = LinearEasing)),
         ) { content() }
+    }
+}
+
+@Composable
+private fun SafeExpandableViewport(maxHeight: androidx.compose.ui.unit.Dp, content: @Composable () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = maxHeight)
+            .clipToBounds()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        content()
     }
 }
 
@@ -1501,7 +1509,8 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
-            Column {
+            SafeExpandableViewport(maxHeight = 520.dp) {
+                Column {
                 if (state.reasoningText.isNotBlank()) {
                     val liveReasoningModifier = if (reasoningPreview) {
                         Modifier
@@ -1540,6 +1549,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
                         }
                     }
                 }
+                }
             }
         }
     }
@@ -1563,7 +1573,14 @@ private fun markdownBlocks(source: String): List<MarkdownBlock> {
 private fun RichResponseText(text: String) {
     val blocks = remember(text) { markdownBlocks(text) }
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        blocks.forEach { block -> if (block.code) RikkaCodeBlock(block.language, block.text) else if (block.text.isNotBlank()) RichMarkdownText(block.text) }
+        blocks.forEach { block ->
+            if (block.code) {
+                RikkaCodeBlock(block.language, block.text)
+            } else if (block.text.isNotBlank()) {
+                val chunks = remember(block.text) { NativeUiRenderSafety.splitMarkdown(block.text) }
+                chunks.forEach { chunk -> RichMarkdownText(chunk) }
+            }
+        }
     }
 }
 
@@ -1795,7 +1812,10 @@ private fun RichMarkdownText(text: String) {
     ) {
         if (value == null) {
             value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                NativeMarkdownRenderer.render(markwon, text)
+                // Historical tool/reasoning output is not trusted Markdown. Markwon's
+                // inline parser can throw on malformed backtick sequences; fall back to
+                // the already-visible plain text instead of terminating the app.
+                runCatching { NativeMarkdownRenderer.render(markwon, text) }.getOrNull()
             }
         }
     }
@@ -1819,8 +1839,11 @@ private fun RichMarkdownText(text: String) {
         update = { view ->
             val rendered = parsed
             if (rendered != null && view.tag != text) {
-                view.tag = text
-                markwon.setParsedMarkdown(view, rendered)
+                val applied = runCatching { markwon.setParsedMarkdown(view, rendered) }.isSuccess
+                if (applied) view.tag = text else {
+                    view.text = text
+                    view.tag = "plain:$text"
+                }
             } else if (rendered == null && view.tag != "plain:$text") {
                 view.text = text
                 view.tag = "plain:$text"
@@ -1885,7 +1908,8 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
-            Column {
+            SafeExpandableViewport(maxHeight = 520.dp) {
+                Column {
         if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(reasoning) }
         else if (reasoningUnavailable) Text(
             "\u6a21\u578b\u672a\u8fd4\u56de\u53ef\u5c55\u793a\u7684\u601d\u8003\u6458\u8981",
@@ -1940,6 +1964,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
             }
             else ToolTextCard(title, detail, type == "fileChange")
         }
+                }
             }
         }
     }
@@ -2046,13 +2071,8 @@ private fun CollabAgentCapsule(
                                 IconButton(onClick = closePanel) { Icon(HugeIcons.Cancel01, "\u5173\u95ed") }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                            AnimatedContent(
-                                targetState = selectedId,
-                                transitionSpec = {
-                                    (fadeIn(tween(180)) + slideInHorizontally(tween(240, easing = FastOutSlowInEasing)) { if (targetState == null) -it / 5 else it / 5 }) togetherWith
-                                        (fadeOut(tween(110)) + slideOutHorizontally(tween(180, easing = FastOutSlowInEasing)) { if (targetState == null) it / 5 else -it / 5 })
-                                }, label = "subagentNavigation",
-                            ) { selected ->
+                            Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
+                                val selected = selectedId
                                 if (selected == null) {
                                     SubagentOverview(state, agents) { chosen ->
                                         val thread = subagentThreadId(chosen)
@@ -2492,6 +2512,7 @@ private fun SubagentDetail(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 item(key = "agent-status") { AgentTimelineSection("\u72b6\u6001", statusLabel) }
+                if (status == "failed" || status == "stopped") item(key = "agent-failure") { SubagentFailureSummary() }
                 if (task.isNotBlank()) item(key = "agent-task") { AgentTimelineSection("\u59d4\u6d3e\u7684\u4efb\u52a1", task) }
                 item(key = "agent-output-title") {
                     Text(
@@ -2538,6 +2559,7 @@ private fun SubagentDetail(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             AgentTimelineSection("\u72b6\u6001", statusLabel)
+            if (status == "failed" || status == "stopped") SubagentFailureSummary()
             if (task.isNotBlank()) AgentTimelineSection("\u59d4\u6d3e\u7684\u4efb\u52a1", task)
             if (result.isNotBlank()) {
                 AgentTimelineSection("\u6700\u7ec8\u56de\u590d", result)
@@ -2558,6 +2580,25 @@ private fun SubagentDetail(
                 }
             }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun SubagentFailureSummary() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.58f),
+    ) {
+        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
+            Text("\u6267\u884c\u5931\u8d25", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "\u5b50\u4ee3\u7406\u672a\u751f\u6210\u6700\u7ec8\u56de\u590d\u3002\u8be6\u7ec6\u6d3b\u52a8\u9ed8\u8ba4\u5df2\u6298\u53e0\uff0c\u53ef\u6309\u9700\u5c55\u5f00\u67e5\u770b\u3002",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
         }
     }
 }
@@ -2620,9 +2661,9 @@ private fun SubagentActivityView(content: String) {
     val reasoning = payload.optString("reasoning")
     val command = payload.optString("command")
     val tools = payload.optJSONArray("tools")
-    // Completed historical activity starts folded like WebUI; an in-progress item
-    // remains open so its newest reasoning and tools are visible immediately.
-    var expanded by remember(content) { mutableStateOf(duration <= 0L) }
+    // A historical activity can be a very large document. Never auto-expand it when
+    // the child detail opens, including failed/aborted activities with no duration.
+    var expanded by remember(content) { mutableStateOf(false) }
     val arrowRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
         animationSpec = tween(190, easing = FastOutSlowInEasing),
@@ -2654,20 +2695,22 @@ private fun SubagentActivityView(content: String) {
                 )
             }
             QElasticExpand(expanded) {
-                Column(Modifier.padding(start = 13.dp, end = 13.dp, bottom = 13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    if (reasoning.isNotBlank()) RichResponseText(reasoning)
-                    if (command.isNotBlank()) ToolTextCard("\u547d\u4ee4\u6267\u884c", command, false)
-                    if (tools != null) for (index in 0 until tools.length()) {
-                        val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
-                        when (tool.optString("type")) {
-                            "commandExecution" -> CommandExecutionCard(tool)
-                            "collabAgentToolCall", "subAgentActivity" -> Unit
-                            else -> ToolTextCard(
-                                tool.optString("type", "\u5de5\u5177\u8c03\u7528"),
-                                tool.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))),
-                                tool.optString("type") == "fileChange",
-                            )
+                SafeExpandableViewport(maxHeight = 520.dp) {
+                    Column(Modifier.padding(start = 13.dp, end = 13.dp, bottom = 13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        if (reasoning.isNotBlank()) RichResponseText(reasoning)
+                        if (command.isNotBlank()) ToolTextCard("\u547d\u4ee4\u6267\u884c", command, false)
+                        if (tools != null) for (index in 0 until tools.length()) {
+                            val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
+                            when (tool.optString("type")) {
+                                "commandExecution" -> CommandExecutionCard(tool)
+                                "collabAgentToolCall", "subAgentActivity" -> Unit
+                                else -> ToolTextCard(
+                                    tool.optString("type", "\u5de5\u5177\u8c03\u7528"),
+                                    tool.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))),
+                                    tool.optString("type") == "fileChange",
+                                )
+                            }
                         }
                     }
                 }
@@ -2733,11 +2776,12 @@ private fun CommandExecutionCard(item: JSONObject) {
                 Text(meta.ifBlank { if (failed) "失败" else "完成" }, style = MaterialTheme.typography.labelSmall, color = accent)
             }
             QElasticExpand(expanded) {
-                Column {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            if (stdout.isNotBlank() || (stdout.isBlank() && aggregated.isNotBlank())) CommandStreamSection("输出", if (stdout.isNotBlank()) stdout else aggregated, false)
-            if (stderr.isNotBlank()) CommandStreamSection("错误输出", stderr, true)
-        
+                SafeExpandableViewport(maxHeight = 420.dp) {
+                    Column {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        if (stdout.isNotBlank() || (stdout.isBlank() && aggregated.isNotBlank())) CommandStreamSection("\u8f93\u51fa", if (stdout.isNotBlank()) stdout else aggregated, false)
+                        if (stderr.isNotBlank()) CommandStreamSection("\u9519\u8bef\u8f93\u51fa", stderr, true)
+                    }
                 }
             }
         }
@@ -2748,7 +2792,14 @@ private fun CommandExecutionCard(item: JSONObject) {
 private fun CommandStreamSection(title: String, value: String, error: Boolean) {
     Column(modifier = Modifier.fillMaxWidth().background(if (error) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f) else Color.Transparent).padding(10.dp)) {
         Text(title, style = MaterialTheme.typography.labelSmall, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.height(4.dp)); SelectionContainer { Text(value.trimEnd(), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+        Spacer(Modifier.height(4.dp))
+        SelectionContainer {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                NativeUiRenderSafety.splitPlainText(value.trimEnd()).forEach { chunk ->
+                    Text(chunk, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
     }
 }
 
@@ -2827,7 +2878,9 @@ private fun SearchOutputCard(content: String) {
                 Spacer(Modifier.width(8.dp)); Text("搜索结果", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 Text("${results.size} 条 · ${grouped.size} 个文件", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (expanded) {
+            QElasticExpand(expanded) {
+                SafeExpandableViewport(maxHeight = 420.dp) {
+                    Column {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 grouped.forEach { (file, lines) ->
                     Row(modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 9.dp, bottom = 3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2840,6 +2893,8 @@ private fun SearchOutputCard(content: String) {
                         SelectionContainer { Text(shown, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
                     }
                 }
+                    }
+                }
             }
         }
     }
@@ -2847,6 +2902,7 @@ private fun SearchOutputCard(content: String) {
 @Composable
 private fun ToolTextCard(title: String, detail: String, diff: Boolean) {
     var expanded by remember { mutableStateOf(false) }
+    val displayDetail = remember(detail) { NativeUiRenderSafety.sanitizeToolDetail(detail) }
     val failed = detail.contains("failed", true) || detail.contains("error", true) || Regex("exit [1-9]").containsMatchIn(detail)
     val accent = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
@@ -2858,10 +2914,21 @@ private fun ToolTextCard(title: String, detail: String, diff: Boolean) {
                 Text(if (failed) "失败" else "完成", style = MaterialTheme.typography.labelSmall, color = accent)
             }
             QElasticExpand(expanded) {
-                Column {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            if (diff) DiffText(detail) else SelectionContainer { Text(detail, modifier = Modifier.padding(10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        
+                SafeExpandableViewport(maxHeight = 420.dp) {
+                    Column {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        if (diff) {
+                            DiffText(displayDetail)
+                        } else {
+                            SelectionContainer {
+                                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    NativeUiRenderSafety.splitPlainText(displayDetail).forEach { chunk ->
+                                        Text(chunk, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2897,10 +2964,11 @@ private fun DiffText(diff: String) {
 
 @Composable
 private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
+    val displayText = remember(text) { NativeUiRenderSafety.errorSummary(text) }
     Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.errorContainer) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text("发生错误", fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp)); SelectionContainer { Text(text, style = MaterialTheme.typography.bodySmall) }
+            Spacer(Modifier.height(4.dp)); SelectionContainer { Text(displayText, style = MaterialTheme.typography.bodySmall) }
             if (onRetry != null) TextButton(onClick = onRetry, modifier = Modifier.align(Alignment.End)) {
                 Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("重试")
             }
