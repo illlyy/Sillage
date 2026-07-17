@@ -1190,13 +1190,25 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
                 Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
                 StreamingResponseText(messageId, text, streaming, revealStartedAt, finalOnlyReveal)
-                if (streaming) Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(7.dp))
-                    Text("\u6b63\u5728\u751f\u6210", style = MaterialTheme.typography.labelSmall)
+                AnimatedVisibility(
+                    visible = streaming,
+                    enter = fadeIn(tween(140)) + expandVertically(tween(160, easing = LinearOutSlowInEasing), expandFrom = Alignment.Top),
+                    exit = fadeOut(tween(100)) + shrinkVertically(tween(150, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
+                ) {
+                    Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(7.dp))
+                        Text("\u6b63\u5728\u751f\u6210", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
-            MessageActions(text = text, onRetry = onRetry, allowShare = true)
+            AnimatedVisibility(
+                visible = !streaming && text.isNotBlank(),
+                enter = fadeIn(tween(150, delayMillis = 60)) + expandVertically(tween(180, easing = LinearOutSlowInEasing), expandFrom = Alignment.Top),
+                exit = fadeOut(tween(90)) + shrinkVertically(tween(120), shrinkTowards = Alignment.Top),
+            ) {
+                MessageActions(text = text, onRetry = onRetry, allowShare = true)
+            }
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
             DropdownMenuItem(
