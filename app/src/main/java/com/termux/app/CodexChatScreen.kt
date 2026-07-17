@@ -316,6 +316,7 @@ internal fun NativeChatScreen(
     var previewAttachment by remember { mutableStateOf<NativeAttachment?>(null) }
     var showGoalDialog by remember { mutableStateOf(false) }
     var showWorkPanel by remember { mutableStateOf(false) }
+    var showSkillPicker by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.busy, state.turnStartedAt) {
         while (state.busy) {
@@ -543,6 +544,8 @@ internal fun NativeChatScreen(
                         onModeSelected = onModeChange,
                         onRequestGoal = { showGoalDialog = true },
                         onClearGoal = onClearGoal,
+                        selectedSkills = state.selectedSkills,
+                        onRemoveSkill = { state.selectedSkills.remove(it) },
                         attachments = state.attachments,
                         onMoreClick = { showFilesSheet = true },
                         onRemoveAttachment = onRemoveAttachment,
@@ -555,6 +558,17 @@ internal fun NativeChatScreen(
                 }
             }
         }
+    }
+    if (showSkillPicker) {
+        SkillPickerDialog(
+            skills = state.skills,
+            selected = state.selectedSkills,
+            onDismiss = { showSkillPicker = false },
+            onSelect = { skill ->
+                if (state.selectedSkills.none { it.path == skill.path }) state.selectedSkills.add(skill)
+                showSkillPicker = false
+            },
+        )
     }
     if (showWorkPanel) {
         WorkPanelDialog(
@@ -621,6 +635,7 @@ internal fun NativeChatScreen(
             RikkaFilesPicker(
                 onPickImage = { showFilesSheet = false; onPickImages() },
                 onPickFile = { showFilesSheet = false; onPickFiles() },
+                onPickSkill = { showFilesSheet = false; showSkillPicker = true },
             )
         }
     }
@@ -1436,8 +1451,8 @@ private fun RikkaCodeBlock(language: String, code: String) {
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
         Column {
             Row(
@@ -1480,6 +1495,15 @@ private fun RikkaCodeBlock(language: String, code: String) {
     }
 }
 
+private fun normalizeMarkdownLists(source: String): String {
+    // Models occasionally place the first list marker directly after a lead-in sentence.
+    // CommonMark then treats the whole response as a paragraph, so introduce only the
+    // structurally unambiguous break while preserving normal prose and version numbers.
+    return source
+        .replace(Regex("""([\uFF1A:;\uFF1B])(?:[ \t]+)(?=(?:[-+*]|\d{1,3}[.)])\s+)"""), "$1\n")
+        .replace(Regex("""(?m)^(\s*)([\u2022\u00B7])\s+"""), "$1- ")
+}
+
 private object NativeMarkdownRenderer {
     @Volatile private var renderer: Markwon? = null
     private val renderedCache = object : LinkedHashMap<String, android.text.Spanned>(48, 0.75f, true) {
@@ -1492,9 +1516,9 @@ private object NativeMarkdownRenderer {
                 override fun configureTheme(builder: MarkwonTheme.Builder) {
                     val density = context.resources.displayMetrics.density
                     builder
-                        .blockMargin((18f * density).roundToInt())
+                        .blockMargin((20f * density).roundToInt())
                         .listItemColor(android.graphics.Color.rgb(184, 112, 130))
-                        .bulletWidth((7f * density).roundToInt())
+                        .bulletWidth((8f * density).roundToInt())
                         .bulletListItemStrokeWidth((2f * density).roundToInt())
                         .blockQuoteColor(android.graphics.Color.rgb(207, 151, 164))
                         .blockQuoteWidth((4f * density).roundToInt())
@@ -1510,8 +1534,8 @@ private object NativeMarkdownRenderer {
                         RoundedInlineCodeSpan(
                             horizontalPadding = 5f * density,
                             verticalPadding = 2f * density,
-                            radius = 6f * density,
-                            backgroundColor = android.graphics.Color.rgb(246, 229, 233),
+                            radius = 8f * density,
+                            backgroundColor = android.graphics.Color.rgb(244, 230, 234),
                             textColor = android.graphics.Color.rgb(112, 57, 73),
                         )
                     }
@@ -1537,7 +1561,7 @@ private object NativeMarkdownRenderer {
 
     fun render(markwon: Markwon, text: String): android.text.Spanned {
         cached(text)?.let { return it }
-        val rendered = markwon.toMarkdown(text)
+        val rendered = markwon.toMarkdown(normalizeMarkdownLists(text))
         synchronized(renderedCache) { renderedCache[text] = rendered }
         return rendered
     }
@@ -2554,10 +2578,12 @@ private fun ComposerModeCapsules(
     onModeSelected: (String) -> Unit,
     onRequestGoal: () -> Unit,
     onClearGoal: () -> Unit,
+    selectedSkills: List<NativeSkill>,
+    onRemoveSkill: (NativeSkill) -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 3.dp),
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 3.dp),
         horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2623,6 +2649,22 @@ private fun ComposerModeCapsules(
                 }
             }
         }
+        selectedSkills.forEach { skill ->
+            Surface(
+                    modifier = Modifier.clickable { onRemoveSkill(skill) },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                ) {
+                    Row(Modifier.padding(start = 10.dp, end = 7.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(HugeIcons.Files02, null, Modifier.size(14.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(skill.name, maxLines = 1, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(5.dp))
+                        Icon(HugeIcons.Cancel01, "\u79fb\u9664 Skill", Modifier.size(13.dp))
+                    }
+                }
+        }
     }
 }
 
@@ -2666,6 +2708,8 @@ private fun RikkaChatInput(
     onModeSelected: (String) -> Unit,
     onRequestGoal: () -> Unit,
     onClearGoal: () -> Unit,
+    selectedSkills: List<NativeSkill>,
+    onRemoveSkill: (NativeSkill) -> Unit,
     attachments: List<NativeAttachment>,
     onMoreClick: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -2732,6 +2776,8 @@ private fun RikkaChatInput(
                         onModeSelected = onModeSelected,
                         onRequestGoal = onRequestGoal,
                         onClearGoal = onClearGoal,
+                        selectedSkills = selectedSkills,
+                        onRemoveSkill = onRemoveSkill,
                     )
                     TextField(
                         value = value,
@@ -2844,7 +2890,63 @@ private fun AttachmentPreviewDialog(attachment: NativeAttachment, onDismiss: () 
 }
 
 @Composable
-private fun RikkaFilesPicker(onPickImage: () -> Unit, onPickFile: () -> Unit) {
+private fun SkillPickerDialog(
+    skills: List<NativeSkill>,
+    selected: List<NativeSkill>,
+    onDismiss: () -> Unit,
+    onSelect: (NativeSkill) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val results = remember(skills, query) {
+        skills.filter { query.isBlank() || it.name.contains(query, true) || it.description.contains(query, true) }
+    }
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("\u5f15\u7528 Skill") },
+        text = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = CircleShape,
+                    leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
+                    placeholder = { Text("\u641c\u7d22 Skill") },
+                )
+                if (results.isEmpty()) {
+                    Text("\u6ca1\u6709\u627e\u5230\u53ef\u7528 Skill", modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        items(results, key = { it.path }) { skill ->
+                            val isSelected = selected.any { it.path == skill.path }
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().clickable(enabled = !isSelected) { onSelect(skill) },
+                                shape = RoundedCornerShape(17.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                            ) {
+                                Row(Modifier.padding(horizontal = 13.dp, vertical = 11.dp), verticalAlignment = Alignment.Top) {
+                                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer) { Icon(HugeIcons.Sparkles, null, Modifier.padding(7.dp).size(15.dp), tint = MaterialTheme.colorScheme.onTertiaryContainer) }
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(skill.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                        if (skill.description.isNotBlank()) Text(skill.description, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp)
+                                    }
+                                    if (isSelected) Text("\u5df2\u5f15\u7528", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("\u5173\u95ed") } },
+    )
+}
+
+@Composable
+private fun RikkaFilesPicker(onPickImage: () -> Unit, onPickFile: () -> Unit, onPickSkill: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),

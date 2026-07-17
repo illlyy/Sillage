@@ -236,11 +236,18 @@ final class CodexAppServerBridge {
     }
 
     void sendMessage(String text, String model, String effort, String attachmentsJson, String collaborationMode) {
+        sendMessage(text, model, effort, attachmentsJson, collaborationMode, "[]");
+    }
+
+    void sendMessage(String text, String model, String effort, String attachmentsJson, String collaborationMode, String skillsJson) {
         if (text == null) text = "";
         JSONArray attachments;
         try { attachments = new JSONArray(attachmentsJson == null ? "[]" : attachmentsJson); }
         catch (Exception ignored) { attachments = new JSONArray(); }
-        if (text.trim().isEmpty() && attachments.length() == 0) return;
+        JSONArray skills;
+        try { skills = new JSONArray(skillsJson == null ? "[]" : skillsJson); }
+        catch (Exception ignored) { skills = new JSONArray(); }
+        if (text.trim().isEmpty() && attachments.length() == 0 && skills.length() == 0) return;
         if (threadId == null) {
             emit("onNativeError", "Codex app-server is not ready yet");
             return;
@@ -260,6 +267,15 @@ final class CodexAppServerBridge {
                 } else {
                     input.put(new JSONObject().put("type", "text").put("text",
                         "Attached local file: " + path + " (" + attachment.optString("name", "file") + ")"));
+                }
+            }
+            for (int i = 0; i < skills.length(); i++) {
+                JSONObject skill = skills.optJSONObject(i);
+                if (skill == null) continue;
+                String name = skill.optString("name", "");
+                String path = skill.optString("path", "");
+                if (!name.isEmpty() && !path.isEmpty()) {
+                    input.put(new JSONObject().put("type", "skill").put("name", name).put("path", path));
                 }
             }
             params.put("input", input);
@@ -332,6 +348,58 @@ final class CodexAppServerBridge {
             }
             emit("onSubagentHistory", result.toString());
         }, "CodexSubagentHistory").start();
+    }
+
+    void loadSkills() {
+        new Thread(() -> {
+            JSONArray result = new JSONArray();
+            java.util.HashSet<String> seen = new java.util.HashSet<>();
+            scanSkillDirectory(new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "skills"), result, seen, 0);
+            scanSkillDirectory(new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".agents"), "skills"), result, seen, 0);
+            emit("onSkills", result.toString());
+        }, "CodexSkillScanner").start();
+    }
+
+    private static void scanSkillDirectory(File directory, JSONArray output, java.util.Set<String> seen, int depth) {
+        if (directory == null || !directory.isDirectory() || depth > 8) return;
+        File skillFile = new File(directory, "SKILL.md");
+        if (skillFile.isFile()) {
+            try {
+                String canonical = skillFile.getCanonicalPath();
+                if (seen.add(canonical)) output.put(readSkillSummary(skillFile));
+            } catch (Exception ignored) {}
+        }
+        File[] children = directory.listFiles(File::isDirectory);
+        if (children == null) return;
+        for (File child : children) scanSkillDirectory(child, output, seen, depth + 1);
+    }
+
+    private static JSONObject readSkillSummary(File skillFile) throws Exception {
+        String fallbackName = skillFile.getParentFile().getName();
+        String name = fallbackName;
+        String description = "";
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(skillFile), java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            boolean frontmatter = false;
+            int count = 0;
+            while ((line = reader.readLine()) != null && count++ < 60) {
+                String trimmed = line.trim();
+                if (count == 1 && "---".equals(trimmed)) { frontmatter = true; continue; }
+                if (frontmatter && "---".equals(trimmed)) break;
+                if (!frontmatter) continue;
+                if (trimmed.startsWith("name:")) name = unquoteYaml(trimmed.substring(5).trim(), fallbackName);
+                else if (trimmed.startsWith("description:")) description = unquoteYaml(trimmed.substring(12).trim(), "");
+            }
+        }
+        return new JSONObject().put("name", name).put("description", description).put("path", skillFile.getAbsolutePath());
+    }
+
+    private static String unquoteYaml(String value, String fallback) {
+        String result = value == null ? "" : value.trim();
+        if (result.length() >= 2 && ((result.startsWith("\"") && result.endsWith("\"")) ||
+                (result.startsWith("'") && result.endsWith("'")))) result = result.substring(1, result.length() - 1);
+        return result.isEmpty() ? fallback : result;
     }
 
     void setThreadGoal(String objective) {

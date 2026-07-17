@@ -32,6 +32,8 @@ internal enum class NativeChatRole {
 
 internal data class NativeAttachment(val name: String, val path: String, val image: Boolean)
 
+internal data class NativeSkill(val name: String, val description: String, val path: String)
+
 internal data class NativeModelOption(val id: String, val name: String, val efforts: List<String>, val defaultEffort: String)
 
 internal data class NativeConversation(val threadId: String, val title: String, val state: String, val projectPath: String, val favorite: Boolean) { val projectName: String get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
@@ -50,6 +52,8 @@ internal class NativeChatState {
     val conversations = mutableStateListOf<NativeConversation>()
     val modelOptions = mutableStateListOf<NativeModelOption>()
     val attachments = mutableStateListOf<NativeAttachment>()
+    val skills = mutableStateListOf<NativeSkill>()
+    val selectedSkills = mutableStateListOf<NativeSkill>()
     val toolDetails = mutableStateListOf<String>()
     val liveSubagents = mutableStateListOf<String>()
     val subagentHistories = mutableStateMapOf<String, String>()
@@ -412,8 +416,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))
             }
         }
-        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, attachments.toString(), chatState.selectedMode)
+        val skills = JSONArray().also { array ->
+            chatState.selectedSkills.forEach { skill -> array.put(JSONObject().put("name", skill.name).put("path", skill.path)) }
+        }
+        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, attachments.toString(), chatState.selectedMode, skills.toString())
         chatState.attachments.clear()
+        chatState.selectedSkills.clear()
     }
 
     private fun setChatMode(mode: String) {
@@ -538,6 +546,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         when (function) {
             "onReady" -> {
                 chatState.ready = true
+                bridge?.loadSkills()
                 chatState.connectionLabel = "已连接"
             }
             "onHistory" -> {
@@ -561,6 +570,19 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.revision++
             }
             "onToolComplete" -> { chatState.toolDetails.add(value); chatState.revision++ }
+            "onSkills" -> {
+                val array = runCatching { JSONArray(value) }.getOrNull() ?: JSONArray()
+                val parsed = buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val name = item.optString("name")
+                        val path = item.optString("path")
+                        if (name.isNotBlank() && path.isNotBlank()) add(NativeSkill(name, item.optString("description"), path))
+                    }
+                }.distinctBy { it.path }.sortedBy { it.name.lowercase() }
+                chatState.skills.clear()
+                chatState.skills.addAll(parsed)
+            }
             "onPlanUpdated" -> {
                 val payload = runCatching { JSONObject(value) }.getOrNull()
                 chatState.planJson = payload?.optJSONArray("plan")?.toString() ?: "[]"
