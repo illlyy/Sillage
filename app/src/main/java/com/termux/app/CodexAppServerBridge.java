@@ -346,6 +346,14 @@ final class CodexAppServerBridge {
     }
 
     void resumeConversation(String resumeThreadId) {
+        resumeConversation(resumeThreadId, false);
+    }
+
+    void restoreRetainedConversation(String resumeThreadId) {
+        resumeConversation(resumeThreadId, true);
+    }
+
+    private void resumeConversation(String resumeThreadId, boolean allowMissingRollout) {
         if (resumeThreadId == null || resumeThreadId.trim().isEmpty()) return;
         final String requestedThread = resumeThreadId.trim();
         final int generation = navigationGeneration.incrementAndGet();
@@ -364,6 +372,7 @@ final class CodexAppServerBridge {
                 JSONArray history = sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile);
                 if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
                 final String historyValue = history.toString();
+                final boolean retainInMemoryThread = allowMissingRollout && sessionFile == null;
                 activity.runOnUiThread(() -> {
                     if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
                     // Apply the persisted snapshot before opening the event gate. Deltas
@@ -371,6 +380,12 @@ final class CodexAppServerBridge {
                     // instead of being appended and then erased by replaceHistory().
                     if (eventListener != null) eventListener.onEvent("onHistory", historyValue);
                     visibleRouteReady = true;
+                    if (retainInMemoryThread) {
+                        NativeChatDiagnostics.record(activity, "retained_empty_thread_restored",
+                            navigationDetails(generation, shortId(requestedThread)));
+                        emit("onReady", requestedThread);
+                        return;
+                    }
                     try {
                         sendNavigationRequest("thread/resume", new JSONObject().put("threadId", requestedThread), generation);
                     } catch (Exception error) {

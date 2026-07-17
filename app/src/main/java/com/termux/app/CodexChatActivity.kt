@@ -343,6 +343,7 @@ internal class NativeChatState {
 class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
     private val chatState = NativeChatState()
     private var bridge: CodexAppServerBridge? = null
+    private var activeProfileId: String = ""
     private var pendingConversationAnimationKey: String? = null
     private var conversationRefreshGeneration = 0
     private val conversationProjectCache = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -442,6 +443,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onNewConversation = ::newConversation,
                     onResumeConversation = ::resumeConversation,
                     onLoadSubagentHistory = ::loadSubagentHistory,
+                    onModelSelected = ::selectNativeModel,
+                    onEffortSelected = ::selectNativeEffort,
                     onModeChange = ::setChatMode,
                     onSetGoal = ::setGoal,
                     onClearGoal = ::clearGoal,
@@ -496,11 +499,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 ),
             )
         }
-        chatState.selectedModel = profile.model
-        val selectedModelOption = chatState.modelOptions.firstOrNull { it.id.equals(profile.model, ignoreCase = true) }
-        chatState.selectedEffort = selectedModelOption?.defaultEffort ?: "high"
-
-        chatState.modelLabel = profile.model.ifBlank { "默认模型" }
+        activeProfileId = profile.id
+        restoreNativeSelection(prefs, profile.id, profile.model)
         chatState.connectionLabel = "正在连接 ${chatState.modelLabel}…"
 
         // Native chat owns a dedicated reasoning panel, so request summaries from
@@ -534,9 +534,109 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             profile.customSubagentStability && profile.hasCustomV2Models(),
         )
         if (retainedRuntime && !retainedThread.isNullOrBlank()) {
-            streamHandler.postDelayed({ resumeConversation(retainedThread) }, 80L)
+            streamHandler.postDelayed({ resumeConversation(retainedThread, retainedRuntime = true) }, 80L)
         }
 
+    }
+
+    private fun preferencePart(value: String): String = Base64.encodeToString(
+        value.toByteArray(Charsets.UTF_8),
+        Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+    )
+
+    private fun modelPreferenceKey(profileId: String): String =
+        "native_chat_model_v2_${preferencePart(profileId)}"
+
+    private fun effortPreferenceKey(profileId: String, modelId: String): String =
+        "native_chat_effort_v2_${preferencePart(profileId)}_${preferencePart(modelId.lowercase())}"
+
+    private fun restoreNativeSelection(
+        prefs: android.content.SharedPreferences,
+        profileId: String,
+        profileDefaultModel: String,
+    ) {
+        val storedModelId = prefs.getString(modelPreferenceKey(profileId), null).orEmpty()
+        val selectedOption = chatState.modelOptions.firstOrNull {
+            it.id.equals(storedModelId, ignoreCase = true)
+        } ?: chatState.modelOptions.firstOrNull {
+            it.id.equals(profileDefaultModel, ignoreCase = true)
+        } ?: chatState.modelOptions.firstOrNull()
+
+        if (selectedOption == null) {
+            chatState.selectedModel = profileDefaultModel
+            chatState.modelLabel = profileDefaultModel.ifBlank { "默认模型" }
+            chatState.selectedEffort = "high"
+            return
+        }
+
+        chatState.selectedModel = selectedOption.id
+        chatState.modelLabel = selectedOption.name.ifBlank { selectedOption.id }
+        val storedEffort = prefs.getString(effortPreferenceKey(profileId, selectedOption.id), null)
+            ?.trim()
+            ?.lowercase()
+            .orEmpty()
+        chatState.selectedEffort = storedEffort.takeIf { it in selectedOption.efforts }
+            ?: selectedOption.defaultEffort
+
+        prefs.edit()
+            .putString(modelPreferenceKey(profileId), selectedOption.id)
+            .putString(effortPreferenceKey(profileId, selectedOption.id), chatState.selectedEffort)
+            .apply()
+        NativeChatDiagnostics.record(this, "native_selection_restored", JSONObject()
+            .put("profileId", profileId)
+            .put("model", chatState.selectedModel)
+            .put("effort", chatState.selectedEffort)
+            .put("hadStoredModel", storedModelId.isNotBlank())
+            .put("hadValidStoredEffort", storedEffort in selectedOption.efforts))
+    }
+
+    private fun selectNativeModel(modelId: String) {
+        val option = chatState.modelOptions.firstOrNull { it.id.equals(modelId, ignoreCase = true) } ?: return
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val profileId = activeProfileId
+        val storedEffort = if (profileId.isBlank()) "" else {
+            prefs.getString(effortPreferenceKey(profileId, option.id), null)
+                ?.trim()
+                ?.lowercase()
+                .orEmpty()
+        }
+        chatState.selectedModel = option.id
+        chatState.modelLabel = option.name.ifBlank { option.id }
+        chatState.selectedEffort = storedEffort.takeIf { it in option.efforts } ?: option.defaultEffort
+        if (profileId.isNotBlank()) {
+            prefs.edit()
+                .putString(modelPreferenceKey(profileId), option.id)
+                .putString(effortPreferenceKey(profileId, option.id), chatState.selectedEffort)
+                .apply()
+        }
+        NativeChatDiagnostics.record(this, "native_model_selected", JSONObject()
+            .put("profileId", profileId)
+            .put("model", chatState.selectedModel)
+            .put("effort", chatState.selectedEffort))
+    }
+
+    private fun selectNativeEffort(effort: String) {
+        val option = chatState.modelOptions.firstOrNull {
+            it.id.equals(chatState.selectedModel, ignoreCase = true)
+        } ?: return
+        val normalized = effort.trim().lowercase()
+        if (normalized !in option.efforts) {
+            NativeChatDiagnostics.record(this, "native_effort_rejected", JSONObject()
+                .put("model", option.id)
+                .put("effort", normalized))
+            return
+        }
+        chatState.selectedEffort = normalized
+        if (activeProfileId.isNotBlank()) {
+            getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+                .putString(modelPreferenceKey(activeProfileId), option.id)
+                .putString(effortPreferenceKey(activeProfileId, option.id), normalized)
+                .apply()
+        }
+        NativeChatDiagnostics.record(this, "native_effort_selected", JSONObject()
+            .put("profileId", activeProfileId)
+            .put("model", option.id)
+            .put("effort", normalized))
     }
 
     private fun editMessage(messageId: String, text: String) {
@@ -764,7 +864,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .put("reason", reason).put("droppedReasoning", droppedReasoning).put("droppedAnswer", droppedAnswer))
     }
 
-    private fun resumeConversation(threadId: String) {
+    private fun resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
         discardPendingStreamEvents("resume")
         pendingConversationAnimationKey = threadId
         currentThreadId = threadId
@@ -780,7 +880,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
         chatState.ready = false
         chatState.connectionLabel = "\u6b63\u5728\u6062\u590d\u5bf9\u8bdd\u2026"
-        bridge?.resumeConversation(threadId)
+        if (retainedRuntime) bridge?.restoreRetainedConversation(threadId)
+        else bridge?.resumeConversation(threadId)
     }
 
     private fun newConversation() {
@@ -935,6 +1036,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 refreshConversations()
             }
             "onNativeError" -> {
+                NativeChatDiagnostics.record(this, "native_error", JSONObject()
+                    .put("thread", currentThreadId.orEmpty().take(8))
+                    .put("model", chatState.selectedModel)
+                    .put("effort", chatState.selectedEffort)
+                    .put("message", value.take(600)))
                 chatState.addError(value)
                 stopFrameDiagnostics()
             }

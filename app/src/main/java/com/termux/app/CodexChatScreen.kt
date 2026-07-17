@@ -279,6 +279,8 @@ internal fun NativeChatScreen(
     onNewConversation: () -> Unit,
     onResumeConversation: (String) -> Unit,
     onLoadSubagentHistory: (String) -> Unit,
+    onModelSelected: (String) -> Unit,
+    onEffortSelected: (String) -> Unit,
     onModeChange: (String) -> Unit,
     onSetGoal: (String) -> Unit,
     onClearGoal: () -> Unit,
@@ -548,7 +550,7 @@ internal fun NativeChatScreen(
                         onModelClick = { showModelPicker = true },
                         effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
                         selectedEffort = state.selectedEffort,
-                        onEffortSelected = { state.selectedEffort = it },
+                        onEffortSelected = onEffortSelected,
                         selectedMode = state.selectedMode,
                         activeGoal = state.activeGoalObjective,
                         onModeSelected = onModeChange,
@@ -658,12 +660,7 @@ internal fun NativeChatScreen(
             selected = state.selectedModel,
             onDismiss = { showModelPicker = false },
             onSelect = { id ->
-                state.selectedModel = id
-                val option = state.modelOptions.firstOrNull { it.id == id }
-                state.modelLabel = option?.name ?: id
-                if (option != null && state.selectedEffort !in option.efforts) {
-                    state.selectedEffort = option.defaultEffort
-                }
+                onModelSelected(id)
                 showModelPicker = false
             },
         )
