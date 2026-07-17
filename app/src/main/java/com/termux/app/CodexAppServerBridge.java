@@ -521,6 +521,9 @@ final class CodexAppServerBridge {
         String method = message.optString("method", "");
         JSONObject params = message.optJSONObject("params");
         logCollabAgentEvent(method, params);
+        if ("turn/plan/updated".equals(method) && params != null) {
+            emit("onPlanUpdated", params.toString());
+        }
         if (("item/started".equals(method) || "item/completed".equals(method)) && params != null) {
             JSONObject liveItem = params.optJSONObject("item");
             String liveType = liveItem == null ? "" : liveItem.optString("type", "");
@@ -781,6 +784,13 @@ final class CodexAppServerBridge {
                 try { record = new JSONObject(line); } catch (Exception ignored) { continue; }
                 JSONObject payload = record.optJSONObject("payload");
                 if (payload == null) continue;
+                if ("event_msg".equals(record.optString("type")) && "plan_update".equals(payload.optString("type"))) {
+                    String encodedPlan = android.util.Base64.encodeToString(
+                        payload.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        android.util.Base64.NO_WRAP);
+                    messages.put(new JSONObject().put("role", "activity").put("content", "PLAN|" + encodedPlan));
+                    continue;
+                }
                 if ("event_msg".equals(record.optString("type")) && "sub_agent_activity".equals(payload.optString("type"))) {
                     tools.put(historySubagentActivityCard(payload));
                     continue;

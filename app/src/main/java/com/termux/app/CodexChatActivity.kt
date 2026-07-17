@@ -65,6 +65,8 @@ internal class NativeChatState {
     var selectedEffort by mutableStateOf("high")
     var selectedMode by mutableStateOf("default")
     var activeGoalObjective by mutableStateOf("")
+    var planJson by mutableStateOf("[]")
+    var planExplanation by mutableStateOf("")
     var revision by mutableIntStateOf(0)
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
@@ -76,6 +78,9 @@ internal class NativeChatState {
 
     fun resetConversation() {
         messages.clear()
+        planJson = "[]"
+        planExplanation = ""
+        activeGoalObjective = ""
         busy = false
         revision++
     }
@@ -148,6 +153,8 @@ internal class NativeChatState {
 
     fun replaceHistory(value: String) {
         val parsed = ArrayList<NativeChatMessage>()
+        planJson = "[]"
+        planExplanation = ""
         val items = JSONArray(value)
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
@@ -158,6 +165,15 @@ internal class NativeChatState {
                 else -> continue
             }
             val content = item.optString("content").trim()
+            if (role == NativeChatRole.ACTIVITY && content.startsWith("PLAN|")) {
+                runCatching {
+                    val decoded = String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8)
+                    val planPayload = JSONObject(decoded)
+                    planJson = planPayload.optJSONArray("plan")?.toString() ?: "[]"
+                    planExplanation = planPayload.optString("explanation")
+                }
+                continue
+            }
             if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content))
         }
         // One snapshot mutation avoids recomposing the chat once for every historical item.
@@ -545,6 +561,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.revision++
             }
             "onToolComplete" -> { chatState.toolDetails.add(value); chatState.revision++ }
+            "onPlanUpdated" -> {
+                val payload = runCatching { JSONObject(value) }.getOrNull()
+                chatState.planJson = payload?.optJSONArray("plan")?.toString() ?: "[]"
+                chatState.planExplanation = payload?.optString("explanation").orEmpty()
+                chatState.revision++
+            }
             "onSubagentEvent" -> chatState.updateSubagent(value)
             "onSubagentHistory" -> {
                 val payload = runCatching { JSONObject(value) }.getOrNull()

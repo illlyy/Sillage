@@ -156,6 +156,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -314,6 +315,7 @@ internal fun NativeChatScreen(
     var editMessage by remember { mutableStateOf<NativeChatMessage?>(null) }
     var previewAttachment by remember { mutableStateOf<NativeAttachment?>(null) }
     var showGoalDialog by remember { mutableStateOf(false) }
+    var showWorkPanel by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.busy, state.turnStartedAt) {
         while (state.busy) {
@@ -429,6 +431,7 @@ internal fun NativeChatScreen(
                         modelLabel = state.modelLabel,
                         ready = state.ready,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
+                        onOpenWorkPanel = { showWorkPanel = true },
                         onSearch = { showMessageSearch = true },
                         onExport = { shareConversation(context, state.conversationTitle, state.messages) },
                         canExport = state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT },
@@ -552,6 +555,13 @@ internal fun NativeChatScreen(
                 }
             }
         }
+    }
+    if (showWorkPanel) {
+        WorkPanelDialog(
+            state = state,
+            onLoadSubagentHistory = onLoadSubagentHistory,
+            onDismiss = { showWorkPanel = false },
+        )
     }
     if (showGoalDialog) {
         GoalEditorDialog(
@@ -921,6 +931,7 @@ private fun RikkaTopBar(
     modelLabel: String,
     ready: Boolean,
     onOpenDrawer: () -> Unit,
+    onOpenWorkPanel: () -> Unit,
     onSearch: () -> Unit,
     onExport: () -> Unit,
     canExport: Boolean,
@@ -961,8 +972,8 @@ private fun RikkaTopBar(
                     .size(8.dp)
                     .background(if (ready) Color(0xFF43A047) else MaterialTheme.colorScheme.outline, CircleShape),
             )
-            IconButton(onClick = {}) {
-                Icon(HugeIcons.LeftToRightListBullet, contentDescription = "对话选项")
+            IconButton(onClick = onOpenWorkPanel) {
+                Icon(HugeIcons.LeftToRightListBullet, contentDescription = "\u5de5\u4f5c\u9762\u677f")
             }
             IconButton(onClick = onNewConversation) {
                 Icon(HugeIcons.MessageAdd01, contentDescription = "新对话")
@@ -1905,7 +1916,7 @@ private fun subagentStatus(item: JSONObject): String = when (item.optString("sta
     else -> "\u5b8c\u6210"
 }
 
-private fun collectSubagentItems(state: NativeChatState, current: JSONObject): List<JSONObject> {
+private fun collectAllSubagentItems(state: NativeChatState): List<JSONObject> {
     val result = LinkedHashMap<String, JSONObject>()
     fun add(value: JSONObject) { result[subagentKey(value)] = value }
     state.messages.forEach { message ->
@@ -1917,8 +1928,161 @@ private fun collectSubagentItems(state: NativeChatState, current: JSONObject): L
         }
     }
     state.liveSubagents.forEach { raw -> runCatching { add(JSONObject(raw)) } }
-    add(current)
     return result.values.toList()
+}
+
+private fun collectSubagentItems(state: NativeChatState, current: JSONObject): List<JSONObject> {
+    val result = LinkedHashMap<String, JSONObject>()
+    collectAllSubagentItems(state).forEach { result[subagentKey(it)] = it }
+    result[subagentKey(current)] = current
+    return result.values.toList()
+}
+
+@Composable
+private fun WorkPanelDialog(
+    state: NativeChatState,
+    onLoadSubagentHistory: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var entered by remember { mutableStateOf(false) }
+    var visible by remember { mutableStateOf(true) }
+    var tab by remember { mutableStateOf("plan") }
+    var selectedAgentId by remember { mutableStateOf<String?>(null) }
+    val agents = remember(state.revision, state.messages.size, state.liveSubagents.size) { collectAllSubagentItems(state) }
+    val close: () -> Unit = { entered = false }
+    LaunchedEffect(visible, entered) {
+        if (visible && !entered) { delay(210L); visible = false; onDismiss() }
+    }
+    if (!visible) return
+    LaunchedEffect(Unit) { delay(18L); entered = true }
+    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        val scrim by animateFloatAsState(if (entered) 0.16f else 0f, tween(170, easing = LinearEasing), label = "workPanelScrim")
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = scrim)).clickable(onClick = close))
+            AnimatedVisibility(
+                visible = entered,
+                modifier = Modifier.align(Alignment.CenterEnd),
+                enter = slideInHorizontally(spring(dampingRatio = 0.82f, stiffness = 430f)) { it } + fadeIn(tween(140)),
+                exit = slideOutHorizontally(tween(190, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(120)),
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxHeight().fillMaxWidth(0.91f).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+                    shape = RoundedCornerShape(topStart = 26.dp, bottomStart = 26.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 14.dp,
+                ) {
+                    Column(Modifier.fillMaxSize()) {
+                        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (selectedAgentId != null) {
+                                IconButton(onClick = { selectedAgentId = null }) {
+                                    Icon(HugeIcons.ArrowRight01, "\u8fd4\u56de", Modifier.graphicsLayer { rotationZ = 180f })
+                                }
+                            } else Spacer(Modifier.width(48.dp))
+                            Text(
+                                selectedAgentId?.let { id -> agents.firstOrNull { subagentKey(it) == id }?.let(::subagentName) } ?: "\u5de5\u4f5c\u9762\u677f",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            IconButton(onClick = close) { Icon(HugeIcons.Cancel01, "\u5173\u95ed") }
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        if (selectedAgentId == null) {
+                            WorkPanelTabs(tab = tab, planCount = parsePlanItems(state.planJson).size, agentCount = agents.size, onTab = { tab = it })
+                            AnimatedContent(
+                                targetState = tab,
+                                transitionSpec = {
+                                    (fadeIn(tween(160)) + slideInHorizontally(tween(220, easing = FastOutSlowInEasing)) { if (targetState == "agents") it / 5 else -it / 5 }) togetherWith
+                                        (fadeOut(tween(100)) + slideOutHorizontally(tween(170, easing = FastOutSlowInEasing)) { if (targetState == "agents") -it / 5 else it / 5 })
+                                },
+                                label = "workPanelTab",
+                            ) { selectedTab ->
+                                if (selectedTab == "agents") {
+                                    if (agents.isEmpty()) WorkPanelEmpty("\u6682\u65e0\u5b50\u4ee3\u7406", "\u5f53 Codex \u59d4\u6d3e\u4efb\u52a1\u540e\uff0c\u5b50\u4ee3\u7406\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002")
+                                    else SubagentOverview(agents) { agent ->
+                                        val thread = subagentThreadId(agent)
+                                        selectedAgentId = subagentKey(agent)
+                                        if (thread.isNotBlank() && state.subagentHistories[thread] == null) onLoadSubagentHistory(thread)
+                                    }
+                                } else WorkPlanView(state.planJson, state.planExplanation)
+                            }
+                        } else {
+                            val agent = agents.firstOrNull { subagentKey(it) == selectedAgentId }
+                            if (agent != null) {
+                                val thread = subagentThreadId(agent)
+                                SubagentDetail(agent, state.subagentHistories[thread], thread in state.loadingSubagentHistories)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkPanelTabs(tab: String, planCount: Int, agentCount: Int, onTab: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf("plan" to "\u8ba1\u5212 $planCount", "agents" to "\u5b50\u4ee3\u7406 $agentCount").forEach { (id, label) ->
+            Surface(
+                modifier = Modifier.weight(1f).clickable { onTab(id) },
+                shape = CircleShape,
+                color = if (tab == id) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                contentColor = if (tab == id) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+            ) { Text(label, Modifier.padding(vertical = 9.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge, fontWeight = if (tab == id) FontWeight.SemiBold else FontWeight.Normal) }
+        }
+    }
+}
+
+private fun parsePlanItems(raw: String): List<JSONObject> = runCatching {
+    val array = JSONArray(raw)
+    buildList { for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add) }
+}.getOrDefault(emptyList())
+
+@Composable
+private fun WorkPlanView(raw: String, explanation: String) {
+    val plan = remember(raw) { parsePlanItems(raw) }
+    if (plan.isEmpty()) {
+        WorkPanelEmpty("\u8fd8\u6ca1\u6709\u8ba1\u5212", "\u5207\u6362\u5230\u8ba1\u5212\u6a21\u5f0f\u5e76\u53d1\u9001\u4efb\u52a1\uff0cCodex \u7684\u6267\u884c\u8ba1\u5212\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002")
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (explanation.isNotBlank()) item(key = "explanation") { Text(explanation, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 21.sp, modifier = Modifier.padding(bottom = 4.dp)) }
+        itemsIndexed(plan, key = { index, item -> item.optString("step").ifBlank { index.toString() } }) { index, item ->
+            val status = item.optString("status", "pending")
+            val color = when (status) {
+                "completed" -> Color(0xFF5E8B68)
+                "in_progress", "inProgress" -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.outline
+            }
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.Top) {
+                    Surface(shape = CircleShape, color = color.copy(alpha = 0.16f)) {
+                        Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+                            Text(if (status == "completed") "\u2713" else "${index + 1}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = color)
+                        }
+                    }
+                    Spacer(Modifier.width(11.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(item.optString("step", item.optString("text", item.toString())), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
+                        Text(when (status) { "completed" -> "\u5df2\u5b8c\u6210"; "in_progress", "inProgress" -> "\u8fdb\u884c\u4e2d"; else -> "\u5f85\u5904\u7406" }, style = MaterialTheme.typography.labelSmall, color = color, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun WorkPanelEmpty(title: String, description: String) {
+    Column(Modifier.fillMaxSize().padding(30.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) { Icon(HugeIcons.LeftToRightListBullet, null, Modifier.padding(14.dp).size(24.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+        Spacer(Modifier.height(14.dp))
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(7.dp))
+        Text(description, textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 21.sp)
+    }
 }
 
 @Composable
