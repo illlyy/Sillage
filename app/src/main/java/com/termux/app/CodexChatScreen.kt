@@ -3884,7 +3884,7 @@ private fun RikkaDrawer(
             }
 
             NavigationDrawerItem(
-                label = { Text(modelLabel.ifBlank { "选择助手" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { Text(modelLabel.ifBlank { nativeText(language, "\u9009\u62e9\u52a9\u624b", "Select assistant") }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 selected = false,
                 onClick = onNewConversation,
                 icon = { Icon(HugeIcons.LookTop, "助手") },
@@ -3909,11 +3909,12 @@ private fun ConversationMenu(
     onDelete: (NativeConversation) -> Unit,
     onToggleFavorite: (NativeConversation) -> Unit,
 ) {
+    val language = LocalNativeLanguage.current
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }, modifier = Modifier.size(32.dp)) { Icon(HugeIcons.MoreVertical, "更多", modifier = Modifier.size(18.dp)) }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text(if (conversation.favorite) "取消收藏" else "收藏") }, leadingIcon = { Icon(HugeIcons.InLove, null) }, onClick = { expanded = false; onToggleFavorite(conversation) })
+            DropdownMenuItem(text = { Text(if (conversation.favorite) nativeText(language, "\u53d6\u6d88\u6536\u85cf", "Unfavorite") else nativeText(language, "\u6536\u85cf", "Favorite")) }, leadingIcon = { Icon(HugeIcons.InLove, null) }, onClick = { expanded = false; onToggleFavorite(conversation) })
             DropdownMenuItem(text = { Text("重命名") }, leadingIcon = { Icon(HugeIcons.PencilEdit01, null) }, onClick = { expanded = false; onRename(conversation) })
             DropdownMenuItem(text = { Text("删除") }, leadingIcon = { Icon(HugeIcons.Delete01, null) }, onClick = { expanded = false; onDelete(conversation) })
         }
