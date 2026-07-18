@@ -86,6 +86,7 @@ internal class NativeChatState {
     var pendingUserInputRequest by mutableStateOf("")
     var planJson by mutableStateOf("[]")
     var planExplanation by mutableStateOf("")
+    var planPanelAdded by mutableStateOf(false)
     var revision by mutableIntStateOf(0)
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
@@ -101,6 +102,7 @@ internal class NativeChatState {
         messages.clear()
         planJson = "[]"
         planExplanation = ""
+        planPanelAdded = false
         activeGoalObjective = ""
         activeGoalStatus = "active"
         phase = NativeTurnPhase.IDLE
@@ -198,6 +200,10 @@ internal class NativeChatState {
 
     fun appendAssistant(delta: String) {
         if (delta.isEmpty()) return
+        if (!planPanelAdded && delta.contains("<propose_plan", ignoreCase = true)) {
+            messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "PLAN_PANEL|"))
+            planPanelAdded = true
+        }
         val cleanedDelta = cleanProtocolMarkup(delta)
         if (cleanedDelta.isEmpty()) return
         phase = NativeTurnPhase.ANSWERING

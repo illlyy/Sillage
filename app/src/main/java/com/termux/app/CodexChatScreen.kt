@@ -2007,6 +2007,26 @@ private fun MarkdownLikeText(text: String) {
 private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatState, onLoadSubagentHistory: (String) -> Unit) {
     val language = LocalNativeLanguage.current
     val text = message.content
+    if (text.startsWith("PLAN_PANEL|")) {
+        val language = LocalNativeLanguage.current
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        ) {
+            Row(Modifier.padding(horizontal = 15.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(nativeText(language, "??", "Plan"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Text(nativeText(language, "????????", "Preparing the plan"), style = MaterialTheme.typography.bodySmall)
+                }
+                CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+            }
+        }
+        return
+    }
     if (text.startsWith("NOTICE|")) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)) {
