@@ -27,7 +27,7 @@ class NativeSettingsActivity : ComponentActivity() {
         setContent {
             var theme by remember { mutableStateOf(prefs.getString("native_theme_mode_v1", "system").orEmpty()) }
             var language by remember { mutableStateOf(prefs.getString("native_language_v1", "system").orEmpty()) }
-            FcodeChatTheme(theme) {
+            FcodeChatTheme(theme, if (language == "en") "en" else "zh") {
                 BackHandler { finish() }
                 Scaffold { padding ->
                     LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {

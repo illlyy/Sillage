@@ -21,6 +21,7 @@ import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.isSystemInDarkTheme
+import java.util.Locale
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -117,6 +118,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
@@ -275,14 +277,18 @@ private val FcodeDarkColors = darkColorScheme(
     surfaceContainer = Color(0xFF241F20), surfaceContainerHigh = Color(0xFF2F292A),
     surfaceContainerHighest = Color(0xFF3A3335),
 )
+val LocalNativeLanguage = staticCompositionLocalOf { "zh" }
+
+internal fun nativeText(language: String, zh: String, en: String): String = if (language == "en") en else zh
+
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun FcodeChatTheme(themeMode: String = "system", content: @Composable () -> Unit) {
+internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", content: @Composable () -> Unit) {
     val dark = when (themeMode) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
     MaterialExpressiveTheme(
         colorScheme = if (dark) FcodeDarkColors else FcodeLightColors,
         motionScheme = MotionScheme.expressive(),
-        content = content,
+        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, content = content) },
     )
 }
 
@@ -991,6 +997,7 @@ private fun RikkaTopBar(
     onNewConversation: () -> Unit,
     onToggleTheme: () -> Unit,
 ) {
+    val language = LocalNativeLanguage.current
     TopAppBar(
         modifier = Modifier.statusBarsPadding(),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
@@ -1027,10 +1034,10 @@ private fun RikkaTopBar(
                     .background(if (ready) Color(0xFF43A047) else MaterialTheme.colorScheme.outline, CircleShape),
             )
             IconButton(onClick = onToggleTheme) {
-                Icon(HugeIcons.Sparkles, contentDescription = "\u5207\u6362\u4e3b\u9898")
+                Icon(HugeIcons.Sparkles, contentDescription = nativeText(language, "????", "Switch theme"))
             }
             IconButton(onClick = onOpenWorkPanel) {
-                Icon(HugeIcons.LeftToRightListBullet, contentDescription = "\u5de5\u4f5c\u9762\u677f")
+                Icon(HugeIcons.LeftToRightListBullet, contentDescription = nativeText(language, "????", "Work panel"))
             }
             IconButton(onClick = onNewConversation) {
                 Icon(HugeIcons.MessageAdd01, contentDescription = "新对话")

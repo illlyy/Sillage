@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import com.termux.shared.termux.TermuxConstants
 import java.io.File
 import java.util.UUID
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -455,6 +456,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
     private var currentThreadId: String? = null
     private var nativeThemeMode by mutableStateOf("system")
+    private var nativeLanguage by mutableStateOf("zh")
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -470,13 +472,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
         chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
         nativeThemeMode = nativePrefs.getString("native_theme_mode_v1", "system").orEmpty().takeIf { it in setOf("system", "light", "dark") } ?: "system"
+        nativeLanguage = nativePrefs.getString("native_language_v1", "system").orEmpty().let { if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh" }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
         )
 
         setContent {
-            FcodeChatTheme(nativeThemeMode) {
+            FcodeChatTheme(nativeThemeMode, nativeLanguage) {
                 NativeChatScreen(
                     state = chatState,
                     onSend = ::sendMessage,
