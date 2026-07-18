@@ -1538,13 +1538,13 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
     } else elapsedSeconds
     val statusText = when {
-        state.phase == NativeTurnPhase.FAILED -> "\u751f\u6210\u5931\u8d25"
-        state.phase == NativeTurnPhase.COMPLETED || state.reasoningComplete -> "\u601d\u8003\u4e86 ${reasoningSeconds}s"
-        state.phase == NativeTurnPhase.WAITING && elapsedSeconds >= 12L -> "\u7b49\u5f85\u6a21\u578b\u54cd\u5e94 ${elapsedSeconds}s"
-        state.phase == NativeTurnPhase.REASONING -> "\u6b63\u5728\u601d\u8003 ${elapsedSeconds}s"
-        state.phase == NativeTurnPhase.TOOL_RUNNING -> "${state.processingLabel.ifBlank { "\u6b63\u5728\u8c03\u7528\u5de5\u5177" }} ${elapsedSeconds}s"
-        state.phase == NativeTurnPhase.ANSWERING -> "\u6b63\u5728\u751f\u6210 ${elapsedSeconds}s"
-        else -> "${state.processingLabel.ifBlank { "\u5904\u7406\u4e2d" }} ${elapsedSeconds}s"
+        state.phase == NativeTurnPhase.FAILED -> nativeText(language, "\u751f\u6210\u5931\u8d25", "Generation failed")
+        state.phase == NativeTurnPhase.COMPLETED || state.reasoningComplete -> nativeText(language, "\u601d\u8003\u4e86 ${reasoningSeconds}s", "Thought for ${reasoningSeconds}s")
+        state.phase == NativeTurnPhase.WAITING && elapsedSeconds >= 12L -> nativeText(language, "\u7b49\u5f85\u6a21\u578b\u54cd\u5e94 ${elapsedSeconds}s", "Waiting for model ${elapsedSeconds}s")
+        state.phase == NativeTurnPhase.REASONING -> nativeText(language, "\u6b63\u5728\u601d\u8003 ${elapsedSeconds}s", "Thinking ${elapsedSeconds}s")
+        state.phase == NativeTurnPhase.TOOL_RUNNING -> nativeText(language, "\u6b63\u5728\u8c03\u7528\u5de5\u5177 ${elapsedSeconds}s", "Running tools ${elapsedSeconds}s")
+        state.phase == NativeTurnPhase.ANSWERING -> nativeText(language, "\u6b63\u5728\u751f\u6210 ${elapsedSeconds}s", "Generating ${elapsedSeconds}s")
+        else -> nativeText(language, "\u5904\u7406\u4e2d ${elapsedSeconds}s", "Processing ${elapsedSeconds}s")
     }
     Column(
         modifier = Modifier
@@ -1575,7 +1575,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
             Text(statusText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (reasoningPreview && state.reasoningText.length > 520) {
                 Spacer(Modifier.weight(1f))
-                Text("\u5c55\u5f00", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Text(nativeText(language, "\u5c55\u5f00", "Expand"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
