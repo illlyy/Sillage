@@ -364,6 +364,7 @@ internal fun NativeChatScreen(
     // faster without teleporting. Manual dragging turns followOutput off above.
     LaunchedEffect(listState, followOutput, listDragged, state.conversationAnimationKey) {
         var previousFrame = withFrameNanos { it }
+        var followVelocity = 0f
         while (isActive) {
             // Do not keep a frame callback alive for an idle conversation. Poll slowly
             // until generation/layout growth needs the smooth 60/120 Hz follow motor.
@@ -372,6 +373,7 @@ internal fun NativeChatScreen(
                 (!state.busy && !listState.canScrollForward)
             ) {
                 delay(72L)
+                followVelocity = 0f
                 previousFrame = withFrameNanos { it }
                 continue
             }
@@ -390,12 +392,13 @@ internal fun NativeChatScreen(
             val overflow = maxOf(measuredOverflow, unseenRunway)
             if (!listState.canScrollForward || overflow < 0.5f) continue
 
-            // Interpolate toward the growing bottom instead of moving by a fixed chunk.
-            // This makes the viewport track the same cadence as the text reveal and avoids
-            // the staircase motion caused by one scroll jump per incoming network delta.
-            val interpolation = (1f - kotlin.math.exp(-6.0f * elapsedSeconds)).coerceIn(0f, 1f)
-            val maxFrameDistance = with(density) { 960.dp.toPx() } * elapsedSeconds
-            val distance = (overflow * interpolation).coerceAtMost(maxFrameDistance).coerceAtMost(overflow)
+            // Follow with a damped velocity rather than issuing a new scroll animation for
+            // every streamed batch. This keeps the viewport moving continuously while the
+            // response grows, and prevents the staircase/jump effect on slow devices.
+            val targetVelocity = (overflow * 10f).coerceIn(0f, with(density) { 900.dp.toPx() })
+            val acceleration = (1f - kotlin.math.exp(-12.0f * elapsedSeconds)).coerceIn(0f, 1f)
+            followVelocity += (targetVelocity - followVelocity) * acceleration
+            val distance = (followVelocity * elapsedSeconds).coerceAtMost(overflow)
             if (distance > 0.25f) listState.scrollBy(distance)
         }
     }
