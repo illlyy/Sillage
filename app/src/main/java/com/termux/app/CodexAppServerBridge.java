@@ -313,6 +313,13 @@ final class CodexAppServerBridge {
                     : new JSONObject().put("mode", collaborationMode);
                 if (model != null && !model.trim().isEmpty()) requestedMode.put("model", model);
                 if (effort != null && !effort.trim().isEmpty()) requestedMode.put("reasoning_effort", effort);
+                // The current CLI requires a settings object as well as the mode
+                // descriptor. Keep both forms for compatibility with older builds.
+                JSONObject settings = new JSONObject();
+                if (model != null && !model.trim().isEmpty()) settings.put("model", model);
+                if (effort != null && !effort.trim().isEmpty()) settings.put("reasoning_effort", effort);
+                settings.put("developer_instructions", JSONObject.NULL);
+                requestedMode.put("settings", settings);
                 params.put("collaborationMode", requestedMode);
             }
             sendRequest("turn/start", params);
