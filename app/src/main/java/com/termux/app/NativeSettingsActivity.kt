@@ -2,9 +2,9 @@ package com.termux.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -15,8 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowLeft01
-import me.rerere.hugeicons.stroke.Moon02
 import me.rerere.hugeicons.stroke.LanguageCircle
+import me.rerere.hugeicons.stroke.Moon02
 import me.rerere.hugeicons.stroke.Text
 
 class NativeSettingsActivity : ComponentActivity() {
@@ -28,26 +28,27 @@ class NativeSettingsActivity : ComponentActivity() {
             var theme by remember { mutableStateOf(prefs.getString("native_theme_mode_v1", "system").orEmpty()) }
             var language by remember { mutableStateOf(prefs.getString("native_language_v1", "system").orEmpty()) }
             var streamAnimations by remember { mutableStateOf(prefs.getBoolean("native_stream_animations_v1", true)) }
-            FcodeChatTheme(theme, if (language == "en") "en" else "zh", streamAnimations) {
+            val lang = if (language == "en") "en" else "zh"
+            FcodeChatTheme(theme, lang, streamAnimations) {
                 BackHandler { finish() }
                 Scaffold { padding ->
                     LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
                         item {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { finish() }) { Icon(HugeIcons.ArrowLeft01, "返回") }
-                                Text("设置", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(start = 4.dp))
+                                IconButton(onClick = { finish() }) { Icon(HugeIcons.ArrowLeft01, nativeText(lang, "??", "Back")) }
+                                Text(nativeText(lang, "??", "Settings"), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(start = 4.dp))
                             }
                         }
-                        item { SettingsSection("外观") }
-                        item { SettingsRow(HugeIcons.Moon02, "主题", when(theme) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" }) { theme = when(theme) { "system" -> "light"; "light" -> "dark"; else -> "system" }; prefs.edit().putString("native_theme_mode_v1", theme).apply() } }
-                        item { SettingsRow(HugeIcons.LanguageCircle, "语言", when(language) { "en" -> "English"; "zh" -> "简体中文"; else -> "跟随系统" }) { language = when(language) { "system" -> "zh"; "zh" -> "en"; else -> "system" }; prefs.edit().putString("native_language_v1", language).apply() } }
-                        item { SettingsRow(HugeIcons.Text, "字体与 Markdown", "公式、代码块、列表渲染") { } }
-                        item { SettingsSection("对话") }
-                        item { SettingsRow(HugeIcons.Moon02, nativeText(if (language == "en") "en" else "zh", "\u6d41\u5f0f\u52a8\u753b", "Streaming animation"), if (streamAnimations) nativeText(if (language == "en") "en" else "zh", "\u5df2\u5f00\u542f", "On") else nativeText(if (language == "en") "en" else "zh", "\u5df2\u5173\u95ed", "Off")) { streamAnimations = !streamAnimations; prefs.edit().putBoolean("native_stream_animations_v1", streamAnimations).apply() } }
-                        item { SettingsRow(HugeIcons.LanguageCircle, "思考过程", "显示、折叠和自动跟随") { } }
-                        item { SettingsSection("系统") }
-                        item { SettingsRow(HugeIcons.Text, "诊断日志", "查看原生 UI 和后端事件") { } }
-                        item { SettingsRow(HugeIcons.Text, "关于 Fcode", "原生 Compose UI") { } }
+                        item { SettingsSection(nativeText(lang, "??", "Appearance")) }
+                        item { SettingsRow(HugeIcons.Moon02, nativeText(lang, "??", "Theme"), when (theme) { "light" -> nativeText(lang, "??", "Light"); "dark" -> nativeText(lang, "??", "Dark"); else -> nativeText(lang, "????", "System") }) { theme = when (theme) { "system" -> "light"; "light" -> "dark"; else -> "system" }; prefs.edit().putString("native_theme_mode_v1", theme).apply() } }
+                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "??", "Language"), when (language) { "en" -> "English"; "zh" -> nativeText(lang, "????", "Simplified Chinese"); else -> nativeText(lang, "????", "System") }) { language = when (language) { "system" -> "zh"; "zh" -> "en"; else -> "system" }; prefs.edit().putString("native_language_v1", language).apply() } }
+                        item { SettingsRow(HugeIcons.Text, nativeText(lang, "??? Markdown", "Typography & Markdown"), nativeText(lang, "???????????", "Math, code and list rendering")) {} }
+                        item { SettingsSection(nativeText(lang, "??", "Conversation")) }
+                        item { SettingsRow(HugeIcons.Moon02, nativeText(lang, "????", "Streaming animation"), if (streamAnimations) nativeText(lang, "???", "On") else nativeText(lang, "???", "Off")) { streamAnimations = !streamAnimations; prefs.edit().putBoolean("native_stream_animations_v1", streamAnimations).apply() } }
+                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), nativeText(lang, "??????????", "Display, collapse and auto-follow")) {} }
+                        item { SettingsSection(nativeText(lang, "??", "System")) }
+                        item { SettingsRow(HugeIcons.Text, nativeText(lang, "????", "Diagnostics"), nativeText(lang, "???? UI ?????", "Inspect native UI and backend events")) {} }
+                        item { SettingsRow(HugeIcons.Text, nativeText(lang, "?? Fcode", "About Fcode"), nativeText(lang, "?? Compose UI", "Native Compose UI")) {} }
                     }
                 }
             }
