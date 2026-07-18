@@ -3450,6 +3450,7 @@ private fun SkillPickerDialog(
     onSelect: (NativeSkill) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
+    val language = LocalNativeLanguage.current
     val results = remember(skills, query) {
         skills.filter { query.isBlank() || it.name.contains(query, true) || it.description.contains(query, true) }
     }
@@ -3468,7 +3469,7 @@ private fun SkillPickerDialog(
                     placeholder = { Text("\u641c\u7d22 Skill") },
                 )
                 if (results.isEmpty()) {
-                    Text("\u6ca1\u6709\u627e\u5230\u53ef\u7528 Skill", modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(nativeText(language, "\u6ca1\u6709\u627e\u5230\u53ef\u7528 Skill", "No skills found"), modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                         items(results, key = { it.path }) { skill ->
@@ -3485,7 +3486,7 @@ private fun SkillPickerDialog(
                                         Text(skill.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                                         if (skill.description.isNotBlank()) Text(skill.description, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp)
                                     }
-                                    if (isSelected) Text("\u5df2\u5f15\u7528", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                    Text(nativeText(language, "\u5df2\u5f15\u7528", "Added"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                                 }
                             }
                         }
@@ -3494,12 +3495,13 @@ private fun SkillPickerDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("\u5173\u95ed") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5173\u95ed", "Close")) } },
     )
 }
 
 @Composable
 private fun RikkaFilesPicker(onPickImage: () -> Unit, onPickFile: () -> Unit, onPickSkill: () -> Unit) {
+    val language = LocalNativeLanguage.current
     Column(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
