@@ -462,7 +462,7 @@ internal fun NativeChatScreen(
                         // retained the first tiny delta and its streaming=true flag.
                         val visibleMessages = state.messages.takeLast(historyLimit)
                         val hiddenMessageCount = state.messages.size - visibleMessages.size
-                        val liveAssistantId = if (state.busy) visibleMessages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }?.id else null
+                        val liveAssistantId = if (state.phase == NativeTurnPhase.ANSWERING) visibleMessages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }?.id else null
                         val retryPrompts = remember(visibleMessages, state.conversationAnimationKey) {
                             buildMap<String, String> {
                                 var lastUser: String? = null
@@ -511,13 +511,13 @@ internal fun NativeChatScreen(
                                     onPreviewAttachment = { previewAttachment = it },
                                 )
                             }
-                            if (state.busy && liveAssistantId == null) {
+                            if (state.phase in setOf(NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING) && liveAssistantId == null) {
                                 item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory, {}) }
                             }
                             // A temporary runway lets streamed lines grow upward instead of
                             // being pinned under the composer. It remains part of LazyColumn,
                             // so manual scrolling and follow cancellation keep normal semantics.
-                            if (state.busy) {
+                            if (state.phase.active) {
                                 item(key = "stream-runway", contentType = "stream-runway") {
                                     Spacer(Modifier.height(88.dp))
                                 }
@@ -549,8 +549,8 @@ internal fun NativeChatScreen(
                     }
                     RikkaChatInput(
                         value = state.input,
-                        enabled = state.ready && !state.busy,
-                        loading = state.busy,
+                        enabled = state.ready && !state.phase.active,
+                        loading = state.phase.active,
                         modelLabel = state.modelLabel,
                         onModelClick = { showModelPicker = true },
                         effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
@@ -568,7 +568,7 @@ internal fun NativeChatScreen(
                         onRemoveAttachment = onRemoveAttachment,
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
-                        onSend = { if (state.busy) onStop() else onSend(state.input) },
+                        onSend = { if (state.phase.active) onStop() else onSend(state.input) },
                         onHeightChanged = { inputHeightPx = it },
                         modifier = Modifier.align(Alignment.BottomCenter),
                     )
@@ -1487,12 +1487,14 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
         (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
     } else elapsedSeconds
-    val statusText = if (state.reasoningComplete) {
-        "\u601d\u8003\u4e86 ${reasoningSeconds}s"
-    } else if (state.reasoningText.isBlank() && state.commandText.isBlank() && elapsedSeconds >= 12L) {
-        "\u7b49\u5f85\u6a21\u578b\u54cd\u5e94 ${elapsedSeconds}s"
-    } else {
-        "${state.processingLabel.ifBlank { "\u5904\u7406\u4e2d" }} ${elapsedSeconds}s"
+    val statusText = when {
+        state.phase == NativeTurnPhase.FAILED -> "\u751f\u6210\u5931\u8d25"
+        state.phase == NativeTurnPhase.COMPLETED || state.reasoningComplete -> "\u601d\u8003\u4e86 ${reasoningSeconds}s"
+        state.phase == NativeTurnPhase.WAITING && elapsedSeconds >= 12L -> "\u7b49\u5f85\u6a21\u578b\u54cd\u5e94 ${elapsedSeconds}s"
+        state.phase == NativeTurnPhase.REASONING -> "\u6b63\u5728\u601d\u8003 ${elapsedSeconds}s"
+        state.phase == NativeTurnPhase.TOOL_RUNNING -> "${state.processingLabel.ifBlank { "\u6b63\u5728\u8c03\u7528\u5de5\u5177" }} ${elapsedSeconds}s"
+        state.phase == NativeTurnPhase.ANSWERING -> "\u6b63\u5728\u751f\u6210 ${elapsedSeconds}s"
+        else -> "${state.processingLabel.ifBlank { "\u5904\u7406\u4e2d" }} ${elapsedSeconds}s"
     }
     Column(
         modifier = Modifier

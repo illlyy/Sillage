@@ -236,6 +236,7 @@ internal class NativeChatState {
                 ),
             )
         }
+        phase = NativeTurnPhase.COMPLETED
         revision++
     }
 
