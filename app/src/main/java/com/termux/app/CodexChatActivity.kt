@@ -1065,6 +1065,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     override fun onEvent(function: String, value: String) {
         when (function) {
             "onReady" -> {
+                // A late onReady from the previous conversation must not overwrite the
+                // goal/mode of the conversation the user has already selected.
+                if (currentThreadId != null && currentThreadId != value) return
                 currentThreadId = value
                 restoreGoalForThread(value)
                 chatState.ready = true
