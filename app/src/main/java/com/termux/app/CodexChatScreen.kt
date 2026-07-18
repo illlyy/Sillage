@@ -1554,6 +1554,7 @@ private fun LiveReasoningText(text: String) {
 @Composable
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
+    var userControlledExpansion by remember { mutableStateOf(false) }
     var fullReasoning by remember { mutableStateOf(false) }
     val language = LocalNativeLanguage.current
     val showReasoning = LocalShowReasoning.current
@@ -1581,8 +1582,9 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         }
     }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
-        if (state.reasoningComplete && answerStarted) {
+        if (state.reasoningComplete && answerStarted && !userControlledExpansion) {
             delay(260L)
+            if (userControlledExpansion) return@LaunchedEffect
             onAutomaticCollapse()
             expanded = false
             fullReasoning = false
@@ -1609,6 +1611,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable {
+                userControlledExpansion = true
                 when {
                     !expanded -> expanded = true
                     reasoningPreview -> fullReasoning = true
