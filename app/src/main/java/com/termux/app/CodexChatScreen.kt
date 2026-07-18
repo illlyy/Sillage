@@ -323,6 +323,7 @@ internal fun NativeChatScreen(
     onToggleTheme: () -> Unit,
 ) {
     val context = LocalContext.current
+    val language = LocalNativeLanguage.current
     val autoFollowEnabled = LocalAutoFollowOutput.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -626,9 +627,11 @@ internal fun NativeChatScreen(
             onEditGoal = { showGoalDialog = true },
             onClearGoal = onClearGoal,
             onExecutePlan = {
-                onModeChange("default")
-                onInputChange("\u8bf7\u6309\u7167\u5de5\u4f5c\u9762\u677f\u4e2d\u7684\u8ba1\u5212\u5f00\u59cb\u6267\u884c\u3002")
-                showWorkPanel = false
+                if (!state.phase.active && state.ready) {
+                    onModeChange("default")
+                    onSend(nativeText(language, "\u8bf7\u6309\u7167\u5de5\u4f5c\u9762\u677f\u4e2d\u7684\u8ba1\u5212\u5f00\u59cb\u6267\u884c\u3002", "Execute the plan shown in the work panel."))
+                    showWorkPanel = false
+                }
             },
             onDismiss = { showWorkPanel = false },
         )
