@@ -997,12 +997,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun openHomeSettings() {
-        startActivity(
-            Intent(this, CodexHomeActivity::class.java)
-                .setAction(CodexHomeActivity.ACTION_OPEN_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-        )
-        finish()
+        startActivity(Intent(this, NativeSettingsActivity::class.java))
     }
 
     private fun openLegacyWebUi() {
