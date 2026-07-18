@@ -3760,7 +3760,8 @@ private fun RikkaDrawer(
     onBackHome: () -> Unit,
     onOpenLegacyWebUi: () -> Unit,
 ) {
-    var selectedCategory by remember { mutableStateOf("全部") }
+    val language = LocalNativeLanguage.current
+    var selectedCategory by remember { mutableStateOf("all") }
     val conversationListState = rememberLazyListState()
     val newestRunningThreadId = conversations.firstOrNull { it.state == CodexTaskStore.RUNNING }?.threadId
     LaunchedEffect(newestRunningThreadId) {
@@ -3769,8 +3770,8 @@ private fun RikkaDrawer(
     val projectPaths = conversations.map { it.projectPath }.filter { it.isNotBlank() }.distinct()
     val visibleConversations = conversations.filter { conversation ->
         when (selectedCategory) {
-            "全部" -> true
-            "收藏" -> conversation.favorite
+            "all" -> true
+            "favorite" -> conversation.favorite
             else -> conversation.projectPath == selectedCategory
         }
     }
@@ -3802,11 +3803,11 @@ private fun RikkaDrawer(
             }
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(horizontal = 4.dp)) {
-                items(listOf("全部", "收藏") + projectPaths) { category ->
-                    val label = when (category) { "全部", "收藏" -> category; else -> category.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
+                items(listOf("all", "favorite") + projectPaths) { category ->
+                    val label = when (category) { "all" -> nativeText(language, "\u5168\u90e8", "All"); "favorite" -> nativeText(language, "\u6536\u85cf", "Favorites"); else -> category.trimEnd('/').substringAfterLast('/').ifBlank { nativeText(language, "\u65e0\u9879\u76ee", "No project") } }
                     Surface(onClick = { selectedCategory = category }, shape = RoundedCornerShape(50), color = if (category == selectedCategory) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent) {
                         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(if (category == "收藏") HugeIcons.InLove else HugeIcons.Folder01, null, modifier = Modifier.size(14.dp))
+                            Icon(if (category == "favorite") HugeIcons.InLove else HugeIcons.Folder01, null, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
                             Text(label, style = MaterialTheme.typography.labelMedium)
                         }
