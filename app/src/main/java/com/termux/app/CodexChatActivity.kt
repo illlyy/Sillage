@@ -391,6 +391,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private val pendingAnswer = StringBuilder()
     private var reasoningFlushScheduled = false
     private var answerFlushScheduled = false
+    private var reasoningPendingSince = 0L
+    private var answerPendingSince = 0L
     private val flushReasoningRunnable = Runnable {
         reasoningFlushScheduled = false
         flushReasoningDeltas()
@@ -1002,9 +1004,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun flushReasoningDeltas() {
         streamHandler.removeCallbacks(flushReasoningRunnable)
         reasoningFlushScheduled = false
-        if (pendingReasoning.isEmpty()) return
+        if (pendingReasoning.isEmpty()) { reasoningPendingSince = 0L; return }
+        val now = android.os.SystemClock.uptimeMillis()
+        val boundary = pendingReasoning.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
+        if (pendingReasoning.length < 12 && !boundary && now - reasoningPendingSince < 110L) {
+            reasoningFlushScheduled = true
+            streamHandler.postDelayed(flushReasoningRunnable, 32L)
+            return
+        }
         val value = pendingReasoning.toString()
         pendingReasoning.setLength(0)
+        reasoningPendingSince = 0L
         val continuedAfterAnswer = chatState.reasoningComplete
         chatState.beginReasoningAfterAnswerIfNeeded()
         if (continuedAfterAnswer) NativeChatDiagnostics.record(this, "reasoning_segment_started", JSONObject()
@@ -1018,9 +1028,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun flushAnswerDeltas() {
         streamHandler.removeCallbacks(flushAnswerRunnable)
         answerFlushScheduled = false
-        if (pendingAnswer.isEmpty()) return
+        if (pendingAnswer.isEmpty()) { answerPendingSince = 0L; return }
+        val now = android.os.SystemClock.uptimeMillis()
+        val boundary = pendingAnswer.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
+        if (pendingAnswer.length < 12 && !boundary && now - answerPendingSince < 110L) {
+            answerFlushScheduled = true
+            streamHandler.postDelayed(flushAnswerRunnable, 32L)
+            return
+        }
         val value = pendingAnswer.toString()
         pendingAnswer.setLength(0)
+        answerPendingSince = 0L
         chatState.finishReasoning()
         chatState.appendAssistant(value)
         NativeChatDiagnostics.record(this, "answer_flush", JSONObject()
@@ -1051,6 +1069,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onDelta" -> {
                 flushReasoningDeltas()
+                if (pendingAnswer.isEmpty()) answerPendingSince = android.os.SystemClock.uptimeMillis()
                 pendingAnswer.append(value)
                 if (!answerFlushScheduled) {
                     answerFlushScheduled = true
@@ -1065,6 +1084,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onReasoningDelta" -> {
                 flushAnswerDeltas()
+                if (pendingReasoning.isEmpty()) reasoningPendingSince = android.os.SystemClock.uptimeMillis()
                 pendingReasoning.append(value)
                 if (!reasoningFlushScheduled) {
                     reasoningFlushScheduled = true
