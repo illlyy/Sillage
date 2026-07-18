@@ -945,6 +945,7 @@ private data class StarterPrompt(val icon: ImageVector, val title: String, val d
 
 @Composable
 private fun EmptyChatState(ready: Boolean, onPrompt: (String) -> Unit) {
+    val language = LocalNativeLanguage.current
     val prompts = remember {
         listOf(
             StarterPrompt(HugeIcons.Code, "理解项目", "分析当前工作区结构和核心逻辑", "请分析当前项目的目录结构，说明核心模块、启动流程和值得优先改进的地方。"),
@@ -964,7 +965,7 @@ private fun EmptyChatState(ready: Boolean, onPrompt: (String) -> Unit) {
             }
         }
         Spacer(Modifier.height(18.dp))
-        Text("今天想做什么？", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+        Text(nativeText(language, "\u4eca\u5929\u60f3\u505a\u4ec0\u4e48\uff1f", "What would you like to do today?"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
         Text(
             if (ready) "Codex 已准备好，可以与你一起处理当前项目" else "正在连接 Codex…",
