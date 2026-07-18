@@ -1328,7 +1328,10 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
 
     // AnimatedContent temporarily promotes the complete document to a hardware layer.
     // Keep the unbounded answer layer-free; the live tail already owns reveal motion.
-    if (showRichText) {
+    // Keep long answers in the chunk renderer even after the final delta. Promoting
+    // a large document to one Markdown tree here causes every previously rendered
+    // paragraph to be measured again and is the main source of end-of-stream jank.
+    if (showRichText && text.length < 1200) {
         RichResponseText(text)
     } else {
         ChunkedLiveText(
