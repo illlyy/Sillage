@@ -83,6 +83,7 @@ internal class NativeChatState {
     var selectedMode by mutableStateOf("default")
     var activeGoalObjective by mutableStateOf("")
     var activeGoalStatus by mutableStateOf("active")
+    var pendingUserInputRequest by mutableStateOf("")
     var planJson by mutableStateOf("[]")
     var planExplanation by mutableStateOf("")
     var revision by mutableIntStateOf(0)
@@ -504,6 +505,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onSetGoal = ::setGoal,
                     onClearGoal = ::clearGoal,
                     onToggleGoalPause = ::toggleGoalPause,
+                    onAnswerUserInput = ::answerUserInput,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { chatState.attachments.remove(it) },
@@ -807,6 +809,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .putString(goalPreferenceKey(threadId), value).putString(goalStatusPreferenceKey(threadId), "active").apply()
         chatState.activeGoalStatus = "active"
         bridge?.setThreadGoal(value)
+    }
+
+    private fun answerUserInput(requestId: Int, questionId: String, answer: String) {
+        val answers = JSONObject().put(questionId, JSONObject().put("answers", JSONArray().put(answer)))
+        bridge?.respondUserInput(requestId, answers.toString())
+        chatState.pendingUserInputRequest = ""
     }
 
     private fun toggleGoalPause() {
@@ -1172,6 +1180,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                         .apply()
                 }
                 chatState.revision++
+            }
+            "onUserInputRequest" -> {
+                chatState.pendingUserInputRequest = value
+                chatState.phase = NativeTurnPhase.WAITING
+                chatState.processingLabel = "\u7b49\u5f85\u4f60\u7684\u56de\u7b54"
             }
             "onSubagentEvent" -> {
                 val thread = chatState.updateSubagent(value)

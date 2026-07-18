@@ -313,6 +313,7 @@ internal fun NativeChatScreen(
     onSetGoal: (String) -> Unit,
     onClearGoal: () -> Unit,
     onToggleGoalPause: () -> Unit,
+    onAnswerUserInput: (Int, String, String) -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -658,6 +659,12 @@ internal fun NativeChatScreen(
             },
         )
     }
+    if (state.pendingUserInputRequest.isNotBlank()) {
+        NativeUserInputDialog(
+            raw = state.pendingUserInputRequest,
+            onAnswer = onAnswerUserInput,
+        )
+    }
     previewAttachment?.let { attachment ->
         AttachmentPreviewDialog(attachment = attachment, onDismiss = { previewAttachment = null })
     }
@@ -826,6 +833,37 @@ private fun MessageSearchDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5173\u95ed", "Close")) } },
+    )
+}
+
+@Composable
+private fun NativeUserInputDialog(raw: String, onAnswer: (Int, String, String) -> Unit) {
+    val language = LocalNativeLanguage.current
+    val payload = remember(raw) { runCatching { JSONObject(raw) }.getOrNull() }
+    val requestId = payload?.optInt("requestId", -1) ?: -1
+    val params = payload?.optJSONObject("params")
+    val questions = params?.optJSONArray("questions")
+    val question = questions?.optJSONObject(0) ?: params
+    val questionId = question?.optString("id", "answer").orEmpty().ifBlank { "answer" }
+    val prompt = question?.optString("question", question.optString("prompt", "")).orEmpty().ifBlank { nativeText(language, "\u6a21\u578b\u9700\u8981\u4f60\u7684\u56de\u7b54", "The model needs your input") }
+    val options = question?.optJSONArray("options")
+    var value by remember(raw) { mutableStateOf("") }
+    FlClashAnimatedDialog(
+        onDismissRequest = {},
+        title = { Text(nativeText(language, "\u9700\u8981\u4f60\u7684\u56de\u7b54", "Your input is needed")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(prompt, style = MaterialTheme.typography.bodyLarge)
+                if (options != null && options.length() > 0) {
+                    for (index in 0 until options.length()) {
+                        val option = options.optJSONObject(index)
+                        val label = option?.optString("label", option.optString("value", "")) ?: options.optString(index)
+                        Surface(Modifier.fillMaxWidth().clickable { value = label }, shape = RoundedCornerShape(14.dp), color = if (value == label) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow) { Text(label, Modifier.padding(12.dp)) }
+                    }
+                } else OutlinedTextField(value = value, onValueChange = { value = it }, modifier = Modifier.fillMaxWidth(), placeholder = { Text(nativeText(language, "\u8f93\u5165\u56de\u7b54", "Type your answer")) })
+            }
+        },
+        confirmButton = { TextButton(enabled = requestId >= 0 && value.isNotBlank(), onClick = { onAnswer(requestId, questionId, value.trim()) }) { Text(nativeText(language, "\u63d0\u4ea4", "Submit")) } },
     )
 }
 

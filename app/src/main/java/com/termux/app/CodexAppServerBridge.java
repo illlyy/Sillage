@@ -539,6 +539,14 @@ final class CodexAppServerBridge {
         }
     }
 
+    void respondUserInput(int requestId, String answersJson) {
+        try {
+            JSONObject result = new JSONObject();
+            result.put("answers", new JSONObject(answersJson == null ? "{}" : answersJson));
+            sendJson(new JSONObject().put("id", requestId).put("result", result));
+        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
     private void sendInitialize() throws Exception {
         JSONObject clientInfo = new JSONObject()
             .put("name", "ilyop_codex_android")
@@ -666,6 +674,16 @@ final class CodexAppServerBridge {
     private void handleMessage(JSONObject message) throws Exception {
         rememberTurnStart(message);
         if (suppressSyntheticInterruptCompletion(message)) return;
+        if (message.has("id") && message.has("method")) {
+            String inboundMethod = message.optString("method", "");
+            if (inboundMethod.contains("requestUserInput") || "item/tool/requestUserInput".equals(inboundMethod)) {
+                emit("onUserInputRequest", new JSONObject()
+                    .put("requestId", message.optInt("id", -1))
+                    .put("method", inboundMethod)
+                    .put("params", message.optJSONObject("params")).toString());
+                return;
+            }
+        }
         if (initializeRequestId >= 0 && message.has("id") && message.has("result")
                 && message.optInt("id", -1) == initializeRequestId) {
             initializeRequestId = -1;
