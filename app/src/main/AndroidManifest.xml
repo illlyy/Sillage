@@ -65,7 +65,7 @@
         <activity
             android:name=".app.CodexChatActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|uiMode|keyboard|keyboardHidden|navigation"
-            android:exported="false"
+            android:exported="true"
             android:label="Fcode Chat"
             android:windowSoftInputMode="adjustNothing"
             android:theme="@style/Theme.CodexMobile">
