@@ -809,19 +809,20 @@ private fun MessageSearchDialog(
 @Composable
 private fun EditMessageDialog(initialText: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var value by remember(initialText) { mutableStateOf(initialText) }
+    val language = LocalNativeLanguage.current
     val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text("编辑消息") },
+        title = { Text(nativeText(language, "????", "Edit message")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("保存后将从这条消息重新生成后续内容。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(value = value, onValueChange = { value = it }, modifier = Modifier.fillMaxWidth().focusRequester(focusRequester), minLines = 3, maxLines = 10)
             }
         },
-        confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) { Text("保存并重新生成") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) { Text(nativeText(language, "???????", "Save and regenerate")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "??", "Cancel")) } },
     )
 }
 
