@@ -203,6 +203,15 @@ internal class NativeChatState {
         }
     }
 
+    fun ensurePlanPanel() {
+        if (messages.none { it.role == NativeChatRole.ACTIVITY && it.content.startsWith("PLAN_PANEL|") }) {
+            val insertAt = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT }.takeIf { it >= 0 } ?: messages.size
+            messages.add(insertAt, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "PLAN_PANEL|"))
+        }
+        planPanelAdded = true
+        revision++
+    }
+
     private fun cleanProtocolMarkup(text: String): String = text
         .replace(Regex("""</?propose_plan\s*>""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("""</?plan\s*>""", RegexOption.IGNORE_CASE), "")
@@ -1211,6 +1220,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     ?: nested?.optString("explanation")?.takeIf { it.isNotBlank() }
                     ?: ""
                 if (plan != null) {
+                    chatState.ensurePlanPanel()
                     chatState.planJson = plan.toString()
                     chatState.finishPlanPanel(plan.length())
                 }
