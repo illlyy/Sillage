@@ -511,7 +511,7 @@ internal fun NativeChatScreen(
                                     onPreviewAttachment = { previewAttachment = it },
                                 )
                             }
-                            if (state.busy && liveAssistantId == null && state.messages.none { it.role == NativeChatRole.ASSISTANT && !it.streaming }) {
+                            if (state.busy && liveAssistantId == null) {
                                 item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory, {}) }
                             }
                             // A temporary runway lets streamed lines grow upward instead of
@@ -1379,8 +1379,8 @@ private fun FadingTailText(text: String, tailStart: Int, generation: Int, reason
     androidx.compose.runtime.key(generation) {
         var visible by remember { mutableStateOf(false) }
         val tailAlpha by animateFloatAsState(
-            targetValue = if (visible) 1f else 0.08f,
-            animationSpec = tween(420, easing = LinearEasing),
+            targetValue = if (visible) 1f else 0.30f,
+            animationSpec = tween(260, easing = LinearEasing),
             label = if (reasoning) "reasoningTail" else "answerTail",
         )
         LaunchedEffect(Unit) { visible = true }
@@ -1450,12 +1450,13 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     var fullReasoning by remember { mutableStateOf(false) }
     val reasoningScrollState = rememberScrollState()
     val reasoningPreview = expanded && !state.reasoningComplete && !fullReasoning
+    val reasoningLive = expanded && !state.reasoningComplete
 
     // Match RikkaHub's important performance behavior: while reasoning is live, keep it
     // inside a bounded inner viewport. Only that viewport scrolls as text grows, so the
     // outer LazyColumn is not remeasured and displaced by thousands of reasoning lines.
-    LaunchedEffect(reasoningPreview) {
-        if (!reasoningPreview) return@LaunchedEffect
+    LaunchedEffect(reasoningLive) {
+        if (!reasoningLive) return@LaunchedEffect
         var previousFrame = withFrameNanos { it }
         while (isActive) {
             val frame = withFrameNanos { it }
@@ -1519,7 +1520,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
             SafeExpandableViewport(maxHeight = 520.dp) {
                 Column {
                 if (state.reasoningText.isNotBlank()) {
-                    val liveReasoningModifier = if (reasoningPreview) {
+                    val liveReasoningModifier = if (reasoningLive) {
                         Modifier
                             .fillMaxWidth()
                             .heightIn(max = 132.dp)
