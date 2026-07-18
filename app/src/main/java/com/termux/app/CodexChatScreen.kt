@@ -781,7 +781,7 @@ private fun MessageSearchDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     leadingIcon = { Icon(HugeIcons.Search01, null) },
-                    placeholder = { Text("输入关键词") },
+                    placeholder = { Text("??") },
                 )
                 if (query.isNotBlank()) {
                     Text("找到 ${results.size} 条结果", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3183,6 +3183,7 @@ private fun RikkaChatInput(
     onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val language = LocalNativeLanguage.current
     var toolsExpanded by remember { mutableStateOf(false) }
     val slashCommandMode = value.trimStart().startsWith("/")
     LaunchedEffect(slashCommandMode) {
