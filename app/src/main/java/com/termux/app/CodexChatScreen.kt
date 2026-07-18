@@ -762,8 +762,8 @@ private fun FlClashAnimatedDialog(
         Dialog(onDismissRequest = { dismissAnimated() }, properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true, usePlatformDefaultWidth = false)) {
             AnimatedVisibility(
                 visibleState = visibility,
-                enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.86f, animationSpec = tween(250, easing = CubicBezierEasing(0.175f, 0.885f, 0.32f, 1f))),
-                exit = fadeOut(tween(145)) + scaleOut(targetScale = 0.90f, animationSpec = tween(190, easing = FastOutSlowInEasing)),
+                enter = fadeIn(tween(120, easing = LinearEasing)) + scaleIn(initialScale = 0.92f, animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)),
+                exit = fadeOut(tween(95, easing = LinearEasing)) + scaleOut(targetScale = 0.96f, animationSpec = spring(dampingRatio = 0.9f, stiffness = 520f)),
             ) {
                 Surface(
                     modifier = modifier.fillMaxWidth(0.88f).widthIn(min = 280.dp, max = 560.dp),
@@ -4085,7 +4085,7 @@ private fun RenameConversationDialog(conversation: NativeConversation, onDismiss
 
 @Composable
 private fun DrawerQuickAction(icon: ImageVector, label: String, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
-    Surface(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    Surface(modifier = modifier.liquidPress(onClick = onClick), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(7.dp))
