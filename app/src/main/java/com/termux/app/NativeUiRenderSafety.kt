@@ -35,6 +35,22 @@ object NativeUiRenderSafety {
     fun shouldDeferStreamFlush(pendingLength: Int, boundary: Boolean, ageMs: Long, force: Boolean): Boolean =
         !force && pendingLength < 12 && !boundary && ageMs < 110L
 
+    /**
+     * Publishing a stream snapshot copies the complete growing String and remeasures its active
+     * text tail. Keep short answers lively, then progressively trade update frequency for input
+     * and gesture headroom. Completion events always bypass this delay and flush synchronously.
+     */
+    @JvmStatic
+    fun streamFlushDelayMs(currentChars: Int, pendingChars: Int, baseDelayMs: Long): Long {
+        val total = (currentChars.toLong() + pendingChars.toLong()).coerceAtLeast(0L)
+        return when {
+            total < 8_000L -> baseDelayMs
+            total < 32_000L -> maxOf(baseDelayMs, 96L)
+            total < 96_000L -> maxOf(baseDelayMs, 140L)
+            else -> maxOf(baseDelayMs, 180L)
+        }
+    }
+
     @JvmStatic
     fun sanitizeToolDetail(source: String): String {
         if (source.contains("SensitiveContentDetected", ignoreCase = true)) {

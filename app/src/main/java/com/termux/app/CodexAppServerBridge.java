@@ -1,6 +1,8 @@
 package com.termux.app;
 
 import android.app.Activity;
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.util.Log;
@@ -19,12 +21,14 @@ import java.io.OutputStreamWriter;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Direct JSONL bridge to `codex app-server --stdio`; no Node.js or external Termux required. */
 final class CodexAppServerBridge {
     interface EventListener {
         void onEvent(String function, String value);
+        void onHistoryPrepared(String threadId, int generation, NativeHistorySnapshot snapshot);
     }
 
     private static final String TAG = "IlyopCodexBridge";
@@ -57,6 +61,9 @@ final class CodexAppServerBridge {
     private volatile boolean visibleRouteReady;
     private volatile String activeTurnId;
     private volatile int initializeRequestId = -1;
+    private volatile boolean appServerInitialized;
+    private String deferredResumeThreadId;
+    private int deferredResumeGeneration = -1;
     private volatile int editRollbackRequestId = -1;
     private volatile int compactRequestId = -1;
     private volatile int collaborationModesRequestId = -1;
@@ -66,6 +73,11 @@ final class CodexAppServerBridge {
     private volatile String pendingEditedEffort;
     private LocalApiProxy apiProxy;
     private CodexDesktopBridge desktopBridge;
+    private static final long NATIVE_STREAM_BATCH_MS = 32L;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final NativeStreamEventBatcher nativeStreamBatcher = new NativeStreamEventBatcher();
+    private final AtomicBoolean nativeStreamDrainScheduled = new AtomicBoolean();
+    private final Runnable nativeStreamDrain = this::drainNativeStreamEvents;
 
     CodexAppServerBridge(Activity activity, WebView webView) {
         this.activity = activity;
@@ -357,6 +369,7 @@ final class CodexAppServerBridge {
 
     @JavascriptInterface public void newConversation() {
         int generation = navigationGeneration.incrementAndGet();
+        clearDeferredResume();
         threadId = null;
         visibleThreadId = null;
         visibleRouteReady = false;
@@ -365,18 +378,19 @@ final class CodexAppServerBridge {
         try { sendThreadStart(); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
-    void resumeConversation(String resumeThreadId) {
-        resumeConversation(resumeThreadId, false);
+    int resumeConversation(String resumeThreadId) {
+        return resumeConversation(resumeThreadId, false);
     }
 
-    void restoreRetainedConversation(String resumeThreadId) {
-        resumeConversation(resumeThreadId, true);
+    int restoreRetainedConversation(String resumeThreadId) {
+        return resumeConversation(resumeThreadId, true);
     }
 
-    private void resumeConversation(String resumeThreadId, boolean allowMissingRollout) {
-        if (resumeThreadId == null || resumeThreadId.trim().isEmpty()) return;
+    private int resumeConversation(String resumeThreadId, boolean allowMissingRollout) {
+        if (resumeThreadId == null || resumeThreadId.trim().isEmpty()) return navigationGeneration.get();
         final String requestedThread = resumeThreadId.trim();
         final int generation = navigationGeneration.incrementAndGet();
+        clearDeferredResume();
         // Change the visible route synchronously, before history I/O and thread/resume.
         // Events from the previously displayed background turn are rejected immediately.
         threadId = requestedThread;
@@ -386,19 +400,25 @@ final class CodexAppServerBridge {
         activeTurnId = null;
         NativeChatDiagnostics.record(activity, "conversation_route", navigationDetails(generation, shortId(requestedThread)));
         new Thread(() -> {
+            final long historyStartedAt = android.os.SystemClock.uptimeMillis();
             try {
                 File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
                 File sessionFile = findSessionFile(sessionsRoot, requestedThread);
                 JSONArray history = sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile);
+                NativeHistorySnapshot historySnapshot = NativeHistoryParser.parse(history);
+                NativeChatDiagnostics.record(activity, "history_prepared", navigationDetails(generation, shortId(requestedThread))
+                    .put("messages", historySnapshot.getMessages().size())
+                    .put("estimatedChars", historySnapshot.getEstimatedChars())
+                    .put("durationMs", android.os.SystemClock.uptimeMillis() - historyStartedAt));
                 if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
-                final String historyValue = history.toString();
                 final boolean retainInMemoryThread = allowMissingRollout && sessionFile == null;
                 activity.runOnUiThread(() -> {
                     if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
-                    // Apply the persisted snapshot before opening the event gate. Deltas
-                    // emitted while disk history was loading remain in the session file
-                    // instead of being appended and then erased by replaceHistory().
-                    if (eventListener != null) eventListener.onEvent("onHistory", historyValue);
+                    // JSON, Base64 and message DTO parsing completed on the resume worker.
+                    // Main only swaps one immutable snapshot before opening the event gate.
+                    if (eventListener != null) {
+                        eventListener.onHistoryPrepared(requestedThread, generation, historySnapshot);
+                    }
                     visibleRouteReady = true;
                     if (retainInMemoryThread) {
                         NativeChatDiagnostics.record(activity, "retained_empty_thread_restored",
@@ -407,6 +427,7 @@ final class CodexAppServerBridge {
                         return;
                     }
                     try {
+                        if (deferResumeUntilInitialized(requestedThread, generation)) return;
                         JSONObject resumeParams = new JSONObject().put("threadId", requestedThread);
                         String permissionMode = configuredPermissionMode();
                         NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
@@ -421,6 +442,7 @@ final class CodexAppServerBridge {
                 if (navigationGeneration.get() == generation) emit("onNativeError", e.getMessage());
             }
         }, "CodexConversationResume").start();
+        return generation;
     }
 
     void loadSubagentHistory(String subagentThreadId, int generation) {
@@ -449,7 +471,7 @@ final class CodexAppServerBridge {
                     result.put("error", error.getMessage());
                 } catch (Exception ignored) {}
             }
-            emit("onSubagentHistory", result.toString());
+            emit("onSubagentHistory", NativeLargePayloadStore.compactSubagentHistoryResult(result));
         }, "CodexSubagentHistory").start();
     }
 
@@ -593,6 +615,23 @@ final class CodexAppServerBridge {
             sendJson(new JSONObject().put("id", requestId).put("result", result));
             Log.i(TAG, "APPROVAL_RESPONSE method=" + method + " decision=" + decision);
         } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
+
+    private synchronized void clearDeferredResume() {
+        deferredResumeThreadId = null;
+        deferredResumeGeneration = -1;
+        mainHandler.removeCallbacks(nativeStreamDrain);
+        nativeStreamDrainScheduled.set(false);
+        nativeStreamBatcher.clear();
+    }
+
+    /** Returns true when the resume will be sent by the initialize-response handler. */
+    private synchronized boolean deferResumeUntilInitialized(String resumeThreadId, int generation) {
+        if (appServerInitialized) return false;
+        deferredResumeThreadId = resumeThreadId;
+        deferredResumeGeneration = generation;
+        return true;
     }
 
     private void sendInitialize() throws Exception {
@@ -758,8 +797,29 @@ final class CodexAppServerBridge {
             sendJson(new JSONObject().put("method", "initialized"));
             try { collaborationModesRequestId = sendRequest("collaborationMode/list", new JSONObject()); }
             catch (Exception error) { android.util.Log.w(TAG, "Unable to list collaboration modes", error); }
-            if (desktopBridge != null) desktopBridge.onAppServerInitialized();
-            else sendThreadStart();
+            String deferredThread;
+            int deferredGeneration;
+            synchronized (this) {
+                appServerInitialized = true;
+                deferredThread = deferredResumeThreadId;
+                deferredGeneration = deferredResumeGeneration;
+                deferredResumeThreadId = null;
+                deferredResumeGeneration = -1;
+            }
+            if (desktopBridge != null) {
+                desktopBridge.onAppServerInitialized();
+            } else if (deferredThread != null
+                    && deferredGeneration == navigationGeneration.get()
+                    && deferredThread.equals(visibleThreadId)) {
+                JSONObject resumeParams = new JSONObject().put("threadId", deferredThread);
+                String permissionMode = configuredPermissionMode();
+                NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
+                sendNavigationRequest("thread/resume", resumeParams, deferredGeneration);
+            } else if (threadId == null) {
+                // A native resume may still be loading history. Its worker will send the request
+                // after observing appServerInitialized, so do not create an orphan new thread.
+                sendThreadStart();
+            }
             return;
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
@@ -880,7 +940,7 @@ final class CodexAppServerBridge {
                 if ("subAgentActivity".equals(liveType) || "item/started".equals(method)) {
                     presentationItem.put("status", "working");
                 }
-                emit("onSubagentEvent", presentationItem.toString());
+                emit("onSubagentEvent", NativeLargePayloadStore.compactToolItem(presentationItem));
                 NativeChatDiagnostics.record(activity, "subagent_capsule", new JSONObject()
                     .put("method", method).put("type", liveType)
                     .put("thread", shortId(params.optString("threadId", ""))));
@@ -912,10 +972,12 @@ final class CodexAppServerBridge {
             if (!text.isEmpty()) emit("onReasoningComplete", text);
         } else if (primaryEvent && "item/completed".equals(method) && isCommandItem(params)) {
             JSONObject item = params.optJSONObject("item");
-            emit("onCommandComplete", item == null ? "{}" : item.toString());
+            // handleNotification runs on the app-server reader thread. Strip large streams
+            // here so the main thread receives only command metadata and an output reference.
+            emit("onCommandComplete", NativeCommandOutputStore.compactCommandItem(item));
         } else if (primaryEvent && "item/completed".equals(method) && isToolDetailItem(params)) {
             JSONObject item = params.optJSONObject("item");
-            emit("onToolComplete", item == null ? "{}" : item.toString());
+            emit("onToolComplete", NativeLargePayloadStore.compactToolItem(item));
         } else if (primaryEvent && "item/completed".equals(method) && isAgentMessageItem(params)) {
             JSONObject item = params == null ? null : params.optJSONObject("item");
             boolean finalAnswer = isFinalAgentMessage(params);
@@ -1311,8 +1373,14 @@ final class CodexAppServerBridge {
                     String callId = payload.optString("call_id", "");
                     JSONObject call = calls.remove(callId);
                     String output = payload.optString("output", "");
-                    if (call != null) tools.put(historyToolCard(call, output));
-                    else if (!output.isEmpty()) command.append(output.trim()).append('\n');
+                    if (call != null) {
+                        JSONObject historyItem = historyToolCard(call, output);
+                        if ("commandExecution".equals(historyItem.optString("type"))) {
+                            tools.put(new JSONObject(NativeCommandOutputStore.compactCommandItem(historyItem)));
+                        } else {
+                            tools.put(historyItem);
+                        }
+                    } else if (!output.isEmpty()) command.append(output.trim()).append('\n');
                     continue;
                 }
                 if (!"message".equals(payloadType)) continue;
@@ -1805,17 +1873,48 @@ final class CodexAppServerBridge {
             || "onReasoningDelta".equals(function) || "onCommandDelta".equals(function);
     }
 
+    private void dispatchNativeEvent(String function, String value) {
+        EventListener listener = eventListener;
+        if (listener != null) listener.onEvent(function, value);
+    }
+
+    private void drainNativeStreamEvents() {
+        nativeStreamDrainScheduled.set(false);
+        for (NativeStreamEventBatcher.Event event : nativeStreamBatcher.drain()) {
+            dispatchNativeEvent(event.function, event.value);
+        }
+    }
+
     private void emit(String function, String value) {
         if (!isHighFrequencyEmission(function)) {
             android.util.Log.d(TAG, "EMIT function=" + function + " length=" + (value == null ? 0 : value.length()));
         }
         final String safeValue = value == null ? "" : value;
-        // Native Compose has no WebView. Avoid JSON-quoting every tiny stream delta when
-        // there is no JavaScript consumer for it.
-        final String quoted = webView == null ? null : JSONObject.quote(safeValue);
+        if (webView == null) {
+            if (isHighFrequencyEmission(function)) {
+                boolean drainNow = nativeStreamBatcher.offer(function, safeValue);
+                if (nativeStreamDrainScheduled.compareAndSet(false, true)) {
+                    mainHandler.postDelayed(nativeStreamDrain, drainNow ? 0L : NATIVE_STREAM_BATCH_MS);
+                } else if (drainNow) {
+                    mainHandler.removeCallbacks(nativeStreamDrain);
+                    mainHandler.post(nativeStreamDrain);
+                }
+                return;
+            }
+            // Completion/tool/lifecycle events are ordering barriers. Flush every earlier delta
+            // in the same main-loop task before delivering the barrier event.
+            mainHandler.removeCallbacks(nativeStreamDrain);
+            mainHandler.post(() -> {
+                drainNativeStreamEvents();
+                dispatchNativeEvent(function, safeValue);
+            });
+            return;
+        }
+
+        final String quoted = JSONObject.quote(safeValue);
         activity.runOnUiThread(() -> {
             if (eventListener != null) eventListener.onEvent(function, safeValue);
-            if (webView != null) webView.evaluateJavascript(
+            webView.evaluateJavascript(
                 "window.codex && window.codex." + function + "(" + quoted + ")", null);
         });
     }
@@ -1826,6 +1925,12 @@ final class CodexAppServerBridge {
         visibleRouteReady = false;
         activeTurnId = null;
         initializeRequestId = -1;
+        appServerInitialized = false;
+        deferredResumeThreadId = null;
+        deferredResumeGeneration = -1;
+        mainHandler.removeCallbacks(nativeStreamDrain);
+        nativeStreamDrainScheduled.set(false);
+        nativeStreamBatcher.clear();
         turnStartedAtMs.clear();
         pendingFinalTurns.clear();
         syntheticCompletedTurns.clear();

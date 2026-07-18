@@ -3,6 +3,7 @@
 package com.termux.app
 
 import android.util.Base64
+import android.app.Activity
 
 import android.os.Build
 import androidx.compose.foundation.BorderStroke
@@ -20,7 +21,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.isSystemInDarkTheme
 import java.util.Locale
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -113,9 +113,6 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
@@ -123,6 +120,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -151,6 +149,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.key.KeyEventType
@@ -165,6 +164,8 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -182,6 +183,8 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.collectLatest
@@ -234,57 +237,6 @@ import me.rerere.hugeicons.stroke.Tick02
 import me.rerere.hugeicons.stroke.Voice
 import me.rerere.hugeicons.stroke.Zap
 
-private val FcodeLightColors = lightColorScheme(
-    primary = Color(0xFF73515A),
-    onPrimary = Color(0xFFFDFBFB),
-    primaryContainer = Color(0xFFE6CDD2),
-    onPrimaryContainer = Color(0xFF553840),
-    secondary = Color(0xFF67565A),
-    onSecondary = Color(0xFFFDFBFB),
-    secondaryContainer = Color(0xFFE6CDD2),
-    onSecondaryContainer = Color(0xFF493C40),
-    tertiary = Color(0xFF6E5A45),
-    onTertiary = Color(0xFFFDFBFB),
-    tertiaryContainer = Color(0xFFE6D6C1),
-    onTertiaryContainer = Color(0xFF4F412F),
-    error = Color(0xFFBA1A1A),
-    onError = Color(0xFFFDFBFB),
-    errorContainer = Color(0xFFFFDAD6),
-    onErrorContainer = Color(0xFF93000A),
-    background = Color(0xFFF5F1F1),
-    onBackground = Color(0xFF241F20),
-    surface = Color(0xFFF5F1F1),
-    onSurface = Color(0xFF241F20),
-    surfaceVariant = Color(0xFFE5DCDE),
-    onSurfaceVariant = Color(0xFF504749),
-    outline = Color(0xFF776C6E),
-    outlineVariant = Color(0xFFCFC4C6),
-    scrim = Color(0xFF000000),
-    inverseSurface = Color(0xFF393334),
-    inverseOnSurface = Color(0xFFF2E9EA),
-    inversePrimary = Color(0xFFD9AEB7),
-    surfaceDim = Color(0xFFDDD6D7),
-    surfaceBright = Color(0xFFF5F1F1),
-    surfaceContainerLowest = Color(0xFFFDFBFB),
-    surfaceContainerLow = Color(0xFFF1EBEC),
-    surfaceContainer = Color(0xFFEDE7E8),
-    surfaceContainerHigh = Color(0xFFE8E1E2),
-    surfaceContainerHighest = Color(0xFFE2DADB),
-)
-
-private val FcodeDarkColors = darkColorScheme(
-    primary = Color(0xFFE6B8C1), onPrimary = Color(0xFF442830),
-    primaryContainer = Color(0xFF5D3E47), onPrimaryContainer = Color(0xFFFFD9E0),
-    secondary = Color(0xFFD6C1C5), onSecondary = Color(0xFF392D30),
-    secondaryContainer = Color(0xFF514347), onSecondaryContainer = Color(0xFFF3DDE1),
-    background = Color(0xFF171314), onBackground = Color(0xFFECE0E2),
-    surface = Color(0xFF171314), onSurface = Color(0xFFECE0E2),
-    surfaceVariant = Color(0xFF51474A), onSurfaceVariant = Color(0xFFD4C2C5),
-    outline = Color(0xFF9C8C8F), outlineVariant = Color(0xFF51474A),
-    surfaceContainerLowest = Color(0xFF120F10), surfaceContainerLow = Color(0xFF201B1C),
-    surfaceContainer = Color(0xFF241F20), surfaceContainerHigh = Color(0xFF2F292A),
-    surfaceContainerHighest = Color(0xFF3A3335),
-)
 val LocalNativeLanguage = staticCompositionLocalOf { "zh" }
 val LocalStreamAnimationsEnabled = staticCompositionLocalOf { true }
 val LocalShowReasoning = staticCompositionLocalOf { true }
@@ -294,12 +246,44 @@ internal fun nativeText(language: String, zh: String, en: String): String = if (
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", streamAnimations: Boolean = true, showReasoning: Boolean = true, autoFollow: Boolean = true, content: @Composable () -> Unit) {
-    val dark = when (themeMode) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
+internal fun FcodeChatTheme(
+    themeMode: String = "system",
+    language: String = "zh",
+    streamAnimations: Boolean = true,
+    showReasoning: Boolean = true,
+    autoFollow: Boolean = true,
+    colorPalette: String = FcodeColorPalette.ROSE.value,
+    chatBackground: String = FcodeChatBackgroundStyle.THEME.value,
+    content: @Composable () -> Unit,
+) {
+    val dark = currentFcodeDarkMode(themeMode)
+    val palette = FcodeColorPalette.from(colorPalette)
+    val background = FcodeChatBackgroundStyle.from(chatBackground)
+    val colorScheme = fcodeColorScheme(palette, dark)
+    val markdownColors = fcodeMarkdownColors(palette, dark, colorScheme)
+    val view = LocalView.current
+    SideEffect {
+        val window = (view.context as? Activity)?.window ?: return@SideEffect
+        WindowCompat.getInsetsController(window, view).run {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+        }
+    }
     MaterialExpressiveTheme(
-        colorScheme = if (dark) FcodeDarkColors else FcodeLightColors,
+        colorScheme = colorScheme,
         motionScheme = MotionScheme.expressive(),
-        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, LocalStreamAnimationsEnabled provides streamAnimations, LocalShowReasoning provides showReasoning, LocalAutoFollowOutput provides autoFollow, content = content) },
+        content = {
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalNativeLanguage provides language,
+                LocalStreamAnimationsEnabled provides streamAnimations,
+                LocalShowReasoning provides showReasoning,
+                LocalAutoFollowOutput provides autoFollow,
+                LocalFcodeColorPalette provides palette,
+                LocalFcodeChatBackground provides background,
+                LocalFcodeMarkdownColors provides markdownColors,
+                content = content,
+            )
+        },
     )
 }
 
@@ -341,11 +325,20 @@ internal fun NativeChatScreen(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var drawerContentReady by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
+    val conversationListKey = state.conversationAnimationKey
+    var historyLimit by remember(conversationListKey) { mutableIntStateOf(40) }
+    val initialVisibleCount = minOf(historyLimit, state.messages.size)
+    val initialLoaderOffset = if (state.messages.size > initialVisibleCount) 1 else 0
+    val initialLastItem = (initialVisibleCount + initialLoaderOffset - 1).coerceAtLeast(0)
+    // A conversation switch used to reuse the previous thread's index, compose that middle
+    // slice, then jump to the new bottom 16ms later. Start the new LazyList at its bottom so
+    // cached history needs one measure/layout pass instead of two.
+    val listState = remember(conversationListKey) {
+        androidx.compose.foundation.lazy.LazyListState(initialLastItem, Int.MAX_VALUE)
+    }
     val listDragged by listState.interactionSource.collectIsDraggedAsState()
-    var followOutput by remember { mutableStateOf(true) }
-    var followPausedUntil by remember { mutableLongStateOf(0L) }
-    var historyLimit by remember { mutableIntStateOf(40) }
+    var followOutput by remember(conversationListKey) { mutableStateOf(true) }
+    var followPausedUntil by remember(conversationListKey) { mutableLongStateOf(0L) }
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
@@ -353,7 +346,7 @@ internal fun NativeChatScreen(
     // invalidate the entire chat composition on every keyboard frame.
     val imeVisible = WindowInsets.isImeVisible
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
-    val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
+    val showScrollToBottom by remember(listState) { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
     var showFilesSheet by remember { mutableStateOf(false) }
     var showConversationSearch by remember { mutableStateOf(false) }
@@ -384,19 +377,9 @@ internal fun NativeChatScreen(
         }
     }
 
-    LaunchedEffect(state.conversationAnimationKey) {
-        historyLimit = 40
-        delay(16L)
-        if (state.messages.isNotEmpty()) {
-            val visibleCount = minOf(historyLimit, state.messages.size)
-            val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
-            listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
-        }
-    }
-
     val latestMessageId = state.messages.lastOrNull()?.id
     LaunchedEffect(latestMessageId) {
-        if (latestMessageId != null && autoFollowEnabled && followOutput && !listDragged) {
+        if (latestMessageId != null && state.phase.active && autoFollowEnabled && followOutput && !listDragged) {
             // A new plan/assistant item is a structural list change, not just text growth.
             // Move to the new item once; the frame-based follow motor handles later deltas.
             withFrameNanos { }
@@ -448,7 +431,14 @@ internal fun NativeChatScreen(
                 .toFloat()
             val unseenRunway = if (last.index < layout.totalItemsCount - 1) with(density) { 72.dp.toPx() } else 0f
             val overflow = maxOf(measuredOverflow, unseenRunway)
-            if (!listState.canScrollForward || overflow < 0.5f) continue
+            if (!listState.canScrollForward || overflow < 0.5f) {
+                // No scroll work exists yet. Avoid retaining a 60/120 Hz callback merely
+                // because the model is busy; the next 24 ms poll still reacts within ~2 frames.
+                delay(24L)
+                followVelocity = 0f
+                previousFrame = withFrameNanos { it }
+                continue
+            }
 
             // Follow with a damped velocity rather than issuing a new scroll animation for
             // every streamed batch. This keeps the viewport moving continuously while the
@@ -491,7 +481,31 @@ internal fun NativeChatScreen(
             }
         },
     ) {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        // Follow the drawer with compositor-only transforms. Reading currentOffset from the
+        // graphicsLayer lambda updates the RenderNode directly during a drag; it does not
+        // remeasure or recompose the LazyColumn and its Markdown children on every pointer move.
+        val drawerWidthPx = with(density) { 300.dp.toPx() }
+        val drawerShiftXPx = with(density) { 10.dp.toPx() }
+        val drawerShiftYPx = with(density) { 8.dp.toPx() }
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val offset = drawerState.currentOffset
+                    val progress = if (offset.isFinite() && drawerWidthPx > 0f) {
+                        (1f + offset / drawerWidthPx).coerceIn(0f, 1f)
+                    } else if (drawerState.currentValue == DrawerValue.Open) 1f else 0f
+                    // Translation is virtually free. Keep scaling extremely subtle: larger
+                    // scaling forces expensive full-screen texture filtering while text streams.
+                    translationX = drawerShiftXPx * progress
+                    translationY = drawerShiftYPx * progress
+                    val contentScale = 1f - 0.006f * progress
+                    scaleX = contentScale
+                    scaleY = contentScale
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0.5f)
+                },
+            color = MaterialTheme.colorScheme.background,
+        ) {
             Scaffold(
                 containerColor = Color.Transparent,
                 topBar = {
@@ -534,7 +548,18 @@ internal fun NativeChatScreen(
                         val visibleMessages = state.messages.takeLast(historyLimit)
                         val hiddenMessageCount = state.messages.size - visibleMessages.size
                         val liveAssistantId = if (state.phase == NativeTurnPhase.ANSWERING) visibleMessages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }?.id else null
-                        val retryPrompts = remember(visibleMessages, state.conversationAnimationKey) {
+                        // Assistant content changes on every stream batch, but retry targets only
+                        // depend on message identity/role and user prompts. Keep a cheap structural
+                        // fingerprint so a growing answer does not rebuild this map dozens of times/s.
+                        var retryStructureKey = 1
+                        visibleMessages.forEach { message ->
+                            retryStructureKey = 31 * retryStructureKey + message.id.hashCode()
+                            retryStructureKey = 31 * retryStructureKey + message.role.hashCode()
+                            if (message.role == NativeChatRole.USER) {
+                                retryStructureKey = 31 * retryStructureKey + message.content.hashCode()
+                            }
+                        }
+                        val retryPrompts = remember(retryStructureKey, state.conversationAnimationKey) {
                             buildMap<String, String> {
                                 var lastUser: String? = null
                                 visibleMessages.forEach { message ->
@@ -1259,19 +1284,7 @@ private fun RikkaTopBar(
 
 @Composable
 private fun AssistantBackdrop() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.18f),
-                        Color.Transparent,
-                        Color.Transparent,
-                    ),
-                ),
-            ),
-    )
+    FcodeChatBackdrop(Modifier.fillMaxSize())
 }
 
 @Composable
@@ -1443,40 +1456,36 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
         return
     }
     var previousLength by remember(messageId) { mutableIntStateOf(text.length) }
-    var showRichText by remember(messageId) { mutableStateOf(!streaming) }
     val tailStart = previousLength.coerceAtMost(text.length)
     androidx.compose.runtime.SideEffect { previousLength = text.length }
+    val accumulator = remember(messageId) { NativeStreamingMarkdownAccumulator() }
+    val snapshot = remember(messageId, text, streaming) {
+        accumulator.update(text, finished = !streaming)
+    }
 
-    LaunchedEffect(streaming) {
-        if (streaming) {
-            showRichText = false
-        } else {
-            // Give the final coalesced text snapshot a layout pass before replacing the
-            // live chunk renderer with Markwon's final Markdown view.
-            delay(220L)
-            showRichText = true
+    Column(modifier = Modifier.fillMaxWidth()) {
+        snapshot.blocks.forEach { block ->
+            androidx.compose.runtime.key(block.start, block.end) {
+                StableStreamingMarkdownBlock(block.text)
+            }
+        }
+        if (snapshot.tail.isNotEmpty()) {
+            ChunkedLiveText(
+                text = snapshot.tail,
+                tailStart = (tailStart - snapshot.stableChars).coerceIn(0, snapshot.tail.length),
+                generation = text.length,
+                reasoning = false,
+                animateTail = streaming,
+            )
         }
     }
+}
 
-    // AnimatedContent temporarily promotes the complete document to a hardware layer.
-    // Keep the unbounded answer layer-free; the live tail already owns reveal motion.
-    // Keep long answers in the chunk renderer even after the final delta. Promoting
-    // a large document to one Markdown tree here causes every previously rendered
-    // paragraph to be measured again and is the main source of end-of-stream jank.
-    val containsTable = remember(text) { NativeUiRenderSafety.containsMarkdownTable(text) }
-    if (showRichText && (text.length < 1200 || containsTable)) {
-        // GFM tables must reach Markwon after streaming ends; leaving a long answer in the
-        // plain live renderer exposes literal pipes instead of cells.
-        RichResponseText(text)
-    } else {
-        ChunkedLiveText(
-            text = text,
-            tailStart = tailStart,
-            generation = text.length,
-            reasoning = false,
-            animateTail = true,
-        )
-    }
+@Composable
+private fun StableStreamingMarkdownBlock(text: String) {
+    // Restartable boundary: an immutable completed block is skipped on later deltas while
+    // Markwon parses it once in the background. Only the unfinished tail keeps changing.
+    RichResponseText(text)
 }
 
 @Composable
@@ -1631,28 +1640,33 @@ private fun FadingTailText(text: String, tailStart: Int, generation: Int, reason
         StableLiveTextChunk(text, reasoning)
         return
     }
-    // A 260 ms color tween restarted for every 56 ms stream batch kept Text in
-    // continuous re-layout. Dim only the latest batch, then settle once after the
-    // stream pauses; this preserves arrival feedback without a per-frame text pass.
-    var settledGeneration by remember { mutableIntStateOf(generation - 1) }
-    LaunchedEffect(generation) {
-        delay(96L)
-        settledGeneration = generation
-    }
+    // Animate the active chunk as one RenderNode instead of tweening Span colors. Text is laid
+    // out once for each batched delta; alpha/translation then run on the compositor and cannot
+    // trigger Markdown parsing, Text measurement, or LazyColumn re-layout on animation frames.
     val safeTailStart = tailStart.coerceIn(0, text.length)
-    val baseColor = if (reasoning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
-    val tailAlpha = if (settledGeneration == generation) 1f else 0.52f
-    val annotatedText = remember(text, safeTailStart, tailAlpha, baseColor) {
-        androidx.compose.ui.text.buildAnnotatedString {
-            if (safeTailStart > 0) append(text.substring(0, safeTailStart))
-            withStyle(androidx.compose.ui.text.SpanStyle(color = baseColor.copy(alpha = tailAlpha))) {
-                append(text.substring(safeTailStart))
-            }
-        }
+    val addedChars = text.length - safeTailStart
+    val arrival = remember { androidx.compose.animation.core.Animatable(1f) }
+    LaunchedEffect(generation, safeTailStart) {
+        // Preserve velocity/continuity when another batch arrives before the previous 140 ms
+        // settle finishes. Tiny token batches rewind less than a complete new word/line.
+        val rewind = if (addedChars <= 4) 0.68f else if (addedChars <= 16) 0.54f else 0.42f
+        arrival.snapTo(arrival.value.coerceAtMost(rewind))
+        arrival.animateTo(
+            targetValue = 1f,
+            animationSpec = tween(durationMillis = 140, easing = LinearOutSlowInEasing),
+        )
     }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val baseColor = if (reasoning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
     Text(
-        text = annotatedText,
-        modifier = Modifier.fillMaxWidth(),
+        text = text,
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                val progress = arrival.value
+                alpha = 0.88f + 0.12f * progress
+                translationY = with(density) { 1.5.dp.toPx() } * (1f - progress)
+            },
         style = if (reasoning) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
         lineHeight = if (reasoning) 22.sp else 24.sp,
         letterSpacing = if (reasoning) 0.sp else 0.1.sp,
@@ -1741,9 +1755,10 @@ private fun ProcessingPanel(
     }
     // Snapshot list equality keeps expensive JSON parsing isolated from reasoning/answer
     // revisions. Tool details change rarely; stream deltas can update dozens of times a second.
-    val completedCommandPayloads = state.toolDetails.toList()
-    val completedCommands = remember(completedCommandPayloads) {
-        completedCommandPayloads.mapNotNull { raw ->
+    val toolDetailCount = state.toolDetails.size
+    val latestToolDetail = state.toolDetails.lastOrNull()
+    val completedCommands = remember(toolDetailCount, latestToolDetail) {
+        state.toolDetails.mapNotNull { raw ->
             runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "commandExecution" }
         }
     }
@@ -1898,7 +1913,7 @@ private fun ProcessingPanelBody(
                     CollabAgentCapsule(
                         item = item,
                         state = state,
-                        history = state.subagentHistories[thread],
+                        history = state.subagentHistoryRefs[thread],
                         historyLoading = thread in state.loadingSubagentHistories,
                         onLoadHistory = onLoadSubagentHistory,
                     )
@@ -2002,39 +2017,42 @@ private fun normalizeMarkdownLists(source: String): String {
         .replace(Regex("""(?m)^(\s*)([\u2022\u00B7])\s+"""), "$1- ")
 }
 
+private data class MarkdownRenderCacheKey(val themeKey: String, val text: String)
+
 private object NativeMarkdownRenderer {
-    @Volatile private var renderer: Markwon? = null
-    private val renderedCache = object : LinkedHashMap<String, android.text.Spanned>(48, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, android.text.Spanned>?): Boolean = size > 48
+    private val renderers = LinkedHashMap<String, Markwon>()
+    private val renderedCache = object : LinkedHashMap<MarkdownRenderCacheKey, android.text.Spanned>(48, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<MarkdownRenderCacheKey, android.text.Spanned>?): Boolean = size > 48
     }
 
-    fun get(context: android.content.Context): Markwon = renderer ?: synchronized(this) {
-        renderer ?: Markwon.builder(context)
+    @Synchronized
+    fun get(context: android.content.Context, colors: FcodeMarkdownColors): Markwon {
+        renderers[colors.cacheKey]?.let { return it }
+        val density = context.resources.displayMetrics.density
+        val renderer = Markwon.builder(context)
             .usePlugin(object : AbstractMarkwonPlugin() {
                 override fun configureTheme(builder: MarkwonTheme.Builder) {
-                    val density = context.resources.displayMetrics.density
                     builder
                         .blockMargin((20f * density).roundToInt())
-                        .listItemColor(android.graphics.Color.rgb(184, 112, 130))
+                        .listItemColor(colors.listMarker.toArgb())
                         .bulletWidth((8f * density).roundToInt())
                         .bulletListItemStrokeWidth((2f * density).roundToInt())
-                        .blockQuoteColor(android.graphics.Color.rgb(207, 151, 164))
+                        .blockQuoteColor(colors.quote.toArgb())
                         .blockQuoteWidth((4f * density).roundToInt())
-                        .linkColor(android.graphics.Color.rgb(157, 77, 99))
+                        .linkColor(colors.link.toArgb())
                         .isLinkUnderlined(false)
-                        .codeBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        .codeTextColor(android.graphics.Color.rgb(117, 62, 78))
+                        .codeBackgroundColor(colors.codeBlockBackground.toArgb())
+                        .codeTextColor(colors.codeBlockText.toArgb())
                 }
 
                 override fun configureSpansFactory(builder: MarkwonSpansFactory.Builder) {
-                    val density = context.resources.displayMetrics.density
                     builder.setFactory(Code::class.java) { _, _ ->
                         RoundedInlineCodeSpan(
                             horizontalPadding = 5f * density,
                             verticalPadding = 2f * density,
                             radius = 8f * density,
-                            backgroundColor = android.graphics.Color.rgb(244, 230, 234),
-                            textColor = android.graphics.Color.rgb(112, 57, 73),
+                            backgroundColor = colors.inlineCodeBackground.toArgb(),
+                            textColor = colors.inlineCodeText.toArgb(),
                         )
                     }
                     builder.setFactory(BlockQuote::class.java) { _, _ ->
@@ -2042,7 +2060,7 @@ private object NativeMarkdownRenderer {
                             margin = 16f * density,
                             barWidth = 4f * density,
                             radius = 2f * density,
-                            color = android.graphics.Color.rgb(207, 151, 164),
+                            color = colors.quote.toArgb(),
                         )
                     }
                 }
@@ -2053,15 +2071,19 @@ private object NativeMarkdownRenderer {
             .usePlugin(MarkwonInlineParserPlugin.create())
             .usePlugin(JLatexMathPlugin.create(42f) { builder -> builder.inlinesEnabled(true) })
             .build()
-            .also { renderer = it }
+        if (renderers.size >= 8) renderers.remove(renderers.keys.first())
+        renderers[colors.cacheKey] = renderer
+        return renderer
     }
 
-    fun cached(text: String): android.text.Spanned? = synchronized(renderedCache) { renderedCache[text] }
+    fun cached(themeKey: String, text: String): android.text.Spanned? =
+        synchronized(renderedCache) { renderedCache[MarkdownRenderCacheKey(themeKey, text)] }
 
-    fun render(markwon: Markwon, text: String): android.text.Spanned {
-        cached(text)?.let { return it }
+    fun render(markwon: Markwon, themeKey: String, text: String): android.text.Spanned {
+        val key = MarkdownRenderCacheKey(themeKey, text)
+        synchronized(renderedCache) { renderedCache[key] }?.let { return it }
         val rendered = markwon.toMarkdown(normalizeMarkdownLists(text))
-        synchronized(renderedCache) { renderedCache[text] = rendered }
+        synchronized(renderedCache) { renderedCache[key] = rendered }
         return rendered
     }
 }
@@ -2159,10 +2181,14 @@ private class RoundedBlockQuoteSpan(
 @Composable
 private fun RichMarkdownText(text: String) {
     val context = LocalContext.current
-    val markwon = remember(context.applicationContext) { NativeMarkdownRenderer.get(context.applicationContext) }
+    val colors = LocalFcodeMarkdownColors.current
+    val themeKey = colors.cacheKey
+    val markwon = remember(context.applicationContext, themeKey) {
+        NativeMarkdownRenderer.get(context.applicationContext, colors)
+    }
     val parsed by produceState<android.text.Spanned?>(
-        initialValue = NativeMarkdownRenderer.cached(text),
-        key1 = text,
+        initialValue = NativeMarkdownRenderer.cached(themeKey, text),
+        key1 = "$themeKey\u0000$text",
         key2 = markwon,
     ) {
         if (value == null) {
@@ -2170,10 +2196,12 @@ private fun RichMarkdownText(text: String) {
                 // Historical tool/reasoning output is not trusted Markdown. Markwon's
                 // inline parser can throw on malformed backtick sequences; fall back to
                 // the already-visible plain text instead of terminating the app.
-                runCatching { NativeMarkdownRenderer.render(markwon, text) }.getOrNull()
+                runCatching { NativeMarkdownRenderer.render(markwon, themeKey, text) }.getOrNull()
             }
         }
     }
+    val renderedTag = "rendered:$themeKey:$text"
+    val plainTag = "plain:$themeKey:$text"
     AndroidView(
         modifier = Modifier.fillMaxWidth(),
         factory = { android.widget.TextView(it).apply {
@@ -2186,22 +2214,23 @@ private fun RichMarkdownText(text: String) {
             breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
             hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
             linksClickable = true
-            setTextColor(android.graphics.Color.rgb(45, 40, 42))
+            setTextColor(colors.text.toArgb())
             // Never expose an empty AndroidView while Markdown/formulas are parsed.
             this.text = text
-            tag = "plain:$text"
+            tag = plainTag
         } },
         update = { view ->
+            view.setTextColor(colors.text.toArgb())
             val rendered = parsed
-            if (rendered != null && view.tag != text) {
+            if (rendered != null && view.tag != renderedTag) {
                 val applied = runCatching { markwon.setParsedMarkdown(view, rendered) }.isSuccess
-                if (applied) view.tag = text else {
+                if (applied) view.tag = renderedTag else {
                     view.text = text
-                    view.tag = "plain:$text"
+                    view.tag = plainTag
                 }
-            } else if (rendered == null && view.tag != "plain:$text") {
+            } else if (rendered == null && view.tag != plainTag) {
                 view.text = text
-                view.tag = "plain:$text"
+                view.tag = plainTag
             }
         },
     )
@@ -2209,21 +2238,22 @@ private fun RichMarkdownText(text: String) {
 
 @Composable
 private fun MarkdownLikeText(text: String) {
+    val colors = LocalFcodeMarkdownColors.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         markdownBlocks(text).forEach { block ->
             if (block.code) {
-                Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Color(0xFF1F1B24)) {
+                Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = colors.codeBlockBackground) {
                     Text(
                         block.text,
                         modifier = Modifier.padding(14.dp),
-                        color = Color(0xFFF4EFF7),
+                        color = colors.codeBlockText,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
                     )
                 }
             } else {
-                Text(block.text, style = MaterialTheme.typography.bodyLarge, lineHeight = 22.sp)
+                Text(block.text, color = colors.text, style = MaterialTheme.typography.bodyLarge, lineHeight = 22.sp)
             }
         }
     }
@@ -2389,7 +2419,8 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
             val type = item.optString("type")
             if (type in setOf("collabAgentToolCall", "subAgentActivity") && hasThreadBackedAgents && subagentThreadId(item).isBlank()) continue
             val title = when (type) { "fileChange" -> nativeText(language, "\u6587\u4ef6\u4fee\u6539", "File change"); "mcpToolCall" -> "MCP tool"; "webSearch" -> nativeText(language, "\u7f51\u9875\u641c\u7d22", "Web search"); "collabAgentToolCall" -> nativeText(language, "\u5b50\u4ee3\u7406", "Subagent"); else -> type }
-            val detail = when (type) {
+            val payloadRef = item.optString(NativeLargePayloadStore.PAYLOAD_REF)
+            val detail = if (payloadRef.isNotBlank()) item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) else when (type) {
                 "commandExecution" -> buildString {
                     val commandValue = item.optString("command", "")
                     val outputValue = item.optString("aggregatedOutput", item.optString("output", ""))
@@ -2420,12 +2451,12 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 CollabAgentCapsule(
                     item = item,
                     state = state,
-                    history = state.subagentHistories[thread],
+                    history = state.subagentHistoryRefs[thread],
                     historyLoading = thread in state.loadingSubagentHistories,
                     onLoadHistory = onLoadSubagentHistory,
                 )
             }
-            else ToolTextCard(title, detail, type == "fileChange")
+            else ToolTextCard(title, detail, type == "fileChange", payloadRef)
         }
                 }
             }
@@ -2547,7 +2578,7 @@ private fun CollabAgentCapsule(
                                     val thread = subagentThreadId(chosen)
                                     SubagentDetail(
                                         item = chosen,
-                                        history = state.subagentHistories[thread] ?: if (thread == subagentThreadId(item)) history else null,
+                                        history = state.subagentHistoryRefs[thread] ?: if (thread == subagentThreadId(item)) history else null,
                                         historyLoading = thread in state.loadingSubagentHistories || (thread == subagentThreadId(item) && historyLoading),
                                         historyError = state.subagentHistoryErrors[thread],
                                         status = resolvedSubagentStatus(state, chosen),
@@ -2732,7 +2763,7 @@ private fun WorkPanelDialog(
                                 val thread = subagentThreadId(agent)
                                 SubagentDetail(
                                     item = agent,
-                                    history = state.subagentHistories[thread],
+                                    history = state.subagentHistoryRefs[thread],
                                     historyLoading = thread in state.loadingSubagentHistories,
                                     historyError = state.subagentHistoryErrors[thread],
                                     status = resolvedSubagentStatus(state, agent),
@@ -2937,14 +2968,17 @@ private fun SubagentOverviewRow(state: NativeChatState, agent: JSONObject, onSel
     }
 }
 
-private fun parseSubagentMessages(history: String?): List<JSONObject> {
-    if (history.isNullOrBlank()) return emptyList()
-    return runCatching {
-        val source = JSONArray(history)
-        buildList {
-            for (index in 0 until source.length()) source.optJSONObject(index)?.let(::add)
-        }
-    }.getOrDefault(emptyList())
+private data class LoadedSubagentPage(
+    val messages: List<JSONObject>,
+    val startIndex: Int,
+    val totalCount: Int,
+)
+
+private fun loadSubagentPage(reference: String, limit: Int): LoadedSubagentPage {
+    if (reference.isBlank()) return LoadedSubagentPage(emptyList(), 0, 0)
+    val page = NativeLargePayloadStore.subagentPage(reference, Int.MAX_VALUE, limit)
+    val messages = page.messages.mapNotNull { raw -> runCatching { JSONObject(raw) }.getOrNull() }
+    return LoadedSubagentPage(messages, page.startIndex, page.totalCount)
 }
 
 @Composable
@@ -2959,12 +2993,18 @@ private fun SubagentDetail(
     val name = subagentName(item)
     val task = jsonText(item, "task", "prompt", "input", "message")
     val result = jsonText(item, "output", "result")
-    val messages = remember(history) { parseSubagentMessages(history) }
+    var historyLimit by remember(history) { mutableIntStateOf(60) }
+    val loadedPage by produceState<LoadedSubagentPage?>(initialValue = null, history, historyLimit) {
+        value = withContext(Dispatchers.Default) { loadSubagentPage(history.orEmpty(), historyLimit) }
+    }
+    val messages = loadedPage?.messages.orEmpty()
     val displayMessages = remember(messages, task) {
         if (task.isBlank()) messages else messages.filterNot {
             it.optString("role") == "user" && it.optString("content").trim() == task.trim()
         }
     }
+    val payloadLoading = !history.isNullOrBlank() && loadedPage == null
+    val effectiveHistoryLoading = historyLoading || payloadLoading
     val statusLabel = subagentStatusLabel(status, LocalNativeLanguage.current)
     if (messages.isNotEmpty()) {
         val conversationListState = rememberLazyListState(
@@ -2987,9 +3027,16 @@ private fun SubagentDetail(
                 item(key = "agent-status") { AgentTimelineSection("\u72b6\u6001", statusLabel) }
                 if (status == "failed" || status == "stopped") item(key = "agent-failure") { SubagentFailureSummary() }
                 if (task.isNotBlank()) item(key = "agent-task") { AgentTimelineSection("\u59d4\u6d3e\u7684\u4efb\u52a1", task) }
+                if ((loadedPage?.startIndex ?: 0) > 0) {
+                    item(key = "load-earlier-agent-history") {
+                        TextButton(onClick = { historyLimit += 60 }) {
+                            Text(nativeText(LocalNativeLanguage.current, "\u52a0\u8f7d\u66f4\u65e9\u7684\u6267\u884c\u8bb0\u5f55", "Load earlier activity"))
+                        }
+                    }
+                }
                 item(key = "agent-output-title") {
                     Text(
-                        "\u6267\u884c\u8bb0\u5f55 \u00b7 ${displayMessages.size}",
+                        "\u6267\u884c\u8bb0\u5f55 \u00b7 ${loadedPage?.totalCount ?: displayMessages.size}",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3003,7 +3050,7 @@ private fun SubagentDetail(
                 ) { _, message ->
                     SubagentConversationMessage(message, name)
                 }
-                if (historyLoading) item(key = "refreshing") { SubagentHistoryLoading("\u6b63\u5728\u540c\u6b65\u5b50\u4ee3\u7406\u6700\u65b0\u8f93\u51fa") }
+                if (effectiveHistoryLoading) item(key = "refreshing") { SubagentHistoryLoading("\u6b63\u5728\u540c\u6b65\u5b50\u4ee3\u7406\u6700\u65b0\u8f93\u51fa") }
                 item(key = "bottom-space") { Spacer(Modifier.height(24.dp)) }
             }
             AnimatedVisibility(
@@ -3036,7 +3083,7 @@ private fun SubagentDetail(
             if (task.isNotBlank()) AgentTimelineSection("\u59d4\u6d3e\u7684\u4efb\u52a1", task)
             if (result.isNotBlank()) {
                 AgentTimelineSection("\u6700\u7ec8\u56de\u590d", result)
-            } else if (historyLoading) {
+            } else if (effectiveHistoryLoading) {
                 SubagentHistoryLoading(
                     if (status in setOf("waiting", "working")) "\u5b50\u4ee3\u7406\u6b63\u5728\u6267\u884c\uff0c\u8f93\u51fa\u4f1a\u81ea\u52a8\u66f4\u65b0"
                     else "\u6b63\u5728\u52a0\u8f7d\u5b50\u4ee3\u7406\u6700\u7ec8\u56de\u590d"
@@ -3178,11 +3225,16 @@ private fun SubagentActivityView(content: String) {
                             when (tool.optString("type")) {
                                 "commandExecution" -> CommandExecutionCard(tool)
                                 "collabAgentToolCall", "subAgentActivity" -> Unit
-                                else -> ToolTextCard(
-                                    tool.optString("type", "\u5de5\u5177\u8c03\u7528"),
-                                    tool.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))),
-                                    tool.optString("type") == "fileChange",
-                                )
+                                else -> {
+                                    val payloadRef = tool.optString(NativeLargePayloadStore.PAYLOAD_REF)
+                                    ToolTextCard(
+                                        tool.optString("type", "\u5de5\u5177\u8c03\u7528"),
+                                        if (payloadRef.isNotBlank()) tool.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW)
+                                        else tool.optString("aggregatedOutput", tool.optString("output", tool.optString("detail", tool.toString(2)))),
+                                        tool.optString("type") == "fileChange",
+                                        payloadRef,
+                                    )
+                                }
                             }
                         }
                     }
@@ -3222,18 +3274,62 @@ private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liv
     val action = NativeCommandPresentation.action(item)
     val actionLabel = NativeCommandPresentation.label(action, language != "en")
     val subject = NativeCommandPresentation.subject(item)
-    val stdout = item.optString("stdout", "")
-    val stderr = item.optString("stderr", "")
-    val aggregated = liveOutput.ifBlank { item.optString("aggregatedOutput", item.optString("output", "")) }
-    val output = if (stdout.isNotBlank() || stderr.isNotBlank()) stdout else aggregated
     val cwd = item.optString("cwd", "")
     val exitCode = item.opt("exitCode")?.takeUnless { it == JSONObject.NULL }?.toString().orEmpty()
     val durationMs = item.optLong("durationMs", item.optLong("duration_ms", 0L))
     val status = item.optString("status")
     val isRunning = running || status.equals("inProgress", true) || status.equals("running", true)
     val failed = status.equals("failed", true) || (exitCode.toIntOrNull()?.let { it != 0 } == true)
-    val hasDetails = command.isNotBlank() || output.isNotBlank() || stderr.isNotBlank() || cwd.isNotBlank()
-    var expanded by remember(item.toString(), running) { mutableStateOf(false) }
+    val outputRef = item.optString(NativeCommandOutputStore.OUTPUT_REF)
+    val stderrRef = item.optString(NativeCommandOutputStore.STDERR_REF)
+    val outputPreview = item.optString(NativeCommandOutputStore.OUTPUT_PREVIEW)
+    val stderrPreview = item.optString(NativeCommandOutputStore.STDERR_PREVIEW)
+    val outputChars = item.optInt(NativeCommandOutputStore.OUTPUT_CHARS, 0)
+    val stderrChars = item.optInt(NativeCommandOutputStore.STDERR_CHARS, 0)
+    val inlineStdout = item.optString("stdout", "")
+    val inlineStderr = item.optString("stderr", "")
+    val inlineAggregate = item.optString("aggregatedOutput", item.optString("output", ""))
+    val inlineOutput = if (inlineStdout.isNotBlank() || inlineStderr.isNotBlank()) inlineStdout else inlineAggregate
+    val cardKey = item.optString("id", item.optString("itemId", "$command|$cwd|$durationMs"))
+    var expanded by remember(cardKey, running) { mutableStateOf(false) }
+    var deferredOutput by remember(outputRef) { mutableStateOf("") }
+    var deferredStderr by remember(stderrRef) { mutableStateOf("") }
+    var outputLoading by remember(outputRef, stderrRef) { mutableStateOf(false) }
+    var previewFallback by remember(outputRef, stderrRef) { mutableStateOf(false) }
+
+    // A completed command keeps only refs in snapshot state. Resolve the potentially 1MB+
+    // stream off the UI thread and release it from this card again when the card collapses.
+    LaunchedEffect(expanded, outputRef, stderrRef) {
+        if (!expanded) {
+            deferredOutput = ""
+            deferredStderr = ""
+            outputLoading = false
+            previewFallback = false
+            return@LaunchedEffect
+        }
+        if (outputRef.isBlank() && stderrRef.isBlank()) return@LaunchedEffect
+        outputLoading = true
+        val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            NativeCommandOutputStore.get(outputRef) to NativeCommandOutputStore.get(stderrRef)
+        }
+        deferredOutput = resolved.first ?: outputPreview
+        deferredStderr = resolved.second ?: stderrPreview
+        previewFallback = (outputRef.isNotBlank() && resolved.first == null) ||
+            (stderrRef.isNotBlank() && resolved.second == null)
+        outputLoading = false
+    }
+
+    val output = when {
+        isRunning -> liveOutput
+        outputRef.isNotBlank() -> deferredOutput
+        else -> inlineOutput
+    }
+    val stderr = when {
+        stderrRef.isNotBlank() -> deferredStderr
+        else -> inlineStderr
+    }
+    val hasDetails = command.isNotBlank() || outputRef.isNotBlank() || stderrRef.isNotBlank() ||
+        inlineOutput.isNotBlank() || inlineStderr.isNotBlank() || cwd.isNotBlank()
     val arrowRotation by animateFloatAsState(
         if (expanded) 180f else 0f,
         tween(150, easing = FastOutSlowInEasing),
@@ -3289,6 +3385,8 @@ private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liv
                 val meta = buildList {
                     if (durationMs > 0 && !isRunning) add("%.1fs".format(durationMs / 1000.0))
                     if (exitCode.isNotBlank() && failed) add("exit $exitCode")
+                    val chars = outputChars + stderrChars
+                    if (chars > 0 && !isRunning) add(formatCommandOutputChars(chars, language))
                 }.joinToString(" \u00b7 ")
                 if (meta.isNotBlank()) {
                     Text(meta, style = MaterialTheme.typography.labelSmall, color = accent)
@@ -3314,12 +3412,33 @@ private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liv
                             if (cwd.isNotBlank()) Text(cwd, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                    if (outputLoading) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.6.dp)
+                            Spacer(Modifier.width(7.dp))
+                            Text(nativeText(language, "\u6b63\u5728\u8bfb\u53d6\u547d\u4ee4\u8f93\u51fa\u2026", "Loading command output\u2026"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                     if (output.isNotBlank()) CommandStreamSection(nativeText(language, "\u8f93\u51fa", "Output"), output, false)
                     if (stderr.isNotBlank()) CommandStreamSection(nativeText(language, "\u9519\u8bef\u8f93\u51fa", "Error output"), stderr, true)
+                    if (previewFallback) {
+                        Text(
+                            nativeText(language, "\u5b8c\u6574\u8f93\u51fa\u5df2\u4ece\u7f13\u5b58\u91ca\u653e\uff0c\u5f53\u524d\u663e\u793a\u6458\u8981\u3002", "The full output was released from cache; showing its preview."),
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+private fun formatCommandOutputChars(chars: Int, language: String): String = when {
+    chars >= 1_000_000 -> "%.1fM".format(chars / 1_000_000.0)
+    chars >= 1_000 -> "%.1fK".format(chars / 1_000.0)
+    else -> nativeText(language, "$chars \u5b57\u7b26", "$chars chars")
 }
 
 @Composable
@@ -3456,10 +3575,20 @@ private fun SearchOutputCard(content: String) {
     }
 }
 @Composable
-private fun ToolTextCard(title: String, detail: String, diff: Boolean) {
+private fun ToolTextCard(title: String, detail: String, diff: Boolean, payloadRef: String = "") {
     var expanded by remember { mutableStateOf(false) }
-    val displayDetail = remember(detail) { NativeUiRenderSafety.sanitizeToolDetail(detail) }
-    val failed = detail.contains("failed", true) || detail.contains("error", true) || Regex("exit [1-9]").containsMatchIn(detail)
+    var loadedDetail by remember(payloadRef) { mutableStateOf<String?>(null) }
+    LaunchedEffect(expanded, payloadRef) {
+        if (expanded && payloadRef.isNotBlank() && loadedDetail == null) {
+            loadedDetail = withContext(Dispatchers.Default) { NativeLargePayloadStore.get(payloadRef) }
+        } else if (!expanded && loadedDetail != null) {
+            // Release the large String from Compose-local state after collapse.
+            loadedDetail = null
+        }
+    }
+    val resolvedDetail = loadedDetail ?: detail
+    val displayDetail = remember(resolvedDetail) { NativeUiRenderSafety.sanitizeToolDetail(resolvedDetail) }
+    val failed = resolvedDetail.contains("failed", true) || resolvedDetail.contains("error", true) || Regex("exit [1-9]").containsMatchIn(resolvedDetail)
     val accent = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
         Column {
@@ -3492,9 +3621,14 @@ private fun ToolTextCard(title: String, detail: String, diff: Boolean) {
 }
 @Composable
 private fun DiffText(diff: String) {
+    var visibleLineLimit by remember(diff) { mutableIntStateOf(300) }
+    val visibleLines = remember(diff, visibleLineLimit) {
+        diff.lineSequence().take(visibleLineLimit + 1).toList()
+    }
+    val hasMore = visibleLines.size > visibleLineLimit
     SelectionContainer {
         Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-            diff.lineSequence().forEach { line ->
+            visibleLines.take(visibleLineLimit).forEach { line ->
                 val background = when {
                     line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
                     line.startsWith("+") -> Color(0xFFD8F3DC)
@@ -3513,6 +3647,11 @@ private fun DiffText(diff: String) {
                     style = MaterialTheme.typography.bodySmall,
                     color = foreground,
                 )
+            }
+            if (hasMore) {
+                TextButton(onClick = { visibleLineLimit += 300 }) {
+                    Text(nativeText(LocalNativeLanguage.current, "\u52a0\u8f7d\u66f4\u591a diff", "Load more diff"))
+                }
             }
         }
     }

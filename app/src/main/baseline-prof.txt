@@ -2,6 +2,7 @@
 # Keep rules app-owned and narrow; AndroidX/Compose dependencies ship their own profiles.
 Lcom/termux/app/CodexChatActivity;
 HSPLcom/termux/app/CodexChatActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLcom/termux/app/CodexChatActivity;->onResume()V
 HPLcom/termux/app/CodexChatActivity;->onEvent(Ljava/lang/String;Ljava/lang/String;)V
 Lcom/termux/app/CodexChatScreenKt;
 Lcom/termux/app/CodexAppServerBridge;
@@ -15,3 +16,23 @@ HPLcom/termux/app/NativeCommandPresentation;->rawCommand(Lorg/json/JSONObject;)L
 Lcom/termux/app/NativePermissionMode;
 HPLcom/termux/app/NativePermissionMode;->applyTurnParams(Lorg/json/JSONObject;Ljava/lang/String;Ljava/lang/String;)Lorg/json/JSONObject;
 Lcom/termux/app/NativeApprovalProtocol;
+
+Lcom/termux/app/NativeCommandOutputStore;
+HPLcom/termux/app/NativeCommandOutputStore;->compactCommandItem(Lorg/json/JSONObject;)Ljava/lang/String;
+HPLcom/termux/app/NativeCommandOutputStore;->get(Ljava/lang/String;)Ljava/lang/String;
+
+Lcom/termux/app/NativeHistoryParser;
+HPLcom/termux/app/NativeHistoryParser;->parse(Lorg/json/JSONArray;)Lcom/termux/app/NativeHistorySnapshot;
+Lcom/termux/app/NativeHistorySnapshotCache;
+HPLcom/termux/app/NativeHistorySnapshotCache;->get(Ljava/lang/String;)Lcom/termux/app/NativeHistorySnapshot;
+
+Lcom/termux/app/NativeStreamingMarkdownAccumulator;
+HPLcom/termux/app/NativeStreamingMarkdownAccumulator;->update(Ljava/lang/String;Z)Lcom/termux/app/NativeStreamingMarkdownSnapshot;
+Lcom/termux/app/NativeProviderSync;
+HPLcom/termux/app/NativeProviderSync;->configurationFingerprint(Lcom/termux/app/CodexProviderStore$Profile;Z)Ljava/lang/String;
+HPLcom/termux/app/NativeProviderSync;->modelOptions(Lcom/termux/app/CodexProviderStore$Profile;)Ljava/util/List;
+
+Lcom/termux/app/NativeLargePayloadStore;
+HPLcom/termux/app/NativeLargePayloadStore;->compactToolItem(Lorg/json/JSONObject;)Ljava/lang/String;
+HPLcom/termux/app/NativeLargePayloadStore;->compactSubagentHistoryResult(Lorg/json/JSONObject;)Ljava/lang/String;
+HPLcom/termux/app/NativeLargePayloadStore;->subagentPage(Ljava/lang/String;II)Lcom/termux/app/NativeLargePayloadStore$SubagentPage;

@@ -10,12 +10,14 @@ final class CodexNativeRuntime {
     private static CodexAppServerBridge bridge;
     private static String fingerprint;
     private static Context appContext;
+    private static boolean lastAttachRecreatedBridge;
 
     private CodexNativeRuntime() {}
 
     static synchronized CodexAppServerBridge attach(
             Activity activity,
             CodexAppServerBridge.EventListener listener,
+            String configurationFingerprint,
             String baseUrl,
             String apiKey,
             String model,
@@ -27,12 +29,13 @@ final class CodexNativeRuntime {
             Map<String, String> transportEfforts,
             boolean preventRecursiveSubagents) {
         String requestedFingerprint = String.join("\n",
-            value(baseUrl), value(apiKey), value(model), value(apiFormat),
+            value(configurationFingerprint), value(baseUrl), value(apiKey), value(model), value(apiFormat),
             String.valueOf(routeThroughMihomo), String.valueOf(forwardReasoningContext),
             String.valueOf(ultraSubagentLimit), String.valueOf(normalSubagentLimit),
             String.valueOf(transportEfforts), String.valueOf(preventRecursiveSubagents));
         if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
         appContext = activity.getApplicationContext();
+        lastAttachRecreatedBridge = bridge == null;
         if (bridge == null) {
             CodexTaskStore.markInterruptedTasks(activity.getApplicationContext());
             bridge = new CodexAppServerBridge(activity, listener);
@@ -53,6 +56,8 @@ final class CodexNativeRuntime {
 
     static synchronized boolean exists() { return bridge != null; }
 
+    static synchronized boolean lastAttachRecreatedBridge() { return lastAttachRecreatedBridge; }
+
     static synchronized boolean isRunning() {
         return bridge != null && bridge.isRunning();
     }
@@ -66,6 +71,7 @@ final class CodexNativeRuntime {
         if (bridge != null) bridge.stop();
         bridge = null;
         fingerprint = null;
+        lastAttachRecreatedBridge = false;
         if (context != null) {
             CodexTaskStore.markInterruptedTasks(context);
             CodexOverlayService.syncKeepAlive(context);

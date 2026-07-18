@@ -4,18 +4,24 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.webkit.WebView
 import android.widget.Toast
 import com.termux.BuildConfig
+import com.termux.shared.termux.TermuxConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -34,7 +40,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.rerere.hugeicons.HugeIcons
@@ -52,7 +61,13 @@ import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tick02
 
-private enum class SettingsPage { ROOT, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI }
+private enum class SettingsPage { ROOT, THEME, CHAT_BACKGROUND, OVERLAY, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY }
+
+private enum class CodexDependentFeature {
+    WEB_UI,
+    TERMUX,
+    SETUP,
+}
 
 class NativeSettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,21 +79,42 @@ class NativeSettingsActivity : ComponentActivity() {
             var page by remember { mutableStateOf(SettingsPage.ROOT) }
             var editingProfileId by remember { mutableStateOf<String?>(null) }
             var providerRevision by remember { mutableIntStateOf(0) }
-            var theme by remember { mutableStateOf(prefs.getString(KEY_THEME, "system").orEmpty()) }
+            var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
+            var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
+            var chatBackground by remember { mutableStateOf(FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value) }
             var language by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "system").orEmpty()) }
             var animations by remember { mutableStateOf(prefs.getBoolean(KEY_STREAM_ANIMATIONS, true)) }
             var reasoning by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING, true)) }
             var follow by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOLLOW, true)) }
             var dialog by remember { mutableStateOf<String?>(null) }
+            var missingCliFeature by remember { mutableStateOf<CodexDependentFeature?>(null) }
+            var codexCliInstalled by remember { mutableStateOf(isCodexCliInstalled()) }
             val lang = resolveLanguage(language)
+            val requestCodexFeature: (CodexDependentFeature) -> Unit = { feature ->
+                if (codexCliInstalled || isCodexCliInstalled()) {
+                    codexCliInstalled = true
+                    when (feature) {
+                        CodexDependentFeature.WEB_UI -> openWebUi()
+                        CodexDependentFeature.TERMUX -> openTermux()
+                        CodexDependentFeature.SETUP -> Unit
+                    }
+                } else {
+                    missingCliFeature = feature
+                }
+            }
             val navigateBack = {
                 page = when (page) {
                     SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
-                    SettingsPage.MODEL_CONFIGS, SettingsPage.WEB_UI -> SettingsPage.ROOT
+                    SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
+                    SettingsPage.THEME, SettingsPage.OVERLAY, SettingsPage.MODEL_CONFIGS, SettingsPage.WEB_UI, SettingsPage.PROXY -> SettingsPage.ROOT
                     SettingsPage.ROOT -> { finish(); SettingsPage.ROOT }
                 }
             }
-            FcodeChatTheme(theme, lang, animations, reasoning, follow) {
+            FcodeChatTheme(
+                theme, lang, animations, reasoning, follow,
+                colorPalette = colorPalette,
+                chatBackground = chatBackground,
+            ) {
                 BackHandler(onBack = navigateBack)
                 AnimatedContent(
                     targetState = page,
@@ -87,11 +123,16 @@ class NativeSettingsActivity : ComponentActivity() {
                 ) { target ->
                     when (target) {
                         SettingsPage.ROOT -> SettingsRootPage(
-                            lang, providerStore.active(), theme, animations, reasoning, follow,
+                            lang, providerStore.active(), theme, colorPalette, animations, reasoning, follow,
                             onBack = { finish() },
                             onModels = { page = SettingsPage.MODEL_CONFIGS },
                             onWebUi = { page = SettingsPage.WEB_UI },
-                            onTheme = { dialog = "theme" },
+                            onTermux = { requestCodexFeature(CodexDependentFeature.TERMUX) },
+                            onInstallCodexCli = { requestCodexFeature(CodexDependentFeature.SETUP) },
+                            codexCliInstalled = codexCliInstalled,
+                            onProxy = { page = SettingsPage.PROXY },
+                            onOverlay = { page = SettingsPage.OVERLAY },
+                            onTheme = { page = SettingsPage.THEME },
                             onLanguage = { dialog = "language" },
                             onTypography = { dialog = "typography" },
                             onAnimations = { animations = it; prefs.edit().putBoolean(KEY_STREAM_ANIMATIONS, it).apply() },
@@ -99,6 +140,36 @@ class NativeSettingsActivity : ComponentActivity() {
                             onFollow = { follow = it; prefs.edit().putBoolean(KEY_AUTO_FOLLOW, it).apply() },
                             prefs = prefs,
                             onAbout = { dialog = "about" },
+                        )
+                        SettingsPage.THEME -> ThemeSettingsPage(
+                            lang = lang,
+                            colorMode = theme,
+                            paletteValue = colorPalette,
+                            backgroundValue = chatBackground,
+                            onBack = navigateBack,
+                            onColorModeChange = { value ->
+                                theme = FcodeAppearancePreferences.normalizeColorMode(value)
+                                prefs.edit().putString(KEY_THEME, theme).apply()
+                            },
+                            onPaletteChange = { value ->
+                                colorPalette = FcodeColorPalette.from(value).value
+                                prefs.edit().putString(FcodeAppearancePreferences.COLOR_PALETTE, colorPalette).apply()
+                            },
+                            onOpenChatBackground = { page = SettingsPage.CHAT_BACKGROUND },
+                        )
+                        SettingsPage.CHAT_BACKGROUND -> ChatBackgroundSettingsPage(
+                            lang = lang,
+                            selectedValue = chatBackground,
+                            onBack = navigateBack,
+                            onSelected = { value ->
+                                chatBackground = FcodeChatBackgroundStyle.from(value).value
+                                prefs.edit().putString(FcodeAppearancePreferences.CHAT_BACKGROUND, chatBackground).apply()
+                            },
+                        )
+                        SettingsPage.OVERLAY -> OverlaySettingsPage(
+                            lang = lang,
+                            prefs = prefs,
+                            onBack = navigateBack,
                         )
                         SettingsPage.MODEL_CONFIGS -> ModelConfigurationsPage(
                             lang, providerStore.all(), providerStore.active()?.id, providerRevision,
@@ -115,20 +186,21 @@ class NativeSettingsActivity : ComponentActivity() {
                                 onDeleted = { providerRevision++; page = SettingsPage.MODEL_CONFIGS },
                             )
                         }
+                        SettingsPage.PROXY -> ProxySettingsPage(
+                            lang = lang,
+                            prefs = prefs,
+                            onBack = navigateBack,
+                            onOpenDashboard = { startActivity(Intent(this@NativeSettingsActivity, MihomoDashboardActivity::class.java)) },
+                        )
                         SettingsPage.WEB_UI -> WebUiSettingsPage(
                             lang, prefs, providerStore.active(), navigateBack,
-                            onOpenWebUi = { openWebUi() },
+                            onOpenWebUi = { requestCodexFeature(CodexDependentFeature.WEB_UI) },
                             onOpenDashboard = { startActivity(Intent(this@NativeSettingsActivity, MihomoDashboardActivity::class.java)) },
                             onClearCache = { resetWebUiPreferences(lang) },
                         )
                     }
                 }
                 when (dialog) {
-                    "theme" -> ChoiceDialog(
-                        tr(lang, "选择主题", "Choose theme"),
-                        listOf("system" to tr(lang, "跟随系统", "System"), "light" to tr(lang, "浅色", "Light"), "dark" to tr(lang, "深色", "Dark")),
-                        theme, { dialog = null },
-                    ) { theme = it; prefs.edit().putString(KEY_THEME, it).apply(); dialog = null }
                     "language" -> ChoiceDialog(
                         tr(lang, "选择语言", "Choose language"),
                         listOf("system" to tr(lang, "跟随系统", "System"), "zh" to "简体中文", "en" to "English"),
@@ -145,9 +217,30 @@ class NativeSettingsActivity : ComponentActivity() {
                         lang, { dialog = null },
                     )
                 }
+                missingCliFeature?.let { feature ->
+                    MissingCodexCliDialog(
+                        lang = lang,
+                        feature = feature,
+                        onDismiss = { missingCliFeature = null },
+                        onInstall = {
+                            missingCliFeature = null
+                            CodexInstaller.setupBootstrapIfNeeded(this@NativeSettingsActivity) {
+                                codexCliInstalled = isCodexCliInstalled()
+                                when (feature) {
+                                    CodexDependentFeature.WEB_UI -> openWebUi()
+                                    CodexDependentFeature.TERMUX -> openTermux()
+                                    CodexDependentFeature.SETUP -> Unit
+                                }
+                            }
+                        },
+                    )
+                }
             }
         }
     }
+
+    private fun isCodexCliInstalled(): Boolean =
+        File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex").canExecute()
 
     private fun openWebUi() {
         CodexNativeRuntime.shutdown()
@@ -155,6 +248,15 @@ class NativeSettingsActivity : ComponentActivity() {
             .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
             // Recreate the legacy host so its EditText-backed launch state is synchronized
             // from the profile that may just have been edited on this native screen.
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        finish()
+    }
+
+    private fun openTermux() {
+        CodexNativeRuntime.shutdown()
+        startActivity(Intent(this, CodexHomeActivity::class.java)
+            .setAction(CodexHomeActivity.ACTION_OPEN_TERMUX)
+            // Recreate the host so the terminal proxy uses the latest provider settings.
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         finish()
     }
@@ -175,17 +277,835 @@ class NativeSettingsActivity : ComponentActivity() {
     }
 }
 
+private data class OverlayGestureSetting(
+    val title: String,
+    val key: String,
+    val fallback: String,
+)
+
+@Composable
+private fun OverlaySettingsPage(
+    lang: String,
+    prefs: SharedPreferences,
+    onBack: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var permissionGranted by remember { mutableStateOf(canDrawOverlays(context)) }
+    var overlayEnabled by remember {
+        mutableStateOf(prefs.getBoolean("overlay_enabled", false) && permissionGranted)
+    }
+    var edgeSnap by remember { mutableStateOf(prefs.getBoolean("overlay_edge_snap", true)) }
+    var completionBubble by remember { mutableStateOf(prefs.getBoolean("completion_bubble", true)) }
+    var completionNotification by remember { mutableStateOf(prefs.getBoolean("completion_notification", false)) }
+    var keepAlive by remember {
+        mutableStateOf(prefs.getBoolean(CodexOverlayService.PREF_NATIVE_TASK_KEEP_ALIVE, true))
+    }
+    var batteryUnrestricted by remember { mutableStateOf(isBatteryUnrestricted(context)) }
+    var selectedGesture by remember { mutableStateOf<OverlayGestureSetting?>(null) }
+    val gestureValues = remember {
+        mutableStateMapOf(
+            "overlay_ball_tap_action" to prefs.getString("overlay_ball_tap_action", "tasks").orEmpty(),
+            "overlay_ball_double_action" to prefs.getString("overlay_ball_double_action", "open").orEmpty(),
+            "overlay_ball_long_action" to prefs.getString("overlay_ball_long_action", "snap").orEmpty(),
+            "overlay_bubble_tap_action" to prefs.getString("overlay_bubble_tap_action", "open").orEmpty(),
+            "overlay_bubble_double_action" to prefs.getString("overlay_bubble_double_action", "toggle_bubble").orEmpty(),
+            "overlay_bubble_long_action" to prefs.getString("overlay_bubble_long_action", "open").orEmpty(),
+        )
+    }
+
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        permissionGranted = canDrawOverlays(context)
+        if (permissionGranted) {
+            prefs.edit().putBoolean("overlay_enabled", true).putBoolean("overlay_enable_pending", false).apply()
+            overlayEnabled = true
+            CodexOverlayService.start(context)
+            Toast.makeText(context, tr(lang, "Codex 悬浮窗已开启", "Codex floating window enabled"), Toast.LENGTH_SHORT).show()
+        } else {
+            prefs.edit().putBoolean("overlay_enabled", false).putBoolean("overlay_enable_pending", false).apply()
+            overlayEnabled = false
+            Toast.makeText(context, tr(lang, "尚未获得悬浮窗权限", "Floating window permission was not granted"), Toast.LENGTH_SHORT).show()
+        }
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        completionNotification = granted
+        prefs.edit().putBoolean("completion_notification", granted).apply()
+        if (!granted) Toast.makeText(context, tr(lang, "需要通知权限才能发送完成提醒", "Notification permission is required for completion alerts"), Toast.LENGTH_SHORT).show()
+    }
+    val batterySettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        batteryUnrestricted = isBatteryUnrestricted(context)
+    }
+
+    fun enableOverlay() {
+        permissionGranted = canDrawOverlays(context)
+        if (permissionGranted) {
+            prefs.edit().putBoolean("overlay_enabled", true).putBoolean("overlay_enable_pending", false).apply()
+            overlayEnabled = true
+            CodexOverlayService.start(context)
+            Toast.makeText(context, tr(lang, "Codex 悬浮窗已开启", "Codex floating window enabled"), Toast.LENGTH_SHORT).show()
+            return
+        }
+        prefs.edit().putBoolean("overlay_enable_pending", true).apply()
+        runCatching {
+            overlayPermissionLauncher.launch(
+                Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}"),
+                ),
+            )
+        }.onFailure {
+            prefs.edit().putBoolean("overlay_enable_pending", false).apply()
+            Toast.makeText(context, tr(lang, "无法打开悬浮窗权限设置", "Unable to open floating window permission settings"), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun disableOverlay() {
+        prefs.edit().putBoolean("overlay_enabled", false).putBoolean("overlay_enable_pending", false).apply()
+        overlayEnabled = false
+        CodexOverlayService.stop(context)
+        Toast.makeText(context, tr(lang, "悬浮窗已关闭", "Floating window disabled"), Toast.LENGTH_SHORT).show()
+    }
+
+    SettingsScaffold(
+        tr(lang, "悬浮窗与后台", "Floating window & background"),
+        tr(lang, "悬浮球、任务提醒、手势与后台连接", "Bubble, task alerts, gestures and background connection"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item {
+                OverlayStatusCard(
+                    lang = lang,
+                    enabled = overlayEnabled,
+                    permissionGranted = permissionGranted,
+                    onAction = { if (overlayEnabled) disableOverlay() else enableOverlay() },
+                )
+            }
+            item { SettingsSection(tr(lang, "悬浮球", "Floating bubble")) }
+            item {
+                ToggleSettingsRow(
+                    HugeIcons.Sparkles,
+                    tr(lang, "启用悬浮图标", "Enable floating icon"),
+                    if (permissionGranted) tr(lang, "在其他应用上层显示 Codex 悬浮球", "Show the Codex bubble above other apps")
+                    else tr(lang, "开启时将跳转系统页面申请显示权限", "Enabling opens the system overlay permission page"),
+                    overlayEnabled,
+                ) { enabled -> if (enabled) enableOverlay() else disableOverlay() }
+            }
+            item {
+                ToggleSettingsRow(
+                    HugeIcons.ArrowRight01,
+                    tr(lang, "拖动后自动贴边", "Snap to edge after dragging"),
+                    tr(lang, "松手后吸附到最近边缘，并按屏幕高度比例保存位置", "Attach to the nearest edge and preserve the vertical position"),
+                    edgeSnap,
+                ) {
+                    edgeSnap = it
+                    prefs.edit().putBoolean("overlay_edge_snap", it).apply()
+                }
+            }
+            item { SettingsSection(tr(lang, "悬浮球手势", "Bubble gestures")) }
+            items(overlayBallGestureSettings(lang), key = { it.key }) { setting ->
+                NavigationSettingsRow(
+                    HugeIcons.Sparkles,
+                    setting.title,
+                    overlayActionLabel(lang, gestureValues[setting.key] ?: setting.fallback),
+                ) { selectedGesture = setting }
+            }
+            item { SettingsSection(tr(lang, "任务气泡手势", "Task bubble gestures")) }
+            items(overlayTaskBubbleGestureSettings(lang), key = { it.key }) { setting ->
+                NavigationSettingsRow(
+                    HugeIcons.Code,
+                    setting.title,
+                    overlayActionLabel(lang, gestureValues[setting.key] ?: setting.fallback),
+                ) { selectedGesture = setting }
+            }
+            item { SettingsSection(tr(lang, "任务完成提醒", "Task completion alerts")) }
+            item {
+                ToggleSettingsRow(
+                    HugeIcons.Sparkles,
+                    tr(lang, "悬浮任务气泡", "Floating task bubble"),
+                    tr(lang, "任务完成时在悬浮图标旁显示完成气泡", "Show a completion bubble beside the floating icon"),
+                    completionBubble,
+                ) {
+                    completionBubble = it
+                    prefs.edit().putBoolean("completion_bubble", it).apply()
+                }
+            }
+            item {
+                ToggleSettingsRow(
+                    HugeIcons.Refresh03,
+                    tr(lang, "系统完成通知", "System completion notification"),
+                    tr(lang, "任务完成时发送可点击的系统通知", "Send a tappable system notification when a task completes"),
+                    completionNotification,
+                ) { enabled ->
+                    if (enabled && android.os.Build.VERSION.SDK_INT >= 33 &&
+                        androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        completionNotification = enabled
+                        prefs.edit().putBoolean("completion_notification", enabled).apply()
+                    }
+                }
+            }
+            item { SettingsSection(tr(lang, "后台连接", "Background connection")) }
+            item {
+                ToggleSettingsRow(
+                    HugeIcons.Refresh03,
+                    tr(lang, "任务后台保持", "Background task keep-alive"),
+                    tr(lang, "任务运行时保持 CPU 与网络连接；悬浮窗开启时服务会常驻", "Keep CPU and network active while tasks run; the service stays active with the overlay"),
+                    keepAlive,
+                ) {
+                    keepAlive = it
+                    prefs.edit().putBoolean(CodexOverlayService.PREF_NATIVE_TASK_KEEP_ALIVE, it).apply()
+                    CodexOverlayService.syncKeepAlive(context)
+                }
+            }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.Settings03,
+                    tr(lang, "电池优化", "Battery optimization"),
+                    if (batteryUnrestricted) tr(lang, "已允许后台不受限", "Background use is unrestricted")
+                    else tr(lang, "受系统限制 · 建议允许后台运行", "System restricted · allowing background use is recommended"),
+                ) {
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M || batteryUnrestricted) {
+                        Toast.makeText(context, tr(lang, "Codex 已允许后台不受限", "Codex is already unrestricted in the background"), Toast.LENGTH_SHORT).show()
+                    } else {
+                        val request = Intent(
+                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}"),
+                        )
+                        runCatching { batterySettingsLauncher.launch(request) }
+                            .onFailure {
+                                batterySettingsLauncher.launch(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                            }
+                    }
+                }
+            }
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+                ) {
+                    Text(
+                        tr(lang, "悬浮窗开启后会显示低优先级常驻通知，并使用 CPU 与 Wi‑Fi 保持来降低切到后台后断开连接的概率。", "When enabled, the floating window uses a low-priority foreground notification plus CPU and Wi-Fi locks to reduce background disconnects."),
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+
+    selectedGesture?.let { setting ->
+        ChoiceDialog(
+            title = setting.title,
+            options = overlayActionOptions(lang),
+            selected = gestureValues[setting.key] ?: setting.fallback,
+            onDismiss = { selectedGesture = null },
+        ) { value ->
+            gestureValues[setting.key] = value
+            prefs.edit().putString(setting.key, value).apply()
+            selectedGesture = null
+        }
+    }
+}
+
+@Composable
+private fun OverlayStatusCard(
+    lang: String,
+    enabled: Boolean,
+    permissionGranted: Boolean,
+    onAction: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (enabled) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        border = BorderStroke(1.dp, if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = .36f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)),
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(58.dp),
+                    shape = CircleShape,
+                    color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            HugeIcons.Sparkles,
+                            null,
+                            Modifier.size(27.dp),
+                            tint = if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Spacer(Modifier.width(15.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            enabled -> tr(lang, "悬浮窗正在运行", "Floating window is running")
+                            permissionGranted -> tr(lang, "悬浮窗已关闭", "Floating window is off")
+                            else -> tr(lang, "需要显示权限", "Display permission required")
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        when {
+                            enabled -> tr(lang, "可拖动悬浮球并查看任务状态", "Drag the bubble and inspect task status")
+                            permissionGranted -> tr(lang, "权限已就绪，可以随时开启", "Permission is ready; enable it at any time")
+                            else -> tr(lang, "系统需要允许 Fcode 显示在其他应用上层", "Android must allow Fcode to appear above other apps")
+                        },
+                        Modifier.padding(top = 3.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Button(
+                onClick = onAction,
+                modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text(
+                    when {
+                        enabled -> tr(lang, "关闭悬浮窗", "Disable floating window")
+                        permissionGranted -> tr(lang, "开启悬浮窗", "Enable floating window")
+                        else -> tr(lang, "授权并开启", "Grant permission & enable")
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun overlayBallGestureSettings(lang: String): List<OverlayGestureSetting> = listOf(
+    OverlayGestureSetting(tr(lang, "单击悬浮球", "Tap floating bubble"), "overlay_ball_tap_action", "tasks"),
+    OverlayGestureSetting(tr(lang, "双击悬浮球", "Double-tap floating bubble"), "overlay_ball_double_action", "open"),
+    OverlayGestureSetting(tr(lang, "长按悬浮球", "Long-press floating bubble"), "overlay_ball_long_action", "snap"),
+)
+
+private fun overlayTaskBubbleGestureSettings(lang: String): List<OverlayGestureSetting> = listOf(
+    OverlayGestureSetting(tr(lang, "单击任务气泡", "Tap task bubble"), "overlay_bubble_tap_action", "open"),
+    OverlayGestureSetting(tr(lang, "双击任务气泡", "Double-tap task bubble"), "overlay_bubble_double_action", "toggle_bubble"),
+    OverlayGestureSetting(tr(lang, "长按任务气泡", "Long-press task bubble"), "overlay_bubble_long_action", "open"),
+)
+
+private fun overlayActionOptions(lang: String): List<Pair<String, String>> = listOf(
+    "tasks" to tr(lang, "显示当前任务列表", "Show current tasks"),
+    "open" to tr(lang, "打开 Codex", "Open Codex"),
+    "snap" to tr(lang, "贴到最近屏幕边缘", "Snap to nearest edge"),
+    "toggle_bubble" to tr(lang, "显示或隐藏任务气泡", "Show or hide task bubble"),
+    "hide_overlay" to tr(lang, "关闭悬浮窗", "Disable floating window"),
+    "none" to tr(lang, "不执行操作", "Do nothing"),
+)
+
+private fun overlayActionLabel(lang: String, value: String): String =
+    overlayActionOptions(lang).firstOrNull { it.first == value }?.second
+        ?: tr(lang, "不执行操作", "Do nothing")
+
+private fun canDrawOverlays(context: android.content.Context): Boolean =
+    android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M || android.provider.Settings.canDrawOverlays(context)
+
+private fun isBatteryUnrestricted(context: android.content.Context): Boolean {
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) return true
+    val power = context.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+    return power?.isIgnoringBatteryOptimizations(context.packageName) == true
+}
+
+@Composable
+private fun ThemeSettingsPage(
+    lang: String,
+    colorMode: String,
+    paletteValue: String,
+    backgroundValue: String,
+    onBack: () -> Unit,
+    onColorModeChange: (String) -> Unit,
+    onPaletteChange: (String) -> Unit,
+    onOpenChatBackground: () -> Unit,
+) {
+    val selectedPalette = FcodeColorPalette.from(paletteValue)
+    val selectedBackground = FcodeChatBackgroundStyle.from(backgroundValue)
+    val dark = currentFcodeDarkMode(colorMode)
+    SettingsScaffold(
+        tr(lang, "主题与外观", "Theme & appearance"),
+        tr(lang, "配色、Markdown 与聊天背景", "Color, Markdown and chat background"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item {
+                ThemeOverviewCard(
+                    lang = lang,
+                    palette = selectedPalette,
+                    colorMode = colorMode,
+                    background = selectedBackground,
+                )
+            }
+            item { SettingsSection(tr(lang, "界面风格", "Interface style")) }
+            item { InterfaceStyleCard(lang) }
+            item { SettingsSection(tr(lang, "颜色模式", "Color mode")) }
+            item {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(
+                        "system" to tr(lang, "跟随系统", "System"),
+                        "light" to tr(lang, "浅色", "Light"),
+                        "dark" to tr(lang, "深色", "Dark"),
+                    ).forEach { (value, label) ->
+                        val selected = colorMode == value
+                        Surface(
+                            onClick = { onColorModeChange(value) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                            border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .45f)) else null,
+                        ) {
+                            Column(
+                                Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                if (selected) Icon(HugeIcons.Tick02, null, Modifier.size(17.dp))
+                                else Spacer(Modifier.height(17.dp))
+                                Text(label, Modifier.padding(top = 5.dp), style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                    }
+                }
+            }
+            item { SettingsSection(tr(lang, "配色主题", "Color palette")) }
+            item {
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    FcodeColorPalette.entries.chunked(2).forEach { row ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            row.forEach { palette ->
+                                PaletteChoiceCard(
+                                    modifier = Modifier.weight(1f),
+                                    lang = lang,
+                                    palette = palette,
+                                    dark = dark,
+                                    selected = palette == selectedPalette,
+                                    onClick = { onPaletteChange(palette.value) },
+                                )
+                            }
+                            if (row.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+            item { SettingsSection(tr(lang, "Markdown 配色", "Markdown colors")) }
+            item { MarkdownThemePreview(lang) }
+            item { SettingsSection(tr(lang, "聊天背景", "Chat background")) }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.Sparkles,
+                    tr(lang, "背景与预览", "Background & preview"),
+                    "${backgroundLabel(lang, selectedBackground)} · ${tr(lang, "三级页面实时预览", "Live preview on the detail page")}",
+                    onOpenChatBackground,
+                )
+            }
+            item { Spacer(Modifier.height(30.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ThemeOverviewCard(
+    lang: String,
+    palette: FcodeColorPalette,
+    colorMode: String,
+    background: FcodeChatBackgroundStyle,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(28.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .65f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Box(Modifier.fillMaxWidth().height(190.dp)) {
+            FcodeChatBackdrop(Modifier.fillMaxSize(), background)
+            Column(Modifier.fillMaxSize().padding(20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                        Icon(HugeIcons.Sparkles, null, Modifier.padding(10.dp).size(20.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(tr(lang, "当前外观", "Current appearance"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${paletteLabel(lang, palette)} · ${themeLabel(lang, colorMode)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Surface(
+                    shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 6.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = .92f),
+                ) {
+                    Text(
+                        tr(lang, "主题、Markdown 和背景会同步更新。", "Theme, Markdown and background update together."),
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InterfaceStyleCard(lang: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Column {
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                SettingsIcon(HugeIcons.Sparkles)
+                Spacer(Modifier.width(13.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Material Expressive", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text(tr(lang, "当前设计风格", "Current design style"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primaryContainer) {
+                    Text(tr(lang, "使用中", "Active"), Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f))
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(Modifier.size(38.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                    Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+                Spacer(Modifier.width(13.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(tr(lang, "液态玻璃", "Liquid Glass"), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(tr(lang, "主题接口已预留，接入后无需重做页面", "Theme hooks are ready; pages will not need rebuilding"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(tr(lang, "待接入", "Planned"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PaletteChoiceCard(
+    modifier: Modifier,
+    lang: String,
+    palette: FcodeColorPalette,
+    dark: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val scheme = fcodeColorScheme(palette, dark)
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .62f) else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .55f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .48f)),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(paletteLabel(lang, palette), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                if (selected) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+            Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                listOf(scheme.primary, scheme.secondary, scheme.tertiary, scheme.surfaceContainerHighest).forEach { color ->
+                    Surface(Modifier.size(24.dp), shape = CircleShape, color = color, border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = .65f))) {}
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownThemePreview(lang: String) {
+    val colors = LocalFcodeMarkdownColors.current
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(tr(lang, "Markdown 预览", "Markdown preview"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = colors.text)
+            Text(tr(lang, "正文颜色会保持足够对比度，链接与列表跟随当前配色。", "Body text keeps sufficient contrast; links and lists follow the selected palette."), style = MaterialTheme.typography.bodyMedium, color = colors.secondaryText)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("• ", color = colors.listMarker, fontWeight = FontWeight.Bold)
+                Text(tr(lang, "列表标记", "List marker"), color = colors.text)
+                Spacer(Modifier.width(10.dp))
+                Text(tr(lang, "主题链接", "Theme link"), color = colors.link, fontWeight = FontWeight.Medium)
+            }
+            Surface(shape = RoundedCornerShape(9.dp), color = colors.inlineCodeBackground) {
+                Text("codex --model gpt-5", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = colors.inlineCodeText, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            }
+            Row {
+                Surface(Modifier.width(4.dp).height(42.dp), shape = RoundedCornerShape(50), color = colors.quote) {}
+                Text(tr(lang, "引用颜色、行内代码和代码块均独立适配浅色与深色模式。", "Quotes, inline code and code blocks adapt independently to light and dark modes."), Modifier.padding(start = 11.dp), style = MaterialTheme.typography.bodySmall, color = colors.secondaryText)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatBackgroundSettingsPage(
+    lang: String,
+    selectedValue: String,
+    onBack: () -> Unit,
+    onSelected: (String) -> Unit,
+) {
+    val selected = FcodeChatBackgroundStyle.from(selectedValue)
+    SettingsScaffold(
+        tr(lang, "聊天背景", "Chat background"),
+        tr(lang, "预览并选择聊天内容区域的背景", "Preview and choose the chat canvas background"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item { ChatBackgroundPreview(lang, selected) }
+            item { SettingsSection(tr(lang, "背景样式", "Background style")) }
+            item {
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    FcodeChatBackgroundStyle.entries.chunked(2).forEach { row ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            row.forEach { style ->
+                                BackgroundChoiceCard(
+                                    modifier = Modifier.weight(1f),
+                                    lang = lang,
+                                    style = style,
+                                    selected = style == selected,
+                                    onClick = { onSelected(style.value) },
+                                )
+                            }
+                            if (row.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+            item { SettingsSection(tr(lang, "动态背景", "Animated backgrounds")) }
+            item { FutureMotionPreviewCard(lang) }
+            item {
+                Text(
+                    tr(lang, "背景只应用于原生聊天内容区域，不会降低终端文字或 WebUI 的可读性。", "The background only applies to the native chat canvas and will not reduce terminal or WebUI readability."),
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ChatBackgroundPreview(lang: String, style: FcodeChatBackgroundStyle) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f)),
+    ) {
+        Box(Modifier.fillMaxWidth().height(270.dp)) {
+            FcodeChatBackdrop(Modifier.fillMaxSize(), style)
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(Modifier.size(34.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                        Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer) }
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(tr(lang, "聊天背景预览", "Chat background preview"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        Text(backgroundLabel(lang, style), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Surface(
+                    modifier = Modifier.align(Alignment.End).fillMaxWidth(.72f),
+                    shape = RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .94f),
+                ) {
+                    Text(tr(lang, "帮我整理一下这个项目。", "Help me organize this project."), Modifier.padding(13.dp), style = MaterialTheme.typography.bodyMedium)
+                }
+                Spacer(Modifier.height(10.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(.88f),
+                    shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 5.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .94f),
+                ) {
+                    Column(Modifier.padding(13.dp)) {
+                        Text(tr(lang, "我会先检查结构，再给出清晰的修改计划。", "I will inspect the structure first, then provide a clear change plan."), style = MaterialTheme.typography.bodyMedium)
+                        Text("• README  • app  • tests", Modifier.padding(top = 7.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundChoiceCard(
+    modifier: Modifier,
+    lang: String,
+    style: FcodeChatBackgroundStyle,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .65f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column {
+            Box(Modifier.fillMaxWidth().height(88.dp)) {
+                FcodeChatBackdrop(Modifier.fillMaxSize(), style)
+                Surface(
+                    modifier = Modifier.align(Alignment.Center).width(64.dp).height(24.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .9f),
+                ) {}
+            }
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(backgroundLabel(lang, style), Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                if (selected) Icon(HugeIcons.Tick02, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FutureMotionPreviewCard(lang: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .45f)),
+    ) {
+        Row(Modifier.padding(17.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(Modifier.size(44.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+            }
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Text(tr(lang, "动态预览区域已预留", "Motion preview area is ready"), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                Text(tr(lang, "未来的粒子、渐变与液态动效会直接在上方聊天预览中播放。", "Future particles, gradients and liquid motion will play directly in the chat preview above."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                Text(tr(lang, "未来", "Future"), Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+private fun paletteLabel(lang: String, palette: FcodeColorPalette): String = when (palette) {
+    FcodeColorPalette.ROSE -> tr(lang, "绯樱", "Rose")
+    FcodeColorPalette.OCEAN -> tr(lang, "海盐", "Ocean")
+    FcodeColorPalette.FOREST -> tr(lang, "森屿", "Forest")
+    FcodeColorPalette.GRAPHITE -> tr(lang, "石墨", "Graphite")
+}
+
+private fun backgroundLabel(lang: String, style: FcodeChatBackgroundStyle): String = when (style) {
+    FcodeChatBackgroundStyle.THEME -> tr(lang, "主题柔光", "Theme glow")
+    FcodeChatBackgroundStyle.AURORA -> tr(lang, "极光", "Aurora")
+    FcodeChatBackgroundStyle.MIST -> tr(lang, "薄雾", "Mist")
+    FcodeChatBackgroundStyle.GRID -> tr(lang, "坐标网格", "Grid")
+}
+
+private fun appearanceLabel(lang: String, paletteValue: String, colorMode: String): String =
+    "${paletteLabel(lang, FcodeColorPalette.from(paletteValue))} · ${themeLabel(lang, colorMode)}"
+
+@Composable
+private fun MissingCodexCliDialog(
+    lang: String,
+    feature: CodexDependentFeature,
+    onDismiss: () -> Unit,
+    onInstall: () -> Unit,
+) {
+    val reason = when (feature) {
+        CodexDependentFeature.WEB_UI -> tr(
+            lang,
+            "WebUI 需要 Codex CLI 作为本地后端，当前设备尚未安装。",
+            "WebUI needs Codex CLI as its local backend, but it is not installed on this device.",
+        )
+        CodexDependentFeature.TERMUX -> tr(
+            lang,
+            "Termux 中的 Codex 命令、API 代理和模型配置注入需要 Codex CLI，当前设备尚未安装。",
+            "Codex commands, API proxying and model configuration injection in Termux require Codex CLI, but it is not installed.",
+        )
+        CodexDependentFeature.SETUP -> tr(
+            lang,
+            "WebUI、Termux 中的 Codex 命令和模型运行能力需要 Codex CLI，当前设备尚未安装。",
+            "WebUI, Codex commands in Termux and model execution require Codex CLI, but it is not installed on this device.",
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Surface(
+                modifier = Modifier.size(48.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer,
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(HugeIcons.Code, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                }
+            }
+        },
+        title = { Text(tr(lang, "需要安装 Codex CLI", "Codex CLI required"), fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(reason)
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                ) {
+                    Text(
+                        tr(
+                            lang,
+                            "安装器将从 OpenAI 官方 GitHub Release 下载 Codex CLI。当前内置安装器仅支持 ARM64 设备，请保持网络连接。",
+                            "The installer downloads Codex CLI from the official OpenAI GitHub Release. The built-in installer currently supports ARM64 devices only; keep your network connected.",
+                        ),
+                        modifier = Modifier.padding(14.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
+        confirmButton = { Button(onClick = onInstall) { Text(tr(lang, "下载安装", "Download & install")) } },
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
 @Composable
 private fun SettingsRootPage(
     lang: String,
     provider: CodexProviderStore.Profile?,
     theme: String,
+    colorPalette: String,
     animations: Boolean,
     reasoning: Boolean,
     follow: Boolean,
     onBack: () -> Unit,
     onModels: () -> Unit,
     onWebUi: () -> Unit,
+    onTermux: () -> Unit,
+    onInstallCodexCli: () -> Unit,
+    codexCliInstalled: Boolean,
+    onProxy: () -> Unit,
+    onOverlay: () -> Unit,
     onTheme: () -> Unit,
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
@@ -196,7 +1116,6 @@ private fun SettingsRootPage(
     onAbout: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var keepAlive by remember { mutableStateOf(prefs.getBoolean(CodexOverlayService.PREF_NATIVE_TASK_KEEP_ALIVE, true)) }
     SettingsScaffold(
         tr(lang, "设置", "Settings"),
         tr(lang, "调整 Fcode 的模型、界面与运行方式", "Configure models, appearance and runtime behavior"),
@@ -205,6 +1124,16 @@ private fun SettingsRootPage(
         LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
             item { ActiveProviderCard(lang, provider, onModels) }
             item { SettingsSection(tr(lang, "服务与工具", "Services & tools")) }
+            if (!codexCliInstalled) {
+                item {
+                    NavigationSettingsRow(
+                        HugeIcons.Code,
+                        "Codex CLI",
+                        tr(lang, "未安装 · WebUI 和 Termux 需要此组件", "Not installed · required by WebUI and Termux"),
+                        onInstallCodexCli,
+                    )
+                }
+            }
             item {
                 NavigationSettingsRow(
                     HugeIcons.Sparkles,
@@ -215,8 +1144,19 @@ private fun SettingsRootPage(
                 )
             }
             item { NavigationSettingsRow(HugeIcons.Code, "WebUI", tr(lang, "入口、全屏、项目目录与缓存", "Launch, fullscreen, project root and cache"), onWebUi) }
+            item { NavigationSettingsRow(HugeIcons.Code, tr(lang, "Termux 终端", "Termux terminal"), tr(lang, "检查工具、运行命令和管理项目文件", "Inspect tools, run commands and manage project files"), onTermux) }
+            item {
+                val manager = remember { MihomoManager.get(context) }
+                val proxyStatus = when {
+                    !manager.isSupported -> tr(lang, "当前设备不支持内置内核", "Built-in core is unsupported on this device")
+                    !manager.isInstalled -> tr(lang, "未安装 · 可离线安装", "Not installed · offline install available")
+                    manager.isRunning -> tr(lang, "运行中 · 127.0.0.1:${manager.mixedPort()}", "Running · 127.0.0.1:${manager.mixedPort()}")
+                    else -> tr(lang, "已安装 · 当前已停止", "Installed · currently stopped")
+                }
+                NavigationSettingsRow(HugeIcons.Code, tr(lang, "网络与代理", "Network & proxy"), proxyStatus, onProxy)
+            }
             item { SettingsSection(tr(lang, "外观", "Appearance")) }
-            item { NavigationSettingsRow(HugeIcons.Moon02, tr(lang, "主题", "Theme"), themeLabel(lang, theme), onTheme) }
+            item { NavigationSettingsRow(HugeIcons.Moon02, tr(lang, "主题与外观", "Theme & appearance"), appearanceLabel(lang, colorPalette, theme), onTheme) }
             item { NavigationSettingsRow(HugeIcons.LanguageCircle, tr(lang, "语言", "Language"), tr(lang, "简体中文 / 跟随系统", "English / System"), onLanguage) }
             item { NavigationSettingsRow(HugeIcons.Text, tr(lang, "文字与 Markdown", "Typography & Markdown"), tr(lang, "代码、表格、列表与公式", "Code, tables, lists and math"), onTypography) }
             item { SettingsSection(tr(lang, "对话", "Conversation")) }
@@ -225,16 +1165,14 @@ private fun SettingsRootPage(
             item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "自动跟随回答", "Auto-follow output"), tr(lang, "生成时保持滚动到最新内容", "Keep the latest output visible"), follow, onFollow) }
             item { SettingsSection(tr(lang, "系统", "System")) }
             item {
-                ToggleSettingsRow(
-                    HugeIcons.Refresh03,
-                    tr(lang, "任务后台保持", "Background task keep-alive"),
-                    tr(lang, "任务执行时保持 CPU 与网络连接", "Keep CPU and network active while a task runs"),
-                    keepAlive,
-                ) {
-                    keepAlive = it
-                    prefs.edit().putBoolean(CodexOverlayService.PREF_NATIVE_TASK_KEEP_ALIVE, it).apply()
-                    CodexOverlayService.syncKeepAlive(context)
+                val overlayGranted = canDrawOverlays(context)
+                val overlayEnabled = prefs.getBoolean("overlay_enabled", false) && overlayGranted
+                val overlaySummary = when {
+                    overlayEnabled -> tr(lang, "悬浮球已开启 · 手势、提醒与后台保持", "Bubble enabled · gestures, reminders and keep-alive")
+                    !overlayGranted -> tr(lang, "需要悬浮窗权限 · 配置手势与完成提醒", "Overlay permission required · configure gestures and completion alerts")
+                    else -> tr(lang, "已关闭 · 配置手势、提醒与后台保持", "Off · configure gestures, reminders and keep-alive")
                 }
+                NavigationSettingsRow(HugeIcons.Sparkles, tr(lang, "悬浮窗与后台", "Floating window & background"), overlaySummary, onOverlay)
             }
             item { NavigationSettingsRow(HugeIcons.Settings03, tr(lang, "关于 Fcode", "About Fcode"), "${tr(lang, "版本", "Version")} ${BuildConfig.VERSION_NAME}", onAbout) }
             item { Spacer(Modifier.height(28.dp)) }
@@ -245,7 +1183,8 @@ private fun SettingsRootPage(
 @Composable
 private fun ActiveProviderCard(lang: String, provider: CodexProviderStore.Profile?, onClick: () -> Unit) {
     Card(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
     ) {
@@ -308,7 +1247,8 @@ private fun ModelConfigurationsPage(
 @Composable
 private fun ProviderCard(lang: String, profile: CodexProviderStore.Profile, active: Boolean, onEdit: () -> Unit, onActivate: () -> Unit) {
     Card(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp).clickable(onClick = onEdit),
+        onClick = onEdit,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow),
     ) {
@@ -763,7 +1703,7 @@ private fun FetchModelsDialog(
         text = {
             LazyColumn(Modifier.heightIn(max = 440.dp)) {
                 items(fetched, key = { it.id }) { model ->
-                    Surface(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onChoose(model) }, shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Surface(onClick = { onChoose(model) }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
                         Row(Modifier.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(modelDisplayName(model) ?: model.id, fontWeight = FontWeight.Medium)
@@ -850,6 +1790,595 @@ private fun openSettingsConnection(context: android.content.Context, prefs: Shar
 
 private fun modelDisplayName(model: CodexProviderStore.ModelConfig?): String? = model?.name?.trim()?.takeIf { it.isNotBlank() } ?: model?.id
 
+private enum class ProxySection { OVERVIEW, NODES, SUBSCRIPTIONS, SETTINGS }
+
+@Composable
+private fun ProxySettingsPage(
+    lang: String,
+    prefs: SharedPreferences,
+    onBack: () -> Unit,
+    onOpenDashboard: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val manager = remember { MihomoManager.get(context) }
+    val controller = remember { MihomoControllerClient(manager) }
+    val scope = rememberCoroutineScope()
+    var section by remember { mutableStateOf(ProxySection.OVERVIEW) }
+    var runtimeRevision by remember { mutableIntStateOf(0) }
+    var groupReloadKey by remember { mutableIntStateOf(0) }
+    var subscriptions by remember { mutableStateOf<List<MihomoManager.Subscription>>(emptyList()) }
+    var groups by remember { mutableStateOf<List<MihomoControllerClient.ProxyGroup>>(emptyList()) }
+    var groupsLoading by remember { mutableStateOf(false) }
+    var selectedGroupName by remember { mutableStateOf(prefs.getString("mihomo_proxy_group", "").orEmpty()) }
+    var proxySort by remember { mutableStateOf(prefs.getString("mihomo_proxy_sort", "default").orEmpty()) }
+    var routeApi by remember { mutableStateOf(prefs.getBoolean("mihomo_route_api", false)) }
+    var autoStart by remember { mutableStateOf(prefs.getBoolean("mihomo_auto_start", false)) }
+    var proxyNotice by remember { mutableStateOf(prefs.getString("proxy_notice_text", "").orEmpty()) }
+    var busyLabel by remember { mutableStateOf<String?>(null) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showAddSubscription by remember { mutableStateOf(false) }
+    var pendingDeleteSubscription by remember { mutableStateOf<MihomoManager.Subscription?>(null) }
+
+    // Observe the polling tick so external process exits/starts refresh the status card.
+    @Suppress("UNUSED_VARIABLE") val runtimeTick = runtimeRevision
+    val installed = manager.isInstalled
+    val running = manager.isRunning
+    val supported = manager.isSupported
+
+    fun runAction(
+        loading: String,
+        success: String,
+        refreshSubs: Boolean = false,
+        refreshProxyGroups: Boolean = false,
+        action: () -> Unit,
+    ) {
+        if (busyLabel != null) return
+        scope.launch {
+            busyLabel = loading
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching(action) }
+            busyLabel = null
+            if (result.isSuccess) {
+                runtimeRevision++
+                if (refreshSubs) subscriptions = withContext(kotlinx.coroutines.Dispatchers.IO) { manager.subscriptions() }
+                if (refreshProxyGroups) groupReloadKey++
+                Toast.makeText(context, success, Toast.LENGTH_SHORT).show()
+            } else {
+                errorMessage = result.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message.orEmpty()}" }
+            }
+        }
+    }
+    fun installBundle() {
+        if (!supported) {
+            errorMessage = tr(lang, "当前内置内核仅支持 ARM64（arm64-v8a）", "The bundled core currently supports ARM64 (arm64-v8a) only")
+            return
+        }
+        if (busyLabel != null) return
+        scope.launch {
+            busyLabel = tr(lang, "正在准备组件…", "Preparing components…")
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    manager.install { progress -> scope.launch { busyLabel = progress } }
+                }
+            }
+            busyLabel = null
+            if (result.isSuccess) {
+                runtimeRevision++
+                subscriptions = withContext(kotlinx.coroutines.Dispatchers.IO) { manager.subscriptions() }
+                Toast.makeText(context, tr(lang, "Mihomo 与 MetaCubeXD 已就绪", "Mihomo and MetaCubeXD are ready"), Toast.LENGTH_SHORT).show()
+            } else {
+                errorMessage = result.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message.orEmpty()}" }
+            }
+        }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            if (!manager.isInstalled) {
+                errorMessage = tr(lang, "请先安装 Mihomo 组件", "Install the Mihomo components first")
+            } else {
+                val displayName = queryDisplayName(context, uri).substringBeforeLast('.').ifBlank { tr(lang, "本地配置", "Local profile") }
+                runAction(
+                    tr(lang, "正在导入配置…", "Importing configuration…"),
+                    tr(lang, "配置已导入并启用", "Configuration imported and activated"),
+                    refreshSubs = true,
+                    refreshProxyGroups = true,
+                ) {
+                    context.contentResolver.openInputStream(uri)?.use { manager.importSubscription(displayName, it) }
+                        ?: throw java.io.IOException("Unable to open selected file")
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        subscriptions = withContext(kotlinx.coroutines.Dispatchers.IO) { manager.subscriptions() }
+        while (isActive) {
+            delay(2_000)
+            runtimeRevision++
+        }
+    }
+    LaunchedEffect(section, groupReloadKey, running) {
+        if (section == ProxySection.NODES && running) {
+            groupsLoading = true
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { controller.groups() } }
+            groupsLoading = false
+            if (result.isSuccess) {
+                groups = result.getOrDefault(emptyList())
+                val selected = groups.firstOrNull { it.name == selectedGroupName } ?: groups.firstOrNull()
+                if (selected != null && selected.name != selectedGroupName) {
+                    selectedGroupName = selected.name
+                    prefs.edit().putString("mihomo_proxy_group", selected.name).apply()
+                }
+            } else {
+                errorMessage = result.exceptionOrNull()?.message
+            }
+        } else if (!running) {
+            groups = emptyList()
+        }
+    }
+
+    SettingsScaffold(
+        tr(lang, "网络与代理", "Network & proxy"),
+        tr(lang, "Mihomo 内核、订阅与节点管理", "Mihomo core, subscriptions and node management"),
+        onBack,
+    ) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad)) {
+            ProxySectionBar(lang, section) { section = it }
+            if (busyLabel != null) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(busyLabel.orEmpty(), Modifier.padding(top = 5.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+            when (section) {
+                ProxySection.OVERVIEW -> ProxyOverviewContent(
+                    lang, manager, installed, running, supported, routeApi, subscriptions.firstOrNull { it.active }, busyLabel != null,
+                    onPrimaryAction = {
+                        when {
+                            !installed -> installBundle()
+                            running -> runAction(tr(lang, "正在停止…", "Stopping…"), tr(lang, "Mihomo 已停止", "Mihomo stopped"), refreshProxyGroups = true) { manager.stop() }
+                            else -> runAction(tr(lang, "正在启动…", "Starting…"), tr(lang, "Mihomo 已启动", "Mihomo started"), refreshProxyGroups = true) { manager.start() }
+                        }
+                    },
+                    onRouteChange = {
+                        routeApi = it; prefs.edit().putBoolean("mihomo_route_api", it).apply()
+                        if (it && installed && !running) runAction(tr(lang, "正在启动…", "Starting…"), tr(lang, "Mihomo 已启动", "Mihomo started"), refreshProxyGroups = true) { manager.start() }
+                        else if (it && !installed) errorMessage = tr(lang, "路由已开启，请先安装 Mihomo 组件", "Routing is enabled; install Mihomo first")
+                    },
+                    onSubscriptions = { section = ProxySection.SUBSCRIPTIONS },
+                    onDashboard = { if (running) onOpenDashboard() else errorMessage = tr(lang, "请先启动 Mihomo", "Start Mihomo first") },
+                )
+                ProxySection.NODES -> ProxyNodesContent(
+                    lang, installed, running, groups, groupsLoading, selectedGroupName, proxySort,
+                    onStart = { if (!installed) installBundle() else runAction(tr(lang, "正在启动…", "Starting…"), tr(lang, "Mihomo 已启动", "Mihomo started"), refreshProxyGroups = true) { manager.start() } },
+                    onRefresh = { groupReloadKey++ },
+                    onGroup = { selectedGroupName = it; prefs.edit().putString("mihomo_proxy_group", it).apply() },
+                    onSort = { proxySort = it; prefs.edit().putString("mihomo_proxy_sort", it).apply() },
+                    onTest = { group -> runAction(tr(lang, "正在测试延迟…", "Testing latency…"), tr(lang, "测速完成", "Latency test complete"), refreshProxyGroups = true) { controller.testGroup(group.name) } },
+                    onSelect = { group, node -> runAction(tr(lang, "正在切换节点…", "Switching node…"), tr(lang, "已切换到 ${node.name}", "Switched to ${node.name}"), refreshProxyGroups = true) { controller.select(group.name, node.name) } },
+                )
+                ProxySection.SUBSCRIPTIONS -> ProxySubscriptionsContent(
+                    lang, installed, subscriptions,
+                    onAdd = { if (installed) showAddSubscription = true else errorMessage = tr(lang, "请先安装 Mihomo 组件", "Install Mihomo first") },
+                    onImport = { importLauncher.launch(arrayOf("application/yaml", "text/yaml", "text/x-yaml", "text/plain", "application/octet-stream")) },
+                    onActivate = { item -> runAction(tr(lang, "正在切换订阅…", "Switching subscription…"), tr(lang, "已切换到 ${item.name}", "Switched to ${item.name}"), refreshSubs = true, refreshProxyGroups = true) { manager.activateSubscription(item.id) } },
+                    onUpdate = { item -> runAction(tr(lang, "正在更新 ${item.name}…", "Updating ${item.name}…"), tr(lang, "订阅已更新", "Subscription updated"), refreshSubs = true, refreshProxyGroups = true) { manager.updateSubscription(item.id) } },
+                    onDelete = { pendingDeleteSubscription = it },
+                )
+                ProxySection.SETTINGS -> ProxyRuntimeSettingsContent(
+                    lang, manager, installed, routeApi, autoStart, proxyNotice,
+                    onInstall = ::installBundle,
+                    onRoute = { routeApi = it; prefs.edit().putBoolean("mihomo_route_api", it).apply() },
+                    onAutoStart = { autoStart = it; prefs.edit().putBoolean("mihomo_auto_start", it).apply() },
+                    onNotice = { proxyNotice = it.take(40); prefs.edit().putString("proxy_notice_text", proxyNotice).apply() },
+                    onDashboard = { if (running) onOpenDashboard() else errorMessage = tr(lang, "请先启动 Mihomo", "Start Mihomo first") },
+                )
+            }
+        }
+    }
+
+    if (showAddSubscription) AddSubscriptionDialog(
+        lang = lang,
+        onDismiss = { showAddSubscription = false },
+        onAdd = { name, url ->
+            showAddSubscription = false
+            runAction(
+                tr(lang, "正在下载订阅…", "Downloading subscription…"),
+                tr(lang, "订阅已添加并启用", "Subscription added and activated"),
+                refreshSubs = true,
+                refreshProxyGroups = true,
+            ) { manager.addSubscription(name, url) }
+        },
+    )
+    pendingDeleteSubscription?.let { item ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteSubscription = null },
+            title = { Text(tr(lang, "删除这个订阅？", "Delete this subscription?")) },
+            text = { Text(item.name) },
+            dismissButton = { TextButton({ pendingDeleteSubscription = null }) { Text(tr(lang, "取消", "Cancel")) } },
+            confirmButton = {
+                TextButton({
+                    pendingDeleteSubscription = null
+                    runAction(tr(lang, "正在删除订阅…", "Deleting subscription…"), tr(lang, "订阅已删除", "Subscription deleted"), refreshSubs = true, refreshProxyGroups = true) { manager.deleteSubscription(item.id) }
+                }) { Text(tr(lang, "删除", "Delete"), color = MaterialTheme.colorScheme.error) }
+            },
+        )
+    }
+    errorMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { errorMessage = null },
+            title = { Text(tr(lang, "代理操作未完成", "Proxy action not completed")) },
+            text = { Text(message) },
+            confirmButton = { TextButton({ errorMessage = null }) { Text(tr(lang, "关闭", "Close")) } },
+        )
+    }
+}
+
+@Composable
+private fun ProxySectionBar(lang: String, selected: ProxySection, onSelected: (ProxySection) -> Unit) {
+    val items = listOf(
+        ProxySection.OVERVIEW to tr(lang, "概览", "Overview"),
+        ProxySection.NODES to tr(lang, "节点", "Nodes"),
+        ProxySection.SUBSCRIPTIONS to tr(lang, "订阅", "Profiles"),
+        ProxySection.SETTINGS to tr(lang, "设置", "Settings"),
+    )
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items.forEach { (section, label) ->
+            Surface(
+                onClick = { onSelected(section) },
+                modifier = Modifier,
+                shape = RoundedCornerShape(14.dp),
+                color = if (section == selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerLow,
+            ) {
+                Text(
+                    label,
+                    Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (section == selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProxyOverviewContent(
+    lang: String,
+    manager: MihomoManager,
+    installed: Boolean,
+    running: Boolean,
+    supported: Boolean,
+    routeApi: Boolean,
+    activeSubscription: MihomoManager.Subscription?,
+    busy: Boolean,
+    onPrimaryAction: () -> Unit,
+    onRouteChange: (Boolean) -> Unit,
+    onSubscriptions: () -> Unit,
+    onDashboard: () -> Unit,
+) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) {
+        item {
+            Card(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                shape = RoundedCornerShape(26.dp),
+                colors = CardDefaults.cardColors(containerColor = if (running) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow),
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(Modifier.size(44.dp), shape = CircleShape, color = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest) {
+                            Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Code, null, Modifier.size(22.dp), tint = if (running) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Mihomo", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when { !supported -> tr(lang, "设备不支持", "Unsupported device"); !installed -> tr(lang, "组件未安装", "Components not installed"); running -> tr(lang, "本地内核运行中", "Local core is running"); else -> tr(lang, "已安装，当前停止", "Installed and stopped") },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Surface(Modifier.size(12.dp), shape = CircleShape, color = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) {}
+                    }
+                    if (installed) Text(
+                        "Mixed  127.0.0.1:${manager.mixedPort()}\nController  127.0.0.1:${manager.controllerPort()}",
+                        Modifier.padding(top = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        onClick = onPrimaryAction, enabled = supported && !busy,
+                        modifier = Modifier.fillMaxWidth().padding(top = 18.dp).height(50.dp), shape = RoundedCornerShape(15.dp),
+                    ) {
+                        Text(when { !installed -> tr(lang, "安装离线组件", "Install bundled components"); running -> tr(lang, "停止 Mihomo", "Stop Mihomo"); else -> tr(lang, "启动 Mihomo", "Start Mihomo") })
+                    }
+                }
+            }
+        }
+        item { SettingsSection(tr(lang, "当前订阅", "Active profile")) }
+        item {
+            NavigationSettingsRow(
+                HugeIcons.Folder01,
+                activeSubscription?.name ?: tr(lang, "暂无当前订阅", "No active profile"),
+                activeSubscription?.let { if (it.isRemote) it.url else tr(lang, "本地 YAML 配置", "Local YAML configuration") } ?: tr(lang, "添加 URL 或导入配置文件", "Add a URL or import a configuration file"),
+                onSubscriptions,
+            )
+        }
+        item { SettingsSection(tr(lang, "应用内代理", "In-app routing")) }
+        item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "Fcode 请求使用 Mihomo", "Route Fcode through Mihomo"), tr(lang, "不创建 Android VPN，也不会影响其他应用", "Does not create an Android VPN or affect other apps"), routeApi, onRouteChange) }
+        item { NavigationSettingsRow(HugeIcons.Code, "MetaCubeXD", tr(lang, "流量、规则、连接和高级控制台", "Traffic, rules, connections and advanced console"), onDashboard) }
+    }
+}
+
+@Composable
+private fun ProxyNodesContent(
+    lang: String,
+    installed: Boolean,
+    running: Boolean,
+    groups: List<MihomoControllerClient.ProxyGroup>,
+    loading: Boolean,
+    selectedGroupName: String,
+    sort: String,
+    onStart: () -> Unit,
+    onRefresh: () -> Unit,
+    onGroup: (String) -> Unit,
+    onSort: (String) -> Unit,
+    onTest: (MihomoControllerClient.ProxyGroup) -> Unit,
+    onSelect: (MihomoControllerClient.ProxyGroup, MihomoControllerClient.ProxyNode) -> Unit,
+) {
+    if (!installed || !running) {
+        LazyColumn(Modifier.fillMaxSize()) {
+            item { EmptySettingsState(HugeIcons.Code, if (!installed) tr(lang, "尚未安装代理组件", "Proxy components are not installed") else tr(lang, "Mihomo 当前已停止", "Mihomo is stopped"), tr(lang, "启动内核后即可读取代理组、选择节点并测试延迟。", "Start the core to load proxy groups, select nodes and test latency.")) }
+            item { Button(onStart, Modifier.fillMaxWidth().padding(horizontal = 28.dp).height(50.dp), shape = RoundedCornerShape(15.dp)) { Text(if (!installed) tr(lang, "安装组件", "Install components") else tr(lang, "启动 Mihomo", "Start Mihomo")) } }
+        }
+        return
+    }
+    val selectedGroup = groups.firstOrNull { it.name == selectedGroupName } ?: groups.firstOrNull()
+    val sortedNodes = remember(selectedGroup, sort) {
+        selectedGroup?.nodes?.toList()?.let { nodes ->
+            when (sort) {
+                "name" -> nodes.sortedBy { it.name.lowercase() }
+                "delay" -> nodes.sortedWith(compareBy<MihomoControllerClient.ProxyNode> { if (it.delay > 0) it.delay else Int.MAX_VALUE }.thenBy { it.name.lowercase() })
+                else -> nodes
+            }
+        }.orEmpty()
+    }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(tr(lang, "代理节点", "Proxy nodes"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(tr(lang, "按代理组选择并查看最近延迟", "Select by proxy group and inspect recent latency"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                IconButton(onRefresh) { Icon(HugeIcons.Refresh03, tr(lang, "刷新", "Refresh")) }
+            }
+        }
+        if (loading && groups.isEmpty()) item { LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) }
+        if (groups.isNotEmpty()) {
+            item {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 7.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    groups.forEach { group -> ProxyChoiceChip(group.name, group.name == selectedGroup?.name) { onGroup(group.name) } }
+                }
+            }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("default" to tr(lang, "默认", "Default"), "delay" to tr(lang, "延迟", "Latency"), "name" to tr(lang, "名称", "Name")).forEach { (value, label) ->
+                        ProxyChoiceChip(label, sort == value) { onSort(value) }
+                    }
+                }
+            }
+            selectedGroup?.let { group ->
+                item {
+                    Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                        Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(group.name, fontWeight = FontWeight.SemiBold)
+                                Text(tr(lang, "当前：${group.selected.ifBlank { "—" }}", "Selected: ${group.selected.ifBlank { "—" }}"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            FilledTonalButton({ onTest(group) }) { Text(tr(lang, "测速", "Test")) }
+                        }
+                    }
+                }
+                items(sortedNodes, key = { "${group.name}-${it.name}" }) { node ->
+                    ProxyNodeCard(lang, node, node.name == group.selected) { onSelect(group, node) }
+                }
+            }
+        } else if (!loading) {
+            item { EmptySettingsState(HugeIcons.Code, tr(lang, "没有可选择的代理组", "No selectable proxy groups"), tr(lang, "检查当前订阅是否包含 select、url-test 等代理组。", "Check whether the active profile contains select or url-test proxy groups.")) }
+        }
+    }
+}
+
+@Composable
+private fun ProxyChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick, modifier = Modifier, shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Text(label, Modifier.padding(horizontal = 14.dp, vertical = 9.dp), style = MaterialTheme.typography.labelLarge, color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+    }
+}
+
+@Composable
+private fun ProxyNodeCard(lang: String, node: MihomoControllerClient.ProxyNode, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(17.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Row(Modifier.padding(horizontal = 15.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(Modifier.size(10.dp), shape = CircleShape, color = when { selected -> MaterialTheme.colorScheme.primary; !node.alive -> MaterialTheme.colorScheme.error; node.delay > 0 -> MaterialTheme.colorScheme.tertiary; else -> MaterialTheme.colorScheme.outlineVariant }) {}
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(node.name, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(node.type.ifBlank { tr(lang, "代理节点", "Proxy node") }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(if (node.delay > 0) "${node.delay} ms" else if (!node.alive) tr(lang, "不可用", "Offline") else "—", style = MaterialTheme.typography.labelLarge, color = when { !node.alive -> MaterialTheme.colorScheme.error; node.delay in 1..250 -> MaterialTheme.colorScheme.primary; node.delay > 0 -> MaterialTheme.colorScheme.tertiary; else -> MaterialTheme.colorScheme.onSurfaceVariant })
+            if (selected) { Spacer(Modifier.width(8.dp)); Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary) }
+        }
+    }
+}
+
+@Composable
+private fun ProxySubscriptionsContent(
+    lang: String,
+    installed: Boolean,
+    subscriptions: List<MihomoManager.Subscription>,
+    onAdd: () -> Unit,
+    onImport: () -> Unit,
+    onActivate: (MihomoManager.Subscription) -> Unit,
+    onUpdate: (MihomoManager.Subscription) -> Unit,
+    onDelete: (MihomoManager.Subscription) -> Unit,
+) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) {
+        item {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(tr(lang, "订阅配置", "Subscription profiles"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(tr(lang, "添加 URL、导入 YAML，并在多个配置间切换", "Add URLs, import YAML and switch between profiles"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onAdd, Modifier.weight(1f), enabled = installed, shape = RoundedCornerShape(14.dp)) { Icon(HugeIcons.Add01, null, Modifier.size(17.dp)); Spacer(Modifier.width(6.dp)); Text(tr(lang, "添加订阅", "Add URL")) }
+                FilledTonalButton(onImport, Modifier.weight(1f), enabled = installed, shape = RoundedCornerShape(14.dp)) { Icon(HugeIcons.Folder01, null, Modifier.size(17.dp)); Spacer(Modifier.width(6.dp)); Text(tr(lang, "导入文件", "Import file")) }
+            }
+        }
+        if (!installed) {
+            item { EmptySettingsState(HugeIcons.Code, tr(lang, "请先安装代理组件", "Install proxy components first"), tr(lang, "组件安装完成后才能校验和保存订阅配置。", "Profiles can be validated and saved after the components are installed.")) }
+        } else if (subscriptions.isEmpty()) {
+            item { EmptySettingsState(HugeIcons.Folder01, tr(lang, "暂无订阅", "No profiles"), tr(lang, "添加订阅 URL，或从设备导入 YAML 配置。", "Add a subscription URL or import a YAML configuration from the device.")) }
+        } else {
+            item { SettingsSection(tr(lang, "订阅列表", "Profiles")) }
+            items(subscriptions, key = { it.id }) { item ->
+                SubscriptionCard(lang, item, { onActivate(item) }, { onUpdate(item) }, { onDelete(item) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubscriptionCard(
+    lang: String,
+    item: MihomoManager.Subscription,
+    onActivate: () -> Unit,
+    onUpdate: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+        shape = RoundedCornerShape(19.dp),
+        colors = CardDefaults.cardColors(containerColor = if (item.active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Column(Modifier.padding(15.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(item.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(if (item.isRemote) item.url else tr(lang, "本地 YAML 文件", "Local YAML file"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (item.active) Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primary) { Text(tr(lang, "当前使用", "Active"), Modifier.padding(horizontal = 7.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary) }
+            }
+            if (item.updatedAt > 0) Text(formatSubscriptionTime(lang, item.updatedAt), Modifier.padding(top = 7.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth().padding(top = 5.dp), horizontalArrangement = Arrangement.End) {
+                if (!item.active) TextButton(onActivate) { Text(tr(lang, "使用", "Use")) }
+                if (item.isRemote) TextButton(onUpdate) { Text(tr(lang, "更新", "Update")) }
+                TextButton(onDelete) { Text(tr(lang, "删除", "Delete"), color = MaterialTheme.colorScheme.error) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddSubscriptionDialog(lang: String, onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr(lang, "添加订阅", "Add subscription")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(name, { name = it }, label = { Text(tr(lang, "名称（可选）", "Name (optional)")) }, placeholder = { Text(tr(lang, "例如：机场订阅", "e.g. Main profile")) }, singleLine = true)
+                OutlinedTextField(url, { url = it; error = false }, label = { Text(tr(lang, "订阅 URL", "Subscription URL")) }, placeholder = { Text("https://example.com/config.yaml") }, singleLine = true, isError = error, supportingText = if (error) ({ Text(tr(lang, "请输入有效的 HTTP(S) 地址", "Enter a valid HTTP(S) URL")) }) else null, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+            }
+        },
+        dismissButton = { TextButton(onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
+        confirmButton = { TextButton({ if (isValidHttpUrl(url.trim())) onAdd(name.trim(), url.trim()) else error = true }) { Text(tr(lang, "添加", "Add")) } },
+    )
+}
+
+@Composable
+private fun ProxyRuntimeSettingsContent(
+    lang: String,
+    manager: MihomoManager,
+    installed: Boolean,
+    routeApi: Boolean,
+    autoStart: Boolean,
+    proxyNotice: String,
+    onInstall: () -> Unit,
+    onRoute: (Boolean) -> Unit,
+    onAutoStart: (Boolean) -> Unit,
+    onNotice: (String) -> Unit,
+    onDashboard: () -> Unit,
+) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) {
+        item { SettingsSection(tr(lang, "组件", "Components")) }
+        item { NavigationSettingsRow(HugeIcons.Refresh03, tr(lang, "Mihomo 内核与网页面板", "Mihomo core & dashboard"), "Mihomo v${MihomoManager.CORE_VERSION} · MetaCubeXD v${MihomoManager.DASHBOARD_VERSION} · ${if (installed) tr(lang, "已安装", "Installed") else tr(lang, "未安装", "Not installed")}", onInstall) }
+        item { SettingsSection(tr(lang, "运行行为", "Runtime behavior")) }
+        item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "应用内 URL 使用 Mihomo", "Route in-app URLs through Mihomo"), tr(lang, "不会影响浏览器或其他 Android 应用", "Does not affect the browser or other Android apps"), routeApi, onRoute) }
+        item { ToggleSettingsRow(HugeIcons.Refresh03, tr(lang, "随应用自动启动", "Start with the app"), tr(lang, "只启动本地内核，不创建 Android VPN", "Starts the local core without creating an Android VPN"), autoStart, onAutoStart) }
+        item { SettingsSection(tr(lang, "顶部提示", "Proxy-ready notice")) }
+        item {
+            OutlinedTextField(
+                value = proxyNotice, onValueChange = onNotice,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                label = { Text(tr(lang, "提示文字", "Notice text")) },
+                placeholder = { Text(tr(lang, "代理已开启", "Proxy enabled")) },
+                supportingText = { Text("${proxyNotice.length}/40") },
+                singleLine = true, shape = RoundedCornerShape(14.dp),
+            )
+        }
+        item {
+            Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                Row(Modifier.padding(horizontal = 15.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(Modifier.size(9.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {}
+                    Spacer(Modifier.width(10.dp))
+                    Text(proxyNotice.ifBlank { tr(lang, "代理已开启", "Proxy enabled") }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text(tr(lang, "预览", "Preview"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        item { SettingsSection(tr(lang, "高级", "Advanced")) }
+        item { NavigationSettingsRow(HugeIcons.Code, "MetaCubeXD", tr(lang, "查看流量、规则、连接和节点详情", "Inspect traffic, rules, connections and nodes"), onDashboard) }
+        item {
+            Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(tr(lang, "本地端点", "Local endpoints"), fontWeight = FontWeight.SemiBold)
+                    Text("Mixed Port   127.0.0.1:${manager.mixedPort()}\nController   127.0.0.1:${manager.controllerPort()}", Modifier.padding(top = 7.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.tertiaryContainer) {
+                Text(tr(lang, "只代理 Fcode 流量。控制器仅监听本机，并使用应用私有随机密钥保护；不会创建系统 VPN。", "Only Fcode traffic is routed. The controller listens on loopback, uses an app-private random secret, and does not create a system VPN."), Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
+        }
+    }
+}
+
+private fun queryDisplayName(context: android.content.Context, uri: Uri): String {
+    return runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }.getOrNull().orEmpty().ifBlank { "config.yaml" }
+}
+
+private fun formatSubscriptionTime(lang: String, timestamp: Long): String {
+    val formatted = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT).format(java.util.Date(timestamp))
+    return tr(lang, "更新于 $formatted", "Updated $formatted")
+}
+
 @Composable
 private fun WebUiSettingsPage(
     lang: String,
@@ -933,7 +2462,8 @@ private fun SettingsSection(title: String) {
 @Composable
 private fun NavigationSettingsRow(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
     Surface(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -951,7 +2481,8 @@ private fun NavigationSettingsRow(icon: ImageVector, title: String, subtitle: St
 @Composable
 private fun ToggleSettingsRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Surface(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clickable { onCheckedChange(!checked) },
+        onClick = { onCheckedChange(!checked) },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1009,9 +2540,16 @@ private fun ChoiceDialog(title: String, options: List<Pair<String, String>>, sel
         onDismissRequest = onDismiss, title = { Text(title) },
         text = { Column {
             options.forEachIndexed { index, (value, label) ->
-                Row(Modifier.fillMaxWidth().clickable { onSelected(value) }.padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    if (value == selected) Icon(HugeIcons.Tick02, null, tint = MaterialTheme.colorScheme.primary)
+                Surface(
+                    onClick = { onSelected(value) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = androidx.compose.ui.graphics.Color.Transparent,
+                ) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                        if (value == selected) Icon(HugeIcons.Tick02, null, tint = MaterialTheme.colorScheme.primary)
+                    }
                 }
                 if (index != options.lastIndex) HorizontalDivider()
             }
