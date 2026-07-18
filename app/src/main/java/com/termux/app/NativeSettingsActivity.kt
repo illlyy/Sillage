@@ -27,49 +27,31 @@ class NativeSettingsActivity : ComponentActivity() {
         setContent {
             var theme by remember { mutableStateOf(prefs.getString("native_theme_mode_v1", "system").orEmpty()) }
             var language by remember { mutableStateOf(prefs.getString("native_language_v1", "system").orEmpty()) }
-            var streamAnimations by remember { mutableStateOf(prefs.getBoolean("native_stream_animations_v1", true)) }
-            var showReasoning by remember { mutableStateOf(prefs.getBoolean("native_show_reasoning_v1", true)) }
-            var autoFollow by remember { mutableStateOf(prefs.getBoolean("native_auto_follow_v1", true)) }
+            var animations by remember { mutableStateOf(prefs.getBoolean("native_stream_animations_v1", true)) }
+            var reasoning by remember { mutableStateOf(prefs.getBoolean("native_show_reasoning_v1", true)) }
+            var follow by remember { mutableStateOf(prefs.getBoolean("native_auto_follow_v1", true)) }
             val lang = if (language == "en") "en" else "zh"
-            FcodeChatTheme(theme, lang, streamAnimations, showReasoning, autoFollow) {
+            FcodeChatTheme(theme, lang, animations, reasoning, follow) {
                 BackHandler { finish() }
-                Scaffold { padding ->
-                    LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
-                        item {
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { finish() }) { Icon(HugeIcons.ArrowLeft01, nativeText(lang, "??", "Back")) }
-                                Text(nativeText(lang, "??", "Settings"), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(start = 4.dp))
-                            }
-                        }
-                        item { SettingsSection(nativeText(lang, "??", "Appearance")) }
-                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
-                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Auto-follow"), if (autoFollow) nativeText(lang, "???", "On") else nativeText(lang, "???", "Off")) { autoFollow = !autoFollow; prefs.edit().putBoolean("native_auto_follow_v1", autoFollow).apply() } }
-                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
-                        item { SettingsRow(HugeIcons.Text, nativeText(lang, "??? Markdown", "Typography & Markdown"), nativeText(lang, "???????????", "Math, code and list rendering")) {} }
-                        item { SettingsSection(nativeText(lang, "??", "Conversation")) }
-                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
-                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
-                        item { SettingsSection(nativeText(lang, "??", "System")) }
-                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
-                        item { SettingsRow(HugeIcons.Text, nativeText(lang, "?? Fcode", "About Fcode"), nativeText(lang, "?? Compose UI", "Native Compose UI")) {} }
-                    }
-                }
+                Scaffold { pad -> LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(bottom = 28.dp)) {
+                    item { Row(Modifier.fillMaxWidth().padding(8.dp, 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton({ finish() }) { Icon(HugeIcons.ArrowLeft01, null) }
+                        Text(if (lang == "zh") "??" else "Settings", style = MaterialTheme.typography.headlineSmall)
+                    }}
+                    item { SettingsSection(if (lang == "zh") "??" else "Appearance") }
+                    item { SettingsRow(HugeIcons.Moon02, if (lang == "zh") "??" else "Theme", when(theme){"light"->if(lang=="zh")"??" else "Light";"dark"->if(lang=="zh")"??" else "Dark";else->if(lang=="zh")"????" else "System"}) { theme=when(theme){"system"->"light";"light"->"dark";else->"system"}; prefs.edit().putString("native_theme_mode_v1",theme).apply() } }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if (lang == "zh") "??" else "Language", if(lang=="zh") "????" else "English") { language=if(language=="en")"zh" else "en"; prefs.edit().putString("native_language_v1",language).apply() } }
+                    item { SettingsRow(HugeIcons.Text, if(lang=="zh") "??? Markdown" else "Typography & Markdown", if(lang=="zh") "????????" else "Math, code and lists") {} }
+                    item { SettingsSection(if(lang=="zh") "??" else "Conversation") }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "????" else "Streaming animation", if(animations) if(lang=="zh")"??" else "On" else if(lang=="zh")"??" else "Off") { animations=!animations; prefs.edit().putBoolean("native_stream_animations_v1",animations).apply() } }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "????" else "Reasoning", if(reasoning) if(lang=="zh")"??" else "Shown" else if(lang=="zh")"??" else "Hidden") { reasoning=!reasoning; prefs.edit().putBoolean("native_show_reasoning_v1",reasoning).apply() } }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "??????" else "Auto-follow output", if(follow) if(lang=="zh")"??" else "On" else if(lang=="zh")"??" else "Off") { follow=!follow; prefs.edit().putBoolean("native_auto_follow_v1",follow).apply() } }
+                    item { SettingsSection(if(lang=="zh") "??" else "System") }
+                    item { SettingsRow(HugeIcons.Text, if(lang=="zh") "?? Fcode" else "About Fcode", "Compose UI") {} }
+                }}
             }
         }
     }
 }
-
-@Composable private fun SettingsSection(title: String) {
-    Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 24.dp, top = 18.dp, bottom = 8.dp))
-}
-
-@Composable private fun SettingsRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, value: String, onClick: () -> Unit) {
-    Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clickable(onClick = onClick), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(15.dp))
-            Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-            Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
+@Composable private fun SettingsSection(title:String) { Text(title, style=MaterialTheme.typography.labelLarge, color=MaterialTheme.colorScheme.primary, modifier=Modifier.padding(start=24.dp,top=18.dp,bottom=8.dp)) }
+@Composable private fun SettingsRow(icon: androidx.compose.ui.graphics.vector.ImageVector,title:String,value:String,onClick:()->Unit) { Surface(Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=4.dp).clickable(onClick=onClick), shape=MaterialTheme.shapes.large, color=MaterialTheme.colorScheme.surfaceContainerLow) { Row(Modifier.padding(horizontal=16.dp,vertical=15.dp),verticalAlignment=Alignment.CenterVertically) { Icon(icon,null,Modifier.size(21.dp),tint=MaterialTheme.colorScheme.primary); Spacer(Modifier.width(15.dp)); Text(title,Modifier.weight(1f)); Text(value,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) } } }

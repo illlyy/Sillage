@@ -54,10 +54,7 @@
             android:label="Fcode"
             android:launchMode="singleTask"
             android:theme="@style/Theme.CodexMobile">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+
         </activity>
 
         <activity
@@ -70,7 +67,12 @@
             android:exported="false"
             android:label="Fcode Chat"
             android:windowSoftInputMode="adjustNothing"
-            android:theme="@style/Theme.CodexMobile" />
+            android:theme="@style/Theme.CodexMobile">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".app.MihomoDashboardActivity"
