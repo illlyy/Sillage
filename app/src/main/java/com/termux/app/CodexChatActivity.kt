@@ -454,6 +454,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         lastFrameNanos = 0L
     }
     private var currentThreadId: String? = null
+    private var nativeThemeMode by mutableStateOf("system")
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -468,13 +469,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
         chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
+        nativeThemeMode = nativePrefs.getString("native_theme_mode_v1", "system").orEmpty().takeIf { it in setOf("system", "light", "dark") } ?: "system"
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
         )
 
         setContent {
-            FcodeChatTheme {
+            FcodeChatTheme(nativeThemeMode) {
                 NativeChatScreen(
                     state = chatState,
                     onSend = ::sendMessage,
@@ -498,6 +500,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onToggleFavorite = ::toggleFavorite,
                     onBackHome = ::openHomeSettings,
                     onOpenLegacyWebUi = ::openLegacyWebUi,
+                    onToggleTheme = {
+                        nativeThemeMode = when (nativeThemeMode) { "system" -> "light"; "light" -> "dark"; else -> "system" }
+                        nativePrefs.edit().putString("native_theme_mode_v1", nativeThemeMode).apply()
+                    },
                 )
             }
         }

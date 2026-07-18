@@ -108,6 +108,8 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
@@ -259,11 +261,26 @@ private val FcodeLightColors = lightColorScheme(
     surfaceContainerHigh = Color(0xFFE8E1E2),
     surfaceContainerHighest = Color(0xFFE2DADB),
 )
+
+private val FcodeDarkColors = darkColorScheme(
+    primary = Color(0xFFE6B8C1), onPrimary = Color(0xFF442830),
+    primaryContainer = Color(0xFF5D3E47), onPrimaryContainer = Color(0xFFFFD9E0),
+    secondary = Color(0xFFD6C1C5), onSecondary = Color(0xFF392D30),
+    secondaryContainer = Color(0xFF514347), onSecondaryContainer = Color(0xFFF3DDE1),
+    background = Color(0xFF171314), onBackground = Color(0xFFECE0E2),
+    surface = Color(0xFF171314), onSurface = Color(0xFFECE0E2),
+    surfaceVariant = Color(0xFF51474A), onSurfaceVariant = Color(0xFFD4C2C5),
+    outline = Color(0xFF9C8C8F), outlineVariant = Color(0xFF51474A),
+    surfaceContainerLowest = Color(0xFF120F10), surfaceContainerLow = Color(0xFF201B1C),
+    surfaceContainer = Color(0xFF241F20), surfaceContainerHigh = Color(0xFF2F292A),
+    surfaceContainerHighest = Color(0xFF3A3335),
+)
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun FcodeChatTheme(content: @Composable () -> Unit) {
+internal fun FcodeChatTheme(themeMode: String = "system", content: @Composable () -> Unit) {
+    val dark = when (themeMode) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
     MaterialExpressiveTheme(
-        colorScheme = FcodeLightColors,
+        colorScheme = if (dark) FcodeDarkColors else FcodeLightColors,
         motionScheme = MotionScheme.expressive(),
         content = content,
     )
@@ -294,6 +311,7 @@ internal fun NativeChatScreen(
     onToggleFavorite: (NativeConversation) -> Unit,
     onBackHome: () -> Unit,
     onOpenLegacyWebUi: () -> Unit,
+    onToggleTheme: () -> Unit,
 ) {
     val context = LocalContext.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -441,6 +459,7 @@ internal fun NativeChatScreen(
                         onExport = { shareConversation(context, state.conversationTitle, state.messages) },
                         canExport = state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT },
                         onNewConversation = onNewConversation,
+                        onToggleTheme = onToggleTheme,
                     )
                 },
                 bottomBar = {},
@@ -970,6 +989,7 @@ private fun RikkaTopBar(
     onExport: () -> Unit,
     canExport: Boolean,
     onNewConversation: () -> Unit,
+    onToggleTheme: () -> Unit,
 ) {
     TopAppBar(
         modifier = Modifier.statusBarsPadding(),
@@ -1006,6 +1026,9 @@ private fun RikkaTopBar(
                     .size(8.dp)
                     .background(if (ready) Color(0xFF43A047) else MaterialTheme.colorScheme.outline, CircleShape),
             )
+            IconButton(onClick = onToggleTheme) {
+                Icon(HugeIcons.Sparkles, contentDescription = "\u5207\u6362\u4e3b\u9898")
+            }
             IconButton(onClick = onOpenWorkPanel) {
                 Icon(HugeIcons.LeftToRightListBullet, contentDescription = "\u5de5\u4f5c\u9762\u677f")
             }
