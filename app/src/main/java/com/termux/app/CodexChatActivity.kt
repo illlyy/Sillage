@@ -505,6 +505,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onSetGoal = ::setGoal,
                     onClearGoal = ::clearGoal,
                     onToggleGoalPause = ::toggleGoalPause,
+                    onCompact = { bridge?.compactThread() },
                     onAnswerUserInput = ::answerUserInput,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },

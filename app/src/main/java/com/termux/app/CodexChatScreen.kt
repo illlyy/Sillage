@@ -313,6 +313,7 @@ internal fun NativeChatScreen(
     onSetGoal: (String) -> Unit,
     onClearGoal: () -> Unit,
     onToggleGoalPause: () -> Unit,
+    onCompact: () -> Unit,
     onAnswerUserInput: (Int, String, String) -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
@@ -608,6 +609,7 @@ internal fun NativeChatScreen(
                         onRemoveSkill = { state.selectedSkills.remove(it) },
                         attachments = state.attachments,
                         onMoreClick = { showFilesSheet = true },
+                        onCompact = onCompact,
                         onRetryLast = { state.messages.lastOrNull { it.role == NativeChatRole.USER }?.content?.let(onRetry) },
                         onEditLast = { editMessage = state.messages.lastOrNull { it.role == NativeChatRole.USER } },
                         onRemoveAttachment = onRemoveAttachment,
@@ -3283,6 +3285,7 @@ private fun RikkaChatInput(
     onRemoveSkill: (NativeSkill) -> Unit,
     attachments: List<NativeAttachment>,
     onMoreClick: () -> Unit,
+    onCompact: () -> Unit,
     onRetryLast: () -> Unit,
     onEditLast: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -3309,6 +3312,7 @@ private fun RikkaChatInput(
                 onCommand = { command ->
                     when (command) {
                         "__attachments__" -> onMoreClick()
+                        "__compact__" -> onCompact()
                         "__retry__" -> onRetryLast()
                         "__edit__" -> onEditLast()
                         else -> onValueChange(command)
@@ -3448,7 +3452,7 @@ private fun RikkaChatInput(
 private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -> Unit) {
     val language = LocalNativeLanguage.current
     val tools = listOf(
-        Triple(HugeIcons.Sparkles, "\u538b\u7f29\u4e0a\u4e0b\u6587", "/compact"),
+        Triple(HugeIcons.Sparkles, "\u538b\u7f29\u4e0a\u4e0b\u6587", "__compact__"),
         Triple(HugeIcons.Add01, "\u6dfb\u52a0\u56fe\u7247\u6216\u6587\u4ef6", "__attachments__"),
         Triple(HugeIcons.Files02, "\u5217\u51fa\u5f53\u524d\u76ee\u5f55", "/ls"),
         Triple(HugeIcons.Search01, "\u641c\u7d22\u6587\u4ef6", "/search "),
