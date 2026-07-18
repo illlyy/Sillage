@@ -2333,7 +2333,7 @@ private fun WorkPanelDialog(
                                         selectedAgentId = subagentKey(agent)
                                         if (thread.isNotBlank()) onLoadSubagentHistory(thread)
                                     }
-                                } else WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, onEditGoal, onClearGoal, onExecutePlan)
+                                } else WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, state.ready && !state.phase.active, onEditGoal, onClearGoal, onExecutePlan)
                             }
                         } else {
                             val agent = agents.firstOrNull { subagentKey(it) == selectedAgentId }
@@ -2377,7 +2377,7 @@ private fun parsePlanItems(raw: String): List<JSONObject> = runCatching {
 }.getOrDefault(emptyList())
 
 @Composable
-private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditGoal: () -> Unit, onClearGoal: () -> Unit, onExecutePlan: () -> Unit) {
+private fun WorkPlanView(raw: String, explanation: String, goal: String, executeEnabled: Boolean, onEditGoal: () -> Unit, onClearGoal: () -> Unit, onExecutePlan: () -> Unit) {
     val language = LocalNativeLanguage.current
     val plan = remember(raw) { parsePlanItems(raw) }
     if (plan.isEmpty() && goal.isBlank()) {
@@ -2386,7 +2386,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditG
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (plan.isNotEmpty()) item(key = "execute-plan") {
-            Button(onClick = onExecutePlan, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
+            Button(onClick = onExecutePlan, enabled = executeEnabled, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
                 Icon(HugeIcons.Zap, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(nativeText(language, "\u6267\u884c\u6b64\u8ba1\u5212", "Execute this plan"))
