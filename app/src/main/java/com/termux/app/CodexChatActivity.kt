@@ -1170,6 +1170,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onResume() {
         super.onResume()
+        // Settings is a separate native Activity. Refresh preferences here so a theme
+        // or language change is visible immediately when returning to the chat.
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        nativeThemeMode = prefs.getString("native_theme_mode_v1", "system").orEmpty().takeIf { it in setOf("system", "light", "dark") } ?: "system"
+        nativeLanguage = prefs.getString("native_language_v1", "system").orEmpty().let {
+            if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh"
+        }
         if (chatState.busy) startFrameDiagnostics()
     }
 
