@@ -193,6 +193,14 @@ internal class NativeChatState {
         revision++
     }
 
+    fun finishPlanPanel(stepCount: Int = 0) {
+        val index = messages.indexOfFirst { it.role == NativeChatRole.ACTIVITY && it.content.startsWith("PLAN_PANEL|") }
+        if (index >= 0) {
+            messages[index] = messages[index].copy(content = "PLAN_PANEL|complete|$stepCount")
+            revision++
+        }
+    }
+
     private fun cleanProtocolMarkup(text: String): String = text
         .replace(Regex("""</?propose_plan\s*>""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("""</?plan\s*>""", RegexOption.IGNORE_CASE), "")
@@ -1198,7 +1206,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     ?: turn?.optString("explanation")?.takeIf { it.isNotBlank() }
                     ?: nested?.optString("explanation")?.takeIf { it.isNotBlank() }
                     ?: ""
-                if (plan != null) chatState.planJson = plan.toString()
+                if (plan != null) {
+                    chatState.planJson = plan.toString()
+                    chatState.finishPlanPanel(plan.length())
+                }
                 chatState.planExplanation = explanation
                 currentThreadId?.let { threadId ->
                     getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
@@ -1232,6 +1243,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 flushReasoningDeltas()
                 flushAnswerDeltas()
                 chatState.completeTurn()
+                if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
                 stopFrameDiagnostics()
                 refreshConversations()
             }

@@ -2009,6 +2009,9 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
     val text = message.content
     if (text.startsWith("PLAN_PANEL|")) {
         val language = LocalNativeLanguage.current
+        val parts = text.split('|')
+        val completed = parts.getOrNull(1) == "complete"
+        val count = parts.getOrNull(2)?.toIntOrNull() ?: 0
         Surface(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
             shape = RoundedCornerShape(18.dp),
@@ -2020,9 +2023,14 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
                     Text(nativeText(language, "??", "Plan"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                    Text(nativeText(language, "????????", "Preparing the plan"), style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        if (completed) nativeText(language, "?????${if (count > 0) " ? $count ?" else ""}", "Plan ready${if (count > 0) " ? $count steps" else ""}")
+                        else nativeText(language, "????????", "Preparing the plan"),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
-                CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                if (completed) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp))
+                else CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
             }
         }
         return
