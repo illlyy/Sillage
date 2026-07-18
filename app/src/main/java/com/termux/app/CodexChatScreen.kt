@@ -2078,7 +2078,7 @@ private fun CollabAgentCapsule(
         collectSubagentItems(state, item)
     }
     val name = subagentName(item)
-    val status = subagentStatusLabel(resolvedSubagentStatus(state, item))
+    val status = subagentStatusLabel(resolvedSubagentStatus(state, item), LocalNativeLanguage.current)
     var panelVisible by remember { mutableStateOf(false) }
     var panelEntered by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(initialId) }
@@ -2215,12 +2215,12 @@ private fun resolvedSubagentStatus(state: NativeChatState, item: JSONObject): St
         ?: normalizedSubagentStatus(jsonText(item, "status"))
 }
 
-private fun subagentStatusLabel(status: String): String = when (status) {
-    "working" -> "\u5904\u7406\u4e2d"
-    "waiting" -> "\u7b49\u5f85\u4e2d"
-    "failed" -> "\u5931\u8d25"
-    "stopped" -> "\u5df2\u505c\u6b62"
-    else -> "\u5b8c\u6210"
+private fun subagentStatusLabel(status: String, language: String): String = when (status) {
+    "working" -> nativeText(language, "\u5904\u7406\u4e2d", "Working")
+    "waiting" -> nativeText(language, "\u7b49\u5f85\u4e2d", "Waiting")
+    "failed" -> nativeText(language, "\u5931\u8d25", "Failed")
+    "stopped" -> nativeText(language, "\u5df2\u505c\u6b62", "Stopped")
+    else -> nativeText(language, "\u5b8c\u6210", "Completed")
 }
 
 private fun isSubagentItem(item: JSONObject): Boolean = item.optString("type") in setOf("collabAgentToolCall", "subAgentActivity")
@@ -2506,7 +2506,7 @@ private fun SubagentOverview(state: NativeChatState, agents: List<JSONObject>, o
 private fun SubagentOverviewRow(state: NativeChatState, agent: JSONObject, onSelect: (JSONObject) -> Unit) {
     val task = jsonText(agent, "task", "prompt", "input", "message")
     val status = resolvedSubagentStatus(state, agent)
-    val statusLabel = subagentStatusLabel(status)
+    val statusLabel = subagentStatusLabel(status, LocalNativeLanguage.current)
     val statusColor = when (status) {
         "working" -> MaterialTheme.colorScheme.primary
         "waiting" -> MaterialTheme.colorScheme.tertiary
@@ -2575,7 +2575,7 @@ private fun SubagentDetail(
             it.optString("role") == "user" && it.optString("content").trim() == task.trim()
         }
     }
-    val statusLabel = subagentStatusLabel(status)
+    val statusLabel = subagentStatusLabel(status, LocalNativeLanguage.current)
     if (messages.isNotEmpty()) {
         val conversationListState = rememberLazyListState(
             initialFirstVisibleItemIndex = (displayMessages.lastIndex + 3).coerceAtLeast(0),
