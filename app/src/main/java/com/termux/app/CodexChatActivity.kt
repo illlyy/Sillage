@@ -782,11 +782,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun goalPreferenceKey(threadId: String): String = "native_thread_goal_v1_$threadId"
     private fun modePreferenceKey(threadId: String): String = "native_thread_mode_v1_$threadId"
+    private fun planPreferenceKey(threadId: String): String = "native_thread_plan_v1_$threadId"
+    private fun planExplanationPreferenceKey(threadId: String): String = "native_thread_plan_explanation_v1_$threadId"
 
     private fun restoreGoalForThread(threadId: String) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.activeGoalObjective = prefs.getString(goalPreferenceKey(threadId), "").orEmpty()
         chatState.selectedMode = prefs.getString(modePreferenceKey(threadId), "default").orEmpty().takeIf { it == "plan" } ?: "default"
+        chatState.planJson = prefs.getString(planPreferenceKey(threadId), "[]").orEmpty().ifBlank { "[]" }
+        chatState.planExplanation = prefs.getString(planExplanationPreferenceKey(threadId), "").orEmpty()
     }
 
     private fun setGoal(objective: String) {
@@ -1146,6 +1150,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 val payload = runCatching { JSONObject(value) }.getOrNull()
                 chatState.planJson = payload?.optJSONArray("plan")?.toString() ?: "[]"
                 chatState.planExplanation = payload?.optString("explanation").orEmpty()
+                currentThreadId?.let { threadId ->
+                    getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+                        .putString(planPreferenceKey(threadId), chatState.planJson)
+                        .putString(planExplanationPreferenceKey(threadId), chatState.planExplanation)
+                        .apply()
+                }
                 chatState.revision++
             }
             "onSubagentEvent" -> {
