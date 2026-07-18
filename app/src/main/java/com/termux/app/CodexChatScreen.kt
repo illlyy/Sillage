@@ -278,17 +278,18 @@ private val FcodeDarkColors = darkColorScheme(
     surfaceContainerHighest = Color(0xFF3A3335),
 )
 val LocalNativeLanguage = staticCompositionLocalOf { "zh" }
+val LocalStreamAnimationsEnabled = staticCompositionLocalOf { true }
 
 internal fun nativeText(language: String, zh: String, en: String): String = if (language == "en") en else zh
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", content: @Composable () -> Unit) {
+internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", streamAnimations: Boolean = true, content: @Composable () -> Unit) {
     val dark = when (themeMode) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
     MaterialExpressiveTheme(
         colorScheme = if (dark) FcodeDarkColors else FcodeLightColors,
         motionScheme = MotionScheme.expressive(),
-        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, content = content) },
+        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, LocalStreamAnimationsEnabled provides streamAnimations, content = content) },
     )
 }
 
@@ -1414,6 +1415,10 @@ private fun StableLiveTextChunk(text: String, reasoning: Boolean) {
 
 @Composable
 private fun FadingTailText(text: String, tailStart: Int, generation: Int, reasoning: Boolean) {
+    if (!LocalStreamAnimationsEnabled.current) {
+        StableLiveTextChunk(text, reasoning)
+        return
+    }
     androidx.compose.runtime.key(generation) {
         var visible by remember { mutableStateOf(false) }
         val tailAlpha by animateFloatAsState(

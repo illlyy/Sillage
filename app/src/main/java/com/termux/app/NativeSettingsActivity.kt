@@ -27,7 +27,8 @@ class NativeSettingsActivity : ComponentActivity() {
         setContent {
             var theme by remember { mutableStateOf(prefs.getString("native_theme_mode_v1", "system").orEmpty()) }
             var language by remember { mutableStateOf(prefs.getString("native_language_v1", "system").orEmpty()) }
-            FcodeChatTheme(theme, if (language == "en") "en" else "zh") {
+            var streamAnimations by remember { mutableStateOf(prefs.getBoolean("native_stream_animations_v1", true)) }
+            FcodeChatTheme(theme, if (language == "en") "en" else "zh", streamAnimations) {
                 BackHandler { finish() }
                 Scaffold { padding ->
                     LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -42,7 +43,7 @@ class NativeSettingsActivity : ComponentActivity() {
                         item { SettingsRow(HugeIcons.LanguageCircle, "语言", when(language) { "en" -> "English"; "zh" -> "简体中文"; else -> "跟随系统" }) { language = when(language) { "system" -> "zh"; "zh" -> "en"; else -> "system" }; prefs.edit().putString("native_language_v1", language).apply() } }
                         item { SettingsRow(HugeIcons.Text, "字体与 Markdown", "公式、代码块、列表渲染") { } }
                         item { SettingsSection("对话") }
-                        item { SettingsRow(HugeIcons.Moon02, "流式显示", "批量更新与平滑揭示动画") { } }
+                        item { SettingsRow(HugeIcons.Moon02, nativeText(if (language == "en") "en" else "zh", "????", "Streaming animation"), if (streamAnimations) nativeText(if (language == "en") "en" else "zh", "???", "On") else nativeText(if (language == "en") "en" else "zh", "???", "Off")) { streamAnimations = !streamAnimations; prefs.edit().putBoolean("native_stream_animations_v1", streamAnimations).apply() } }
                         item { SettingsRow(HugeIcons.LanguageCircle, "思考过程", "显示、折叠和自动跟随") { } }
                         item { SettingsSection("系统") }
                         item { SettingsRow(HugeIcons.Text, "诊断日志", "查看原生 UI 和后端事件") { } }
