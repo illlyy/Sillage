@@ -595,6 +595,7 @@ internal fun NativeChatScreen(
                         onRemoveSkill = { state.selectedSkills.remove(it) },
                         attachments = state.attachments,
                         onMoreClick = { showFilesSheet = true },
+                        onRetryLast = { state.messages.lastOrNull { it.role == NativeChatRole.USER }?.content?.let(onRetry) },
                         onRemoveAttachment = onRemoveAttachment,
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
@@ -3195,6 +3196,7 @@ private fun RikkaChatInput(
     onRemoveSkill: (NativeSkill) -> Unit,
     attachments: List<NativeAttachment>,
     onMoreClick: () -> Unit,
+    onRetryLast: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
@@ -3217,7 +3219,11 @@ private fun RikkaChatInput(
             NativeComposerToolSheet(
                 onDismiss = { toolsExpanded = false },
                 onCommand = { command ->
-                    if (command == "__attachments__") onMoreClick() else onValueChange(command)
+                    when (command) {
+                        "__attachments__" -> onMoreClick()
+                        "__retry__" -> onRetryLast()
+                        else -> onValueChange(command)
+                    }
                     toolsExpanded = false
                 },
             )
@@ -3358,7 +3364,7 @@ private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -
         Triple(HugeIcons.Files02, "\u5217\u51fa\u5f53\u524d\u76ee\u5f55", "/ls"),
         Triple(HugeIcons.Search01, "\u641c\u7d22\u6587\u4ef6", "/search "),
         Triple(HugeIcons.PencilEdit01, "\u7f16\u8f91\u4e0a\u4e00\u6761\u6d88\u606f", "/edit"),
-        Triple(HugeIcons.Refresh03, "\u91cd\u65b0\u751f\u6210\u56de\u7b54", "/retry"),
+        Triple(HugeIcons.Refresh03, "\u91cd\u65b0\u751f\u6210\u56de\u7b54", "__retry__"),
         Triple(HugeIcons.Cancel01, "\u6e05\u7a7a\u8f93\u5165", ""),
     )
     Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp)) {
@@ -3373,7 +3379,7 @@ private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -
                     Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(14.dp))
                     Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                    Text(when (command) { "__attachments__" -> "\u9009\u62e9"; "" -> "\u6e05\u9664"; else -> command }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(when (command) { "__attachments__" -> "\u9009\u62e9"; "__retry__" -> "\u6267\u884c"; "" -> "\u6e05\u9664"; else -> command }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
