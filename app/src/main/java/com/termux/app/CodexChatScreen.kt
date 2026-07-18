@@ -596,6 +596,7 @@ internal fun NativeChatScreen(
                         attachments = state.attachments,
                         onMoreClick = { showFilesSheet = true },
                         onRetryLast = { state.messages.lastOrNull { it.role == NativeChatRole.USER }?.content?.let(onRetry) },
+                        onEditLast = { editMessage = state.messages.lastOrNull { it.role == NativeChatRole.USER } },
                         onRemoveAttachment = onRemoveAttachment,
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
@@ -3197,6 +3198,7 @@ private fun RikkaChatInput(
     attachments: List<NativeAttachment>,
     onMoreClick: () -> Unit,
     onRetryLast: () -> Unit,
+    onEditLast: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
@@ -3222,6 +3224,7 @@ private fun RikkaChatInput(
                     when (command) {
                         "__attachments__" -> onMoreClick()
                         "__retry__" -> onRetryLast()
+                        "__edit__" -> onEditLast()
                         else -> onValueChange(command)
                     }
                     toolsExpanded = false
@@ -3363,7 +3366,7 @@ private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -
         Triple(HugeIcons.Add01, "\u6dfb\u52a0\u56fe\u7247\u6216\u6587\u4ef6", "__attachments__"),
         Triple(HugeIcons.Files02, "\u5217\u51fa\u5f53\u524d\u76ee\u5f55", "/ls"),
         Triple(HugeIcons.Search01, "\u641c\u7d22\u6587\u4ef6", "/search "),
-        Triple(HugeIcons.PencilEdit01, "\u7f16\u8f91\u4e0a\u4e00\u6761\u6d88\u606f", "/edit"),
+        Triple(HugeIcons.PencilEdit01, "\u7f16\u8f91\u4e0a\u4e00\u6761\u6d88\u606f", "__edit__"),
         Triple(HugeIcons.Refresh03, "\u91cd\u65b0\u751f\u6210\u56de\u7b54", "__retry__"),
         Triple(HugeIcons.Cancel01, "\u6e05\u7a7a\u8f93\u5165", ""),
     )
@@ -3379,7 +3382,7 @@ private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -
                     Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(14.dp))
                     Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                    Text(when (command) { "__attachments__" -> "\u9009\u62e9"; "__retry__" -> "\u6267\u884c"; "" -> "\u6e05\u9664"; else -> command }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(when (command) { "__attachments__" -> "\u9009\u62e9"; "__retry__" -> "\u6267\u884c"; "__edit__" -> "\u7f16\u8f91"; "" -> "\u6e05\u9664"; else -> command }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
