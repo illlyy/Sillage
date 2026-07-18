@@ -1990,7 +1990,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (command.isNotBlank()) ToolTextCard("命令执行", command, false)
+        if (command.isNotBlank()) ToolTextCard(nativeText(language, "\u547d\u4ee4\u6267\u884c", "Command execution"), command, false)
         val hasThreadBackedAgents = tools != null && (0 until tools.length()).any { toolIndex ->
             runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.let(::subagentThreadId).orEmpty().isNotBlank()
         }
@@ -1998,7 +1998,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
             val item = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
             val type = item.optString("type")
             if (type in setOf("collabAgentToolCall", "subAgentActivity") && hasThreadBackedAgents && subagentThreadId(item).isBlank()) continue
-            val title = when (type) { "fileChange" -> "文件修改"; "mcpToolCall" -> "MCP 工具"; "webSearch" -> "网页搜索"; "collabAgentToolCall" -> "子代理"; else -> type }
+            val title = when (type) { "fileChange" -> nativeText(language, "\u6587\u4ef6\u4fee\u6539", "File change"); "mcpToolCall" -> "MCP tool"; "webSearch" -> nativeText(language, "\u7f51\u9875\u641c\u7d22", "Web search"); "collabAgentToolCall" -> nativeText(language, "\u5b50\u4ee3\u7406", "Subagent"); else -> type }
             val detail = when (type) {
                 "commandExecution" -> buildString {
                     val commandValue = item.optString("command", "")
