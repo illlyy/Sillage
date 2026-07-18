@@ -2410,7 +2410,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
                         Text(goal, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp, modifier = Modifier.padding(top = 3.dp))
                     }
                     IconButton(onClick = onClearGoal, modifier = Modifier.size(34.dp)) {
-                        Icon(HugeIcons.Cancel01, "\u6e05\u9664\u76ee\u6807", Modifier.size(16.dp))
+                        Icon(HugeIcons.Cancel01, nativeText(language, "\u6e05\u9664\u76ee\u6807", "Clear goal"), Modifier.size(16.dp))
                     }
                 }
             }
@@ -3068,6 +3068,7 @@ private fun ComposerModeCapsules(
     selectedSkills: List<NativeSkill>,
     onRemoveSkill: (NativeSkill) -> Unit,
 ) {
+    val language = LocalNativeLanguage.current
     var menuExpanded by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 3.dp),
@@ -3092,7 +3093,7 @@ private fun ComposerModeCapsules(
                         },
                         label = "composerModeLabel",
                     ) { mode ->
-                        Text(if (mode == "plan") "\u8ba1\u5212\u6a21\u5f0f" else "\u9ed8\u8ba4\u6a21\u5f0f", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                        Text(if (mode == "plan") nativeText(language, "\u8ba1\u5212\u6a21\u5f0f", "Plan mode") else nativeText(language, "\u9ed8\u8ba4\u6a21\u5f0f", "Default mode"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                     }
                     Spacer(Modifier.width(3.dp))
                     Icon(HugeIcons.ArrowDown01, null, Modifier.size(13.dp))
@@ -3100,17 +3101,17 @@ private fun ComposerModeCapsules(
             }
             DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                 DropdownMenuItem(
-                    text = { Text("\u9ed8\u8ba4\u6a21\u5f0f") },
+                    text = { Text(nativeText(language, "\u9ed8\u8ba4\u6a21\u5f0f", "Default mode")) },
                     leadingIcon = { Icon(HugeIcons.Sparkles, null, Modifier.size(18.dp)) },
                     onClick = { onModeSelected("default"); menuExpanded = false },
                 )
                 DropdownMenuItem(
-                    text = { Text("\u8ba1\u5212\u6a21\u5f0f") },
+                    text = { Text(nativeText(language, "\u8ba1\u5212\u6a21\u5f0f", "Plan mode")) },
                     leadingIcon = { Icon(HugeIcons.Zap, null, Modifier.size(18.dp)) },
                     onClick = { onModeSelected("plan"); menuExpanded = false },
                 )
                 DropdownMenuItem(
-                    text = { Text(if (activeGoal.isBlank()) "\u8bbe\u7f6e\u76ee\u6807" else "\u7f16\u8f91\u76ee\u6807") },
+                    text = { Text(if (activeGoal.isBlank()) nativeText(language, "\u8bbe\u7f6e\u76ee\u6807", "Set goal") else nativeText(language, "\u7f16\u8f91\u76ee\u6807", "Edit goal")) },
                     leadingIcon = { Icon(HugeIcons.LookTop, null, Modifier.size(18.dp)) },
                     onClick = { menuExpanded = false; onRequestGoal() },
                 )
@@ -3130,9 +3131,9 @@ private fun ComposerModeCapsules(
                 Row(Modifier.padding(start = 10.dp, end = 7.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(HugeIcons.LookTop, null, Modifier.size(14.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("\u76ee\u6807", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Text(nativeText(language, "\u76ee\u6807", "Goal"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.width(5.dp))
-                    Icon(HugeIcons.Cancel01, "\u6e05\u9664\u76ee\u6807", Modifier.size(13.dp))
+                    Icon(HugeIcons.Cancel01, nativeText(language, "\u6e05\u9664\u76ee\u6807", "Clear goal"), Modifier.size(13.dp))
                 }
             }
         }
