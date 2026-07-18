@@ -769,14 +769,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun setChatMode(mode: String) {
         chatState.selectedMode = if (mode == "plan") "plan" else "default"
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
-            .putString("native_chat_mode_v1", chatState.selectedMode).apply()
+            .putString("native_chat_mode_v1", chatState.selectedMode)
+            .apply { currentThreadId?.let { putString(modePreferenceKey(it), chatState.selectedMode) } }
+            .apply()
     }
 
     private fun goalPreferenceKey(threadId: String): String = "native_thread_goal_v1_$threadId"
+    private fun modePreferenceKey(threadId: String): String = "native_thread_mode_v1_$threadId"
 
     private fun restoreGoalForThread(threadId: String) {
-        chatState.activeGoalObjective = getSharedPreferences("codex_mobile", MODE_PRIVATE)
-            .getString(goalPreferenceKey(threadId), "").orEmpty()
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        chatState.activeGoalObjective = prefs.getString(goalPreferenceKey(threadId), "").orEmpty()
+        chatState.selectedMode = prefs.getString(modePreferenceKey(threadId), "default").orEmpty().takeIf { it == "plan" } ?: "default"
     }
 
     private fun setGoal(objective: String) {
@@ -987,6 +991,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun newConversation() {
         discardPendingStreamEvents("new")
+        chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
         pendingConversationAnimationKey = null
