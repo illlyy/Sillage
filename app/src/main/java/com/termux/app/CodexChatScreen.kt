@@ -593,6 +593,11 @@ internal fun NativeChatScreen(
             onLoadSubagentHistory = onLoadSubagentHistory,
             onEditGoal = { showGoalDialog = true },
             onClearGoal = onClearGoal,
+            onExecutePlan = {
+                onModeChange("default")
+                onInputChange("\u8bf7\u6309\u7167\u5de5\u4f5c\u9762\u677f\u4e2d\u7684\u8ba1\u5212\u5f00\u59cb\u6267\u884c\u3002")
+                showWorkPanel = false
+            },
             onDismiss = { showWorkPanel = false },
         )
     }
@@ -2208,6 +2213,7 @@ private fun WorkPanelDialog(
     onLoadSubagentHistory: (String) -> Unit,
     onEditGoal: () -> Unit,
     onClearGoal: () -> Unit,
+    onExecutePlan: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var entered by remember { mutableStateOf(false) }
@@ -2274,7 +2280,7 @@ private fun WorkPanelDialog(
                                         selectedAgentId = subagentKey(agent)
                                         if (thread.isNotBlank()) onLoadSubagentHistory(thread)
                                     }
-                                } else WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, onEditGoal, onClearGoal)
+                                } else WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, onEditGoal, onClearGoal, onExecutePlan)
                             }
                         } else {
                             val agent = agents.firstOrNull { subagentKey(it) == selectedAgentId }
@@ -2317,13 +2323,20 @@ private fun parsePlanItems(raw: String): List<JSONObject> = runCatching {
 }.getOrDefault(emptyList())
 
 @Composable
-private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditGoal: () -> Unit, onClearGoal: () -> Unit) {
+private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditGoal: () -> Unit, onClearGoal: () -> Unit, onExecutePlan: () -> Unit) {
     val plan = remember(raw) { parsePlanItems(raw) }
     if (plan.isEmpty() && goal.isBlank()) {
         WorkPanelEmpty("\u8fd8\u6ca1\u6709\u8ba1\u5212", "\u5207\u6362\u5230\u8ba1\u5212\u6a21\u5f0f\u5e76\u53d1\u9001\u4efb\u52a1\uff0cCodex \u7684\u6267\u884c\u8ba1\u5212\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002")
         return
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (plan.isNotEmpty()) item(key = "execute-plan") {
+            Button(onClick = onExecutePlan, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
+                Icon(HugeIcons.Zap, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("\u6309\u6b64\u8ba1\u5212\u5f00\u59cb\u6267\u884c")
+            }
+        }
         if (goal.isNotBlank()) item(key = "active-goal") {
             Surface(
                 modifier = Modifier.fillMaxWidth().clickable { onEditGoal() },

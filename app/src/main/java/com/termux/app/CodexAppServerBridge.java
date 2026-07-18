@@ -1235,6 +1235,10 @@ final class CodexAppServerBridge {
             || text.startsWith("<collaboration_mode>")
             || text.startsWith("<skills_instructions>")
             || text.startsWith("<plugins_instructions>")
+            || text.startsWith("<goal>")
+            || text.startsWith("<thread_goal>")
+            || text.startsWith("<task_goal>")
+            || text.startsWith("<goal_context>")
             || (text.startsWith("<cwd>") && text.contains("<filesystem>"));
     }
 
