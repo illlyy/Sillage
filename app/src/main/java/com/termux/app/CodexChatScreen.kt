@@ -2012,8 +2012,10 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         val parts = text.split('|')
         val completed = parts.getOrNull(1) == "complete"
         val count = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        var expanded by remember(message.id) { mutableStateOf(false) }
+        val planSteps = remember(state.planJson) { parsePlanItems(state.planJson) }
         Surface(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { expanded = !expanded },
             shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -2031,6 +2033,14 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 }
                 if (completed) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp))
                 else CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+            }
+            if (expanded && planSteps.isNotEmpty()) {
+                Column(Modifier.padding(start = 42.dp, end = 16.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    planSteps.forEachIndexed { index, step ->
+                        val label = step.optString("step").ifBlank { step.optString("title") }.ifBlank { step.optString("description") }
+                        if (label.isNotBlank()) Text("${index + 1}. $label", style = MaterialTheme.typography.bodySmall, lineHeight = 18.sp)
+                    }
+                }
             }
         }
         return
