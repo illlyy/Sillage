@@ -2337,8 +2337,9 @@ private fun WorkPanelDialog(
 
 @Composable
 private fun WorkPanelTabs(tab: String, planCount: Int, agentCount: Int, onTab: (String) -> Unit) {
+    val language = LocalNativeLanguage.current
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf("plan" to "\u8ba1\u5212 $planCount", "agents" to "\u5b50\u4ee3\u7406 $agentCount").forEach { (id, label) ->
+        listOf("plan" to "${nativeText(language, "??", "Plan")} $planCount", "agents" to "${nativeText(language, "???", "Agents")} $agentCount").forEach { (id, label) ->
             Surface(
                 modifier = Modifier.weight(1f).clickable { onTab(id) },
                 shape = CircleShape,
@@ -2356,6 +2357,7 @@ private fun parsePlanItems(raw: String): List<JSONObject> = runCatching {
 
 @Composable
 private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditGoal: () -> Unit, onClearGoal: () -> Unit, onExecutePlan: () -> Unit) {
+    val language = LocalNativeLanguage.current
     val plan = remember(raw) { parsePlanItems(raw) }
     if (plan.isEmpty() && goal.isBlank()) {
         WorkPanelEmpty("\u8fd8\u6ca1\u6709\u8ba1\u5212", "\u5207\u6362\u5230\u8ba1\u5212\u6a21\u5f0f\u5e76\u53d1\u9001\u4efb\u52a1\uff0cCodex \u7684\u6267\u884c\u8ba1\u5212\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002")
@@ -2366,7 +2368,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditG
             Button(onClick = onExecutePlan, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
                 Icon(HugeIcons.Zap, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("\u6309\u6b64\u8ba1\u5212\u5f00\u59cb\u6267\u884c")
+                Text(nativeText(language, "????????", "Execute this plan"))
             }
         }
         if (goal.isNotBlank()) item(key = "active-goal") {
@@ -2382,7 +2384,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditG
                     }
                     Spacer(Modifier.width(11.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("\u6301\u7eed\u76ee\u6807", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                        Text(nativeText(language, "????", "Active goal"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                         Text(goal, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp, modifier = Modifier.padding(top = 3.dp))
                     }
                     IconButton(onClick = onClearGoal, modifier = Modifier.size(34.dp)) {
@@ -3332,6 +3334,7 @@ private fun RikkaChatInput(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -> Unit) {
+    val language = LocalNativeLanguage.current
     val tools = listOf(
         Triple(HugeIcons.Sparkles, "\u538b\u7f29\u4e0a\u4e0b\u6587", "/compact"),
         Triple(HugeIcons.Add01, "\u6dfb\u52a0\u56fe\u7247\u6216\u6587\u4ef6", "__attachments__"),
@@ -3343,10 +3346,10 @@ private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -
     )
     Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("\u5de5\u5177", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text(nativeText(language, "\u5de5\u5177", "Tools"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = onDismiss) { Icon(HugeIcons.Cancel01, "\u5173\u95ed") }
         }
-        Text("\u8f93\u5165 / \u4e5f\u53ef\u4ee5\u968f\u65f6\u6253\u5f00\u6b64\u9762\u677f", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 10.dp))
+        Text(nativeText(language, "\u8f93\u5165 / \u4e5f\u53ef\u4ee5\u968f\u65f6\u6253\u5f00\u6b64\u9762\u677f", "Type / to open this panel"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 10.dp))
         tools.forEach { (icon, title, command) ->
             Surface(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onCommand(command) }, shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
