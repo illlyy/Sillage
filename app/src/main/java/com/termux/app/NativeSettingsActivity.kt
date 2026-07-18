@@ -30,6 +30,8 @@ class NativeSettingsActivity : ComponentActivity() {
             var animations by remember { mutableStateOf(prefs.getBoolean("native_stream_animations_v1", true)) }
             var reasoning by remember { mutableStateOf(prefs.getBoolean("native_show_reasoning_v1", true)) }
             var follow by remember { mutableStateOf(prefs.getBoolean("native_auto_follow_v1", true)) }
+            var showTypography by remember { mutableStateOf(false) }
+            var showAbout by remember { mutableStateOf(false) }
             val lang = if (language == "en") "en" else "zh"
             FcodeChatTheme(theme, lang, animations, reasoning, follow) {
                 BackHandler { finish() }
@@ -41,14 +43,16 @@ class NativeSettingsActivity : ComponentActivity() {
                     item { SettingsSection(if (lang == "zh") "\u5916\u89c2" else "Appearance") }
                     item { SettingsRow(HugeIcons.Moon02, if (lang == "zh") "\u4e3b\u9898" else "Theme", when(theme){"light"->if(lang=="zh")"\u6d45\u8272" else "Light";"dark"->if(lang=="zh")"\u6df1\u8272" else "Dark";else->if(lang=="zh")"\u8ddf\u968f\u7cfb\u7edf" else "System"}) { theme=when(theme){"system"->"light";"light"->"dark";else->"system"}; prefs.edit().putString("native_theme_mode_v1",theme).apply() } }
                     item { SettingsRow(HugeIcons.LanguageCircle, if (lang == "zh") "\u8bed\u8a00" else "Language", if(lang=="zh") "\u7b80\u4f53\u4e2d\u6587" else "English") { language=if(language=="en")"zh" else "en"; prefs.edit().putString("native_language_v1",language).apply() } }
-                    item { SettingsRow(HugeIcons.Text, if(lang=="zh") "\u6587\u5b57\u4e0e Markdown" else "Typography & Markdown", if(lang=="zh") "\u516c\u5f0f\u3001\u4ee3\u7801\u3001\u5217\u8868" else "Math, code and lists") {} }
+                    item { SettingsRow(HugeIcons.Text, if(lang=="zh") "\u6587\u5b57\u4e0e Markdown" else "Typography & Markdown", if(lang=="zh") "\u516c\u5f0f\u3001\u4ee3\u7801\u3001\u5217\u8868" else "Math, code and lists") { showTypography = true } }
                     item { SettingsSection(if(lang=="zh") "\u5bf9\u8bdd" else "Conversation") }
-                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "\u6d41\u5f0f\u52a8\u753b" else "Streaming animation", if(animations) if(lang=="zh")"\u5f00\u542f" else "On" else if(lang=="zh")"\u5f00\u542f" else "Off") { animations=!animations; prefs.edit().putBoolean("native_stream_animations_v1",animations).apply() } }
-                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "\u601d\u8003\u8fc7\u7a0b" else "Reasoning", if(reasoning) if(lang=="zh")"\u663e\u793a" else "Shown" else if(lang=="zh")"\u663e\u793a" else "Hidden") { reasoning=!reasoning; prefs.edit().putBoolean("native_show_reasoning_v1",reasoning).apply() } }
-                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "\u81ea\u52a8\u8ddf\u968f\u56de\u7b54" else "Auto-follow output", if(follow) if(lang=="zh")"\u5f00\u542f" else "On" else if(lang=="zh")"\u5f00\u542f" else "Off") { follow=!follow; prefs.edit().putBoolean("native_auto_follow_v1",follow).apply() } }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "\u6d41\u5f0f\u52a8\u753b" else "Streaming animation", if(animations) if(lang=="zh")"\u5f00\u542f" else "On" else if(lang=="zh")"\u5173\u95ed" else "Off") { animations=!animations; prefs.edit().putBoolean("native_stream_animations_v1",animations).apply() } }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "\u601d\u8003\u8fc7\u7a0b" else "Reasoning", if(reasoning) if(lang=="zh")"\u663e\u793a" else "Shown" else if(lang=="zh")"\u9690\u85cf" else "Hidden") { reasoning=!reasoning; prefs.edit().putBoolean("native_show_reasoning_v1",reasoning).apply() } }
+                    item { SettingsRow(HugeIcons.LanguageCircle, if(lang=="zh") "\u81ea\u52a8\u8ddf\u968f\u56de\u7b54" else "Auto-follow output", if(follow) if(lang=="zh")"\u5f00\u542f" else "On" else if(lang=="zh")"\u5173\u95ed" else "Off") { follow=!follow; prefs.edit().putBoolean("native_auto_follow_v1",follow).apply() } }
                     item { SettingsSection(if(lang=="zh") "\u7cfb\u7edf" else "System") }
-                    item { SettingsRow(HugeIcons.Text, if(lang=="zh") "\u5173\u4e8e Fcode" else "About Fcode", "Compose UI") {} }
+                    item { SettingsRow(HugeIcons.Text, if(lang=="zh") "\u5173\u4e8e Fcode" else "About Fcode", "Compose UI") { showAbout = true } }
                 }}
+                if (showTypography) AlertDialog(onDismissRequest={showTypography=false}, title={Text(if(lang=="zh")"\u6587\u5b57\u4e0e Markdown" else "Typography & Markdown")}, text={Text(if(lang=="zh")"\u5df2\u652f\u6301 Markdown\u3001\u4ee3\u7801\u5757\u3001\u5217\u8868\u548c\u516c\u5f0f\u6e32\u67d3\u3002\u540e\u7eed\u5c06\u5728\u6b64\u6dfb\u52a0\u5b57\u53f7\u4e0e\u884c\u8ddd\u8c03\u8282\u3002" else "Markdown, code blocks, lists and math rendering are enabled. Font size and line-height controls will live here.")}, confirmButton={TextButton({showTypography=false}){Text(if(lang=="zh")"\u5b8c\u6210" else "Done")}})
+                if (showAbout) AlertDialog(onDismissRequest={showAbout=false}, title={Text("Fcode")}, text={Text(if(lang=="zh")"\u539f\u751f Compose UI\nWebUI \u4fdd\u6301\u72ec\u7acb\nGoal\u3001Plan \u4e0e\u591a\u4efb\u52a1\u652f\u6301" else "Native Compose UI\nWebUI remains independent\nGoal, Plan and multitasking support")}, confirmButton={TextButton({showAbout=false}){Text(if(lang=="zh")"\u5b8c\u6210" else "Done")}})
             }
         }
     }
