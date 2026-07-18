@@ -1138,6 +1138,7 @@ private fun RikkaMessageItem(message: NativeChatMessage, chatState: NativeChatSt
 
 @Composable
 private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>, onEdit: () -> Unit, onPreviewAttachment: (NativeAttachment) -> Unit) {
+    val language = LocalNativeLanguage.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
@@ -1204,12 +1205,12 @@ private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachment
             }
             DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                 DropdownMenuItem(
-                    text = { Text("复制") },
+                    text = { Text(nativeText(language, "\u590d\u5236", "Copy")) },
                     leadingIcon = { Icon(HugeIcons.Copy01, null, modifier = Modifier.size(18.dp)) },
                     onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)); menuExpanded = false },
                 )
                 DropdownMenuItem(
-                    text = { Text("编辑并重新生成") },
+                    text = { Text(nativeText(language, "\u7f16\u8f91\u5e76\u91cd\u65b0\u751f\u6210", "Edit and regenerate")) },
                     leadingIcon = { Icon(HugeIcons.PencilEdit01, null, modifier = Modifier.size(18.dp)) },
                     onClick = { menuExpanded = false; onEdit() },
                 )
@@ -1289,7 +1290,7 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
                     ProcessingPanel(liveState, elapsedSeconds, text.isNotBlank(), onLoadSubagentHistory, onReasoningAutoCollapse)
                     Spacer(Modifier.height(6.dp))
                 }
-                Text("\u9ed8\u8ba4\u52a9\u624b", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(nativeText(language, "\u9ed8\u8ba4\u52a9\u624b", "Assistant"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
                 StreamingResponseText(messageId, text, streaming, revealStartedAt, finalOnlyReveal)
                 AnimatedVisibility(
@@ -1300,7 +1301,7 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
                     Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(7.dp))
-                        Text("\u6b63\u5728\u751f\u6210", style = MaterialTheme.typography.labelSmall)
+                        Text(nativeText(language, "\u6b63\u5728\u751f\u6210", "Generating"), style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -1314,22 +1315,22 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
             DropdownMenuItem(
-                text = { Text("复制回答") },
+                text = { Text(nativeText(language, "\u590d\u5236\u56de\u7b54", "Copy answer")) },
                 leadingIcon = { Icon(HugeIcons.Copy01, null, modifier = Modifier.size(18.dp)) },
                 onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)); menuExpanded = false },
             )
             DropdownMenuItem(
-                text = { Text("引用回答") },
+                text = { Text(nativeText(language, "\u5f15\u7528\u56de\u7b54", "Quote answer")) },
                 leadingIcon = { Icon(HugeIcons.LeftToRightListBullet, null, modifier = Modifier.size(18.dp)) },
                 onClick = { menuExpanded = false; onQuote(text) },
             )
             if (onRetry != null) DropdownMenuItem(
-                text = { Text("重新生成") },
+                text = { Text(nativeText(language, "\u91cd\u65b0\u751f\u6210", "Regenerate")) },
                 leadingIcon = { Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(18.dp)) },
                 onClick = { menuExpanded = false; onRetry() },
             )
             DropdownMenuItem(
-                text = { Text("分享回答") },
+                text = { Text(nativeText(language, "\u5206\u4eab\u56de\u7b54", "Share answer")) },
                 leadingIcon = { Icon(HugeIcons.Share08, null, modifier = Modifier.size(18.dp)) },
                 onClick = {
                     menuExpanded = false
