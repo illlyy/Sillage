@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -3097,6 +3098,7 @@ private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConf
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RikkaChatInput(
     value: String,
@@ -3123,6 +3125,26 @@ private fun RikkaChatInput(
     onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var toolsExpanded by remember { mutableStateOf(false) }
+    val slashCommandMode = value.trimStart().startsWith("/")
+    LaunchedEffect(slashCommandMode) {
+        if (slashCommandMode) toolsExpanded = true
+    }
+    if (toolsExpanded) {
+        ModalBottomSheet(
+            onDismissRequest = { toolsExpanded = false },
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        ) {
+            NativeComposerToolSheet(
+                onDismiss = { toolsExpanded = false },
+                onCommand = { command ->
+                    if (command == "__attachments__") onMoreClick() else onValueChange(command)
+                    toolsExpanded = false
+                },
+            )
+        }
+    }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
     val bottomCorner by animateDpAsState(if (imeVisible) 0.dp else 28.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomCorner")
@@ -3217,7 +3239,7 @@ private fun RikkaChatInput(
                         ) {
                             InputTool(HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick)
                             LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected)
-                            InputTool(HugeIcons.Add01, "更多选项", onMoreClick)
+                            InputTool(HugeIcons.Add01, "\u5de5\u5177", { toolsExpanded = true })
                         }
                         Surface(
                             modifier = Modifier.size(42.dp).clickable(enabled = loading || (enabled && value.isNotBlank())) { onSend() },
@@ -3245,6 +3267,38 @@ private fun RikkaChatInput(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -> Unit) {
+    val tools = listOf(
+        Triple(HugeIcons.Sparkles, "\u538b\u7f29\u4e0a\u4e0b\u6587", "/compact"),
+        Triple(HugeIcons.Add01, "\u6dfb\u52a0\u56fe\u7247\u6216\u6587\u4ef6", "__attachments__"),
+        Triple(HugeIcons.Files02, "\u5217\u51fa\u5f53\u524d\u76ee\u5f55", "/ls"),
+        Triple(HugeIcons.Search01, "\u641c\u7d22\u6587\u4ef6", "/search "),
+        Triple(HugeIcons.PencilEdit01, "\u7f16\u8f91\u4e0a\u4e00\u6761\u6d88\u606f", "/edit"),
+        Triple(HugeIcons.Refresh03, "\u91cd\u65b0\u751f\u6210\u56de\u7b54", "/retry"),
+        Triple(HugeIcons.Cancel01, "\u6e05\u7a7a\u8f93\u5165", ""),
+    )
+    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("\u5de5\u5177", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = onDismiss) { Icon(HugeIcons.Cancel01, "\u5173\u95ed") }
+        }
+        Text("\u8f93\u5165 / \u4e5f\u53ef\u4ee5\u968f\u65f6\u6253\u5f00\u6b64\u9762\u677f", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 10.dp))
+        tools.forEach { (icon, title, command) ->
+            Surface(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onCommand(command) }, shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(14.dp))
+                    Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    Text(when (command) { "__attachments__" -> "\u9009\u62e9"; "" -> "\u6e05\u9664"; else -> command }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
     }
 }
 
