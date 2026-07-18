@@ -3140,12 +3140,13 @@ private fun ComposerModeCapsules(
 @Composable
 private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var value by remember(initialValue) { mutableStateOf(initialValue) }
+    val language = LocalNativeLanguage.current
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initialValue.isBlank()) "\u8bbe\u7f6e\u6301\u7eed\u76ee\u6807" else "\u7f16\u8f91\u6301\u7eed\u76ee\u6807") },
+        title = { Text(if (initialValue.isBlank()) nativeText(language, "??????", "Set active goal") else nativeText(language, "??????", "Edit active goal")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Codex \u4f1a\u5728\u540e\u7eed\u6bcf\u4e2a\u56de\u5408\u4e2d\u7ee7\u7eed\u8ffd\u8e2a\u8fd9\u4e2a\u76ee\u6807\u3002", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(nativeText(language, "Codex ??????????????????", "Codex will keep tracking this goal in later turns."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(
                     value = value,
                     onValueChange = { value = it },
@@ -3153,12 +3154,12 @@ private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConf
                     minLines = 3,
                     maxLines = 7,
                     shape = RoundedCornerShape(18.dp),
-                    placeholder = { Text("\u63cf\u8ff0\u4f60\u60f3\u8ba9 Codex \u6301\u7eed\u5b8c\u6210\u7684\u4e8b\u60c5") },
+                    placeholder = { Text(nativeText(language, "????? Codex ???????", "Describe what Codex should keep working toward")) },
                 )
             }
         },
-        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text("\u542f\u7528\u76ee\u6807") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("\u53d6\u6d88") } },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text(nativeText(language, "????", "Enable goal")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "??", "Cancel")) } },
     )
 }
 
