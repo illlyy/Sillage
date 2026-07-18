@@ -2382,7 +2382,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
     val language = LocalNativeLanguage.current
     val plan = remember(raw) { parsePlanItems(raw) }
     if (plan.isEmpty() && goal.isBlank()) {
-        WorkPanelEmpty("\u8fd8\u6ca1\u6709\u8ba1\u5212", "\u5207\u6362\u5230\u8ba1\u5212\u6a21\u5f0f\u5e76\u53d1\u9001\u4efb\u52a1\uff0cCodex \u7684\u6267\u884c\u8ba1\u5212\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002")
+        WorkPanelEmpty(nativeText(language, "\u8fd8\u6ca1\u6709\u8ba1\u5212", "No plan yet"), nativeText(language, "\u5207\u6362\u5230\u8ba1\u5212\u6a21\u5f0f\u5e76\u53d1\u9001\u4efb\u52a1\uff0cCodex \u7684\u6267\u884c\u8ba1\u5212\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002", "Switch to Plan mode and send a task; Codex will show the generated plan here."))
         return
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -2395,7 +2395,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
         }
         if (goal.isNotBlank()) item(key = "active-goal") {
             Surface(
-                modifier = Modifier.fillMaxWidth().clickable { onEditGoal() },
+                modifier = Modifier.fillMaxWidth().clickable(enabled = executeEnabled) { onEditGoal() },
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -2409,7 +2409,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
                         Text(nativeText(language, "\u6d3b\u8dc3\u76ee\u6807", "Active goal"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                         Text(goal, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp, modifier = Modifier.padding(top = 3.dp))
                     }
-                    IconButton(onClick = onClearGoal, modifier = Modifier.size(34.dp)) {
+                    IconButton(onClick = onClearGoal, enabled = executeEnabled, modifier = Modifier.size(34.dp)) {
                         Icon(HugeIcons.Cancel01, nativeText(language, "\u6e05\u9664\u76ee\u6807", "Clear goal"), Modifier.size(16.dp))
                     }
                 }
@@ -2433,7 +2433,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
                     Spacer(Modifier.width(11.dp))
                     Column(Modifier.weight(1f)) {
                         Text(item.optString("step", item.optString("text", item.toString())), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
-                        Text(when (status) { "completed" -> "\u5df2\u5b8c\u6210"; "in_progress", "inProgress" -> "\u8fdb\u884c\u4e2d"; else -> "\u5f85\u5904\u7406" }, style = MaterialTheme.typography.labelSmall, color = color, modifier = Modifier.padding(top = 4.dp))
+                        Text(when (status) { "completed" -> nativeText(language, "\u5df2\u5b8c\u6210", "Completed"); "in_progress", "inProgress" -> nativeText(language, "\u8fdb\u884c\u4e2d", "In progress"); else -> nativeText(language, "\u5f85\u5904\u7406", "Pending") }, style = MaterialTheme.typography.labelSmall, color = color, modifier = Modifier.padding(top = 4.dp))
                     }
                 }
             }
