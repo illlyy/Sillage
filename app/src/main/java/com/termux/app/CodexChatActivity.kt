@@ -1171,15 +1171,36 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.skills.addAll(parsed)
             }
             "onPlanUpdated" -> {
+                // App-server versions have emitted the plan at params.plan, turn.plan,
+                // or inside a nested payload. Normalize all of them so Plan mode is not
+                // rendered as an empty panel on older/newer CLI builds.
                 val payload = runCatching { JSONObject(value) }.getOrNull()
-                chatState.planJson = payload?.optJSONArray("plan")?.toString() ?: "[]"
-                chatState.planExplanation = payload?.optString("explanation").orEmpty()
+                val turn = payload?.optJSONObject("turn")
+                val nested = payload?.optJSONObject("payload")
+                val plan = payload?.optJSONArray("plan")
+                    ?: turn?.optJSONArray("plan")
+                    ?: nested?.optJSONArray("plan")
+                val explanation = payload?.optString("explanation")?.takeIf { it.isNotBlank() }
+                    ?: turn?.optString("explanation")?.takeIf { it.isNotBlank() }
+                    ?: nested?.optString("explanation")?.takeIf { it.isNotBlank() }
+                    ?: ""
+                if (plan != null) chatState.planJson = plan.toString()
+                chatState.planExplanation = explanation
                 currentThreadId?.let { threadId ->
                     getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
                         .putString(planPreferenceKey(threadId), chatState.planJson)
                         .putString(planExplanationPreferenceKey(threadId), chatState.planExplanation)
                         .apply()
                 }
+                chatState.revision++
+            }
+            "onCompactStatus" -> {
+                val text = when (value) {
+                    "started" -> nativeText(nativeLanguage, "\u6b63\u5728\u538b\u7f29\u4e0a\u4e0b\u6587\u2026", "Compacting context?")
+                    "completed" -> nativeText(nativeLanguage, "\u4e0a\u4e0b\u6587\u5df2\u538b\u7f29", "Context compacted")
+                    else -> nativeText(nativeLanguage, "\u4e0a\u4e0b\u6587\u538b\u7f29\u5931\u8d25", "Context compaction failed")
+                }
+                chatState.messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "NOTICE|$text"))
                 chatState.revision++
             }
             "onUserInputRequest" -> {

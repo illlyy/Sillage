@@ -56,6 +56,7 @@ final class CodexAppServerBridge {
     private volatile String activeTurnId;
     private volatile int initializeRequestId = -1;
     private volatile int editRollbackRequestId = -1;
+    private volatile int compactRequestId = -1;
     private volatile String pendingEditedText;
     private volatile String pendingEditedModel;
     private volatile String pendingEditedEffort;
@@ -512,9 +513,14 @@ final class CodexAppServerBridge {
     }
 
     void compactThread() {
-        if (threadId == null) return;
-        try { sendRequest("thread/compact/start", new JSONObject().put("threadId", threadId)); }
-        catch (Exception e) { emit("onNativeError", e.getMessage()); }
+        if (threadId == null || threadId.trim().isEmpty()) return;
+        try {
+            emit("onCompactStatus", "started");
+            compactRequestId = sendRequest("thread/compact/start", new JSONObject().put("threadId", threadId));
+        } catch (Exception e) {
+            emit("onCompactStatus", "failed");
+            emit("onNativeError", e.getMessage());
+        }
     }
 
     void setThreadGoalStatus(String status) {
@@ -700,6 +706,10 @@ final class CodexAppServerBridge {
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
         if (message.has("error")) {
+            if (message.optInt("id", -1) == compactRequestId) {
+                compactRequestId = -1;
+                emit("onCompactStatus", "failed");
+            }
             if (message.optInt("id", -1) == editRollbackRequestId) {
                 editRollbackRequestId = -1;
                 pendingEditedText = pendingEditedModel = pendingEditedEffort = null;
@@ -719,6 +729,10 @@ final class CodexAppServerBridge {
         }
         if (message.has("id") && message.has("result")) {
             int id = message.optInt("id", -1);
+            if (id == compactRequestId) {
+                compactRequestId = -1;
+                emit("onCompactStatus", "completed");
+            }
             JSONObject result = message.optJSONObject("result");
             if (result != null && result.optJSONObject("thread") != null) {
                 String resultThreadId = result.getJSONObject("thread").getString("id");
@@ -756,7 +770,12 @@ final class CodexAppServerBridge {
                 .put("routeReady", visibleRouteReady)
                 .put("type", ignoredItem == null ? "" : ignoredItem.optString("type", "")));
         }
-        if ("turn/plan/updated".equals(method) && params != null && primaryEvent) {
+        if (("turn/plan/updated".equals(method) || "turn/planUpdated".equals(method)
+                || "plan/updated".equals(method)) && params != null && primaryEvent) {
+            // Keep the raw payload: native normalizes params.plan, turn.plan and
+            // payload.plan because app-server versions differ in nesting.
+            NativeChatDiagnostics.record(activity, "plan_updated", new JSONObject()
+                .put("method", method).put("thread", shortId(params.optString("threadId", ""))));
             emit("onPlanUpdated", params.toString());
         }
         if (("item/started".equals(method) || "item/completed".equals(method)) && params != null && primaryEvent) {
