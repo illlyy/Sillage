@@ -1931,6 +1931,7 @@ private fun MarkdownLikeText(text: String) {
 
 @Composable
 private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatState, onLoadSubagentHistory: (String) -> Unit) {
+    val language = LocalNativeLanguage.current
     val text = message.content
     if (text.startsWith("NOTICE|")) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
@@ -1967,7 +1968,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 Column {
         if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(reasoning) }
         else if (reasoningUnavailable) Text(
-            "\u6a21\u578b\u672a\u8fd4\u56de\u53ef\u5c55\u793a\u7684\u601d\u8003\u6458\u8981",
+            nativeText(language, "?????????????", "The model did not return a visible reasoning summary"),
             modifier = Modifier.padding(top = 10.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
