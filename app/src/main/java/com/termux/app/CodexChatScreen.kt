@@ -639,6 +639,7 @@ internal fun NativeChatScreen(
     if (showGoalDialog) {
         GoalEditorDialog(
             initialValue = state.activeGoalObjective,
+            enabled = state.ready && !state.phase.active,
             onDismiss = { showGoalDialog = false },
             onConfirm = { objective ->
                 onSetGoal(objective)
@@ -3155,7 +3156,7 @@ private fun ComposerModeCapsules(
 }
 
 @Composable
-private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+private fun GoalEditorDialog(initialValue: String, enabled: Boolean, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var value by remember(initialValue) { mutableStateOf(initialValue) }
     val language = LocalNativeLanguage.current
     FlClashAnimatedDialog(
@@ -3175,7 +3176,7 @@ private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConf
                 )
             }
         },
-        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text(nativeText(language, "\u542f\u7528\u76ee\u6807", "Enable goal")) } },
+        confirmButton = { TextButton(enabled = enabled && value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text(nativeText(language, "\u542f\u7528\u76ee\u6807", "Enable goal")) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
     )
 }
