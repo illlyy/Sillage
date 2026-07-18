@@ -458,6 +458,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var nativeThemeMode by mutableStateOf("system")
     private var nativeLanguage by mutableStateOf("zh")
     private var streamAnimationsEnabled by mutableStateOf(true)
+    private var showReasoning by mutableStateOf(true)
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -475,13 +476,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         nativeThemeMode = nativePrefs.getString("native_theme_mode_v1", "system").orEmpty().takeIf { it in setOf("system", "light", "dark") } ?: "system"
         nativeLanguage = nativePrefs.getString("native_language_v1", "system").orEmpty().let { if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh" }
         streamAnimationsEnabled = nativePrefs.getBoolean("native_stream_animations_v1", true)
+        showReasoning = nativePrefs.getBoolean("native_show_reasoning_v1", true)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
         )
 
         setContent {
-            FcodeChatTheme(nativeThemeMode, nativeLanguage, streamAnimationsEnabled) {
+            FcodeChatTheme(nativeThemeMode, nativeLanguage, streamAnimationsEnabled, showReasoning) {
                 NativeChatScreen(
                     state = chatState,
                     onSend = ::sendMessage,
@@ -1180,6 +1182,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh"
         }
         streamAnimationsEnabled = prefs.getBoolean("native_stream_animations_v1", true)
+        showReasoning = prefs.getBoolean("native_show_reasoning_v1", true)
         if (chatState.busy) startFrameDiagnostics()
     }
 

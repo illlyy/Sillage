@@ -279,17 +279,18 @@ private val FcodeDarkColors = darkColorScheme(
 )
 val LocalNativeLanguage = staticCompositionLocalOf { "zh" }
 val LocalStreamAnimationsEnabled = staticCompositionLocalOf { true }
+val LocalShowReasoning = staticCompositionLocalOf { true }
 
 internal fun nativeText(language: String, zh: String, en: String): String = if (language == "en") en else zh
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", streamAnimations: Boolean = true, content: @Composable () -> Unit) {
+internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", streamAnimations: Boolean = true, showReasoning: Boolean = true, content: @Composable () -> Unit) {
     val dark = when (themeMode) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
     MaterialExpressiveTheme(
         colorScheme = if (dark) FcodeDarkColors else FcodeLightColors,
         motionScheme = MotionScheme.expressive(),
-        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, LocalStreamAnimationsEnabled provides streamAnimations, content = content) },
+        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, LocalStreamAnimationsEnabled provides streamAnimations, LocalShowReasoning provides showReasoning, content = content) },
     )
 }
 
@@ -1492,6 +1493,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     var expanded by remember { mutableStateOf(true) }
     var fullReasoning by remember { mutableStateOf(false) }
     val language = LocalNativeLanguage.current
+    val showReasoning = LocalShowReasoning.current
     val reasoningScrollState = rememberScrollState()
     val reasoningPreview = expanded && !state.reasoningComplete && !fullReasoning
     val reasoningLive = expanded && !state.reasoningComplete
@@ -1571,7 +1573,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
         QElasticExpand(expanded) {
             SafeExpandableViewport(maxHeight = 520.dp) {
                 Column {
-                if (state.reasoningText.isNotBlank()) {
+                if (showReasoning && state.reasoningText.isNotBlank()) {
                     val liveReasoningModifier = if (reasoningLive) {
                         Modifier
                             .fillMaxWidth()
