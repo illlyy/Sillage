@@ -798,8 +798,24 @@ final class CodexAppServerBridge {
                 .put("routeReady", visibleRouteReady)
                 .put("type", ignoredItem == null ? "" : ignoredItem.optString("type", "")));
         }
+        if ("event_msg".equals(method) && params != null && primaryEvent) {
+            JSONObject eventPayload = params.optJSONObject("payload");
+            if (eventPayload == null) eventPayload = params.optJSONObject("msg");
+            if (eventPayload != null && "plan_update".equals(eventPayload.optString("type"))) {
+                NativeChatDiagnostics.record(activity, "live_plan_event_msg", eventPayload);
+                emit("onPlanUpdated", eventPayload.toString());
+            }
+        }
+        boolean planLikeMethod = method.toLowerCase(java.util.Locale.ROOT).contains("plan")
+            || (params != null && (params.has("plan") || params.has("proposedPlan")));
+        if (planLikeMethod) {
+            NativeChatDiagnostics.record(activity, "plan_signal", new JSONObject()
+                .put("method", method).put("primary", primaryEvent)
+                .put("params", params == null ? JSONObject.NULL : params));
+        }
         if (("turn/plan/updated".equals(method) || "turn/planUpdated".equals(method)
-                || "plan/updated".equals(method)) && params != null && primaryEvent) {
+                || "plan/updated".equals(method) || "item/plan/updated".equals(method)
+                || "item/planUpdated".equals(method)) && params != null && primaryEvent) {
             // Keep the raw payload: native normalizes params.plan, turn.plan and
             // payload.plan because app-server versions differ in nesting.
             NativeChatDiagnostics.record(activity, "plan_updated", new JSONObject()
