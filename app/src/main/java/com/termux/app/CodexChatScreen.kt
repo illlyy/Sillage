@@ -1415,15 +1415,11 @@ private fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, cont
     AnimatedVisibility(
         visible = visible,
         modifier = modifier,
-        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f), clip = true),
-        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = spring(dampingRatio = 0.82f, stiffness = 440f), clip = true),
-    ) {
-        AnimatedVisibility(
-            visible = visible,
-            enter = fadeIn(tween(75, easing = LinearEasing)) + slideInVertically(initialOffsetY = { -it / 8 }, animationSpec = tween(130, easing = LinearEasing)),
-            exit = fadeOut(tween(65, easing = LinearEasing)) + slideOutVertically(targetOffsetY = { -it / 10 }, animationSpec = tween(105, easing = LinearEasing)),
-        ) { content() }
-    }
+        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = spring(dampingRatio = 0.82f, stiffness = 360f), clip = true)
+            + fadeIn(tween(120, easing = LinearEasing)),
+        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = spring(dampingRatio = 0.86f, stiffness = 380f), clip = true)
+            + fadeOut(tween(90, easing = LinearEasing)),
+    ) { content() }
 }
 
 @Composable
