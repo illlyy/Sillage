@@ -3316,7 +3316,7 @@ private fun RikkaChatInput(
                         minLines = 1,
                         maxLines = 5,
                         shape = MaterialTheme.shapes.largeIncreased,
-                        placeholder = { Text("输入消息") },
+                        placeholder = { Text(nativeText(language, "\u8f93\u5165\u6d88\u606f", "Type a message")) },
                         colors = TextFieldDefaults.colors(
                             focusedIndicatorColor = Color.Transparent,
                             unfocusedIndicatorColor = Color.Transparent,
