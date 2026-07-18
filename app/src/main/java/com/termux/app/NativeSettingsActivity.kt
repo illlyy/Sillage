@@ -1,6 +1,7 @@
 package com.termux.app
 
 import android.os.Bundle
+import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -32,7 +33,7 @@ class NativeSettingsActivity : ComponentActivity() {
             var follow by remember { mutableStateOf(prefs.getBoolean("native_auto_follow_v1", true)) }
             var showTypography by remember { mutableStateOf(false) }
             var showAbout by remember { mutableStateOf(false) }
-            val lang = if (language == "en") "en" else "zh"
+            val lang = if (language == "en") "en" else if (language == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh"
             FcodeChatTheme(theme, lang, animations, reasoning, follow) {
                 BackHandler { finish() }
                 Scaffold { pad -> LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(bottom = 28.dp)) {
