@@ -1,0 +1,7 @@
+ViewGroup id=android:id/content bounds=[91,2053][536,2613]
+  View flags=clickable,focusable bounds=[91,2081][536,2249]
+    TextView text="默认模式" bounds=[259,2123][494,2207]
+  View flags=clickable,focusable bounds=[91,2249][536,2417]
+    TextView text="计划模式" bounds=[259,2291][494,2375]
+  View flags=clickable,focusable bounds=[91,2417][536,2585]
+    TextView text="设置目标" bounds=[259,2459][494,2543]

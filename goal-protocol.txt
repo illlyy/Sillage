@@ -1,0 +1,64 @@
+          },
+        ),
+        "refresh-thread-description": P9(async (e, { conversationId: t }) => {
+          e.refreshConversationDescription(t);
+        }),
+        "set-thread-goal-status": F9(
+          async (e, { conversationId: t, status: n, threadSettings: r }) => {
+            n === `active` && (await bet(e, t, r));
+            let { goal: i } = await e.sendRequest(`thread/goal/set`, {
+              threadId: t,
+              status: n,
+            });
+            return (
+              e.updateConversationState(t, (e) => {
+                ((e.threadGoal = i), (e.threadGoalResumeConfirmation = null));
+              }),
+              n === `active` && e.maybeContinueActiveThreadGoal(t),
+              i
+            );
+          },
+        ),
+        "set-thread-goal": F9(
+          async (
+            e,
+            {
+              appendTranscriptItem: t,
+              conversationId: n,
+              objective: r,
+              threadSettings: i,
+            },
+          ) => {
+            (await Oi(e, {
+              conversationId: n,
+              model: null,
+              serviceTier: null,
+              reasoningEffort: null,
+              workspaceRoots: [e.getConversationCwd(n) ?? `/`],
+              collaborationMode:
+                e.getConversation(n)?.latestCollaborationMode ?? null,
+            }),
+              await bet(e, n, i));
+            let { goal: a } = await e.sendRequest(`thread/goal/set`, {
+              threadId: n,
+              objective: r,
+              status: `active`,
+            });
+            return (
+              t === !1
+                ? e.updateConversationState(n, (e) => {
+                    e.threadGoal = a;
+                  })
+                : ste(e, n, a),
+              a.status === `active` && e.maybeContinueActiveThreadGoal(n),
+              a
+            );
+          },
+        ),
+        "clear-thread-goal": F9(async (e, { conversationId: t }) =>
+          e.sendRequest(`thread/goal/clear`, { threadId: t }),
+        ),
+        "clear-thread-goal-resume-confirmation": F9(
+          async (e, { conversationId: t }) => {
+            e.updateConversationState(t, (e) => {
+              e.threadGoalResum

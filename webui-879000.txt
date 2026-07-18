@@ -1,0 +1,183 @@
+] = r),
+      (t[12] = i),
+      (t[13] = g))
+    : (g = t[13]);
+  let _;
+  return (
+    t[14] !== m || t[15] !== h || t[16] !== g
+      ? ((_ = (0, jK.jsxs)(jK.Fragment, { children: [m, h, g] })),
+        (t[14] = m),
+        (t[15] = h),
+        (t[16] = g),
+        (t[17] = _))
+      : (_ = t[17]),
+    _
+  );
+}
+function CK(e) {
+  return e.mode === `default`;
+}
+function wK(e) {
+  let t = (0, kK.c)(9),
+    { onClearGoal: n } = e,
+    r = Jn(),
+    i;
+  t[0] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((i = (0, jK.jsx)(`div`, {
+        className: `flex flex-col items-center text-center leading-tight`,
+        children: (0, jK.jsx)(`span`, {
+          children: (0, jK.jsx)(Q, {
+            id: `composer.goalModeIndicator.tooltip`,
+            defaultMessage: `Clear goal`,
+            description: `Tooltip for the goal mode footer indicator.`,
+          }),
+        }),
+      })),
+      (t[0] = i))
+    : (i = t[0]);
+  let a;
+  t[1] === r
+    ? (a = t[2])
+    : ((a = r.formatMessage({
+        id: `composer.goalModeIndicator.clear`,
+        defaultMessage: `Clear goal`,
+        description: `Accessible label for the goal footer indicator.`,
+      })),
+      (t[1] = r),
+      (t[2] = a));
+  let o, s;
+  t[3] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((o = (0, jK.jsx)(MO, {
+        "aria-hidden": !0,
+        className: `icon-xs shrink-0 group-hover:hidden`,
+      })),
+      (s = (0, jK.jsx)(Rh, {
+        "aria-hidden": !0,
+        className: `icon-xs hidden shrink-0 group-hover:block`,
+      })),
+      (t[3] = o),
+      (t[4] = s))
+    : ((o = t[3]), (s = t[4]));
+  let c;
+  t[5] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((c = (0, jK.jsx)(xW.FooterLabel, {
+        width: `wide`,
+        children: (0, jK.jsx)(Q, {
+          id: `composer.goalModeIndicator`,
+          defaultMessage: `Goal`,
+          description: `Goal mode indicator shown in the composer footer.`,
+        }),
+      })),
+      (t[5] = c))
+    : (c = t[5]);
+  let l;
+  return (
+    t[6] !== n || t[7] !== a
+      ? ((l = (0, jK.jsx)(Vo, {
+          tooltipContent: i,
+          side: `top`,
+          align: `center`,
+          sideOffset: 4,
+          children: (0, jK.jsxs)(Ri, {
+            "aria-label": a,
+            className: `group flex items-center gap-1 text-token-text-tertiary`,
+            size: `composer`,
+            color: `ghostActive`,
+            onClick: n,
+            children: [o, s, c],
+          }),
+        })),
+        (t[6] = n),
+        (t[7] = a),
+        (t[8] = l))
+      : (l = t[8]),
+    l
+  );
+}
+function TK(e) {
+  let t = (0, kK.c)(12),
+    { hasDefaultMode: n, setSelectedMode: r } = e,
+    i = Jn(),
+    a;
+  t[0] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((a = (0, jK.jsx)(Q, {
+        id: `composer.planModeIndicator.tooltipText`,
+        defaultMessage: `Create a plan`,
+        description: `Tooltip text for the plan mode footer indicator`,
+      })),
+      (t[0] = a))
+    : (a = t[0]);
+  let o;
+  t[1] === i
+    ? (o = t[2])
+    : ((o = i.formatMessage(MK.planModeIndicator)), (t[1] = i), (t[2] = o));
+  let s;
+  t[3] !== n || t[4] !== r
+    ? ((s = () => {
+        r(n ? `default` : null);
+      }),
+      (t[3] = n),
+      (t[4] = r),
+      (t[5] = s))
+    : (s = t[5]);
+  let c, l;
+  t[6] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((c = (0, jK.jsx)(WD, {
+        "aria-hidden": !0,
+        className: `icon-xs shrink-0 group-hover:hidden`,
+      })),
+      (l = (0, jK.jsx)(Rh, {
+        "aria-hidden": !0,
+        className: `icon-xs hidden shrink-0 group-hover:block`,
+      })),
+      (t[6] = c),
+      (t[7] = l))
+    : ((c = t[6]), (l = t[7]));
+  let u;
+  t[8] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((u = (0, jK.jsx)(xW.FooterLabel, {
+        width: `narrow`,
+        children: (0, jK.jsx)(Q, { ...MK.planModeIndicator }),
+      })),
+      (t[8] = u))
+    : (u = t[8]);
+  let d;
+  return (
+    t[9] !== o || t[10] !== s
+      ? ((d = (0, jK.jsx)(Vo, {
+          tooltipContent: a,
+          side: `top`,
+          align: `center`,
+          sideOffset: 4,
+          children: (0, jK.jsxs)(Ri, {
+            "aria-label": o,
+            className: `group flex items-center gap-1 text-token-text-tertiary`,
+            size: `composer`,
+            color: `ghostActive`,
+            onClick: s,
+            children: [c, l, u],
+          }),
+        })),
+        (t[9] = o),
+        (t[10] = s),
+        (t[11] = d))
+      : (d = t[11]),
+    d
+  );
+}
+function EK(e) {
+  let t = (0, kK.c)(11),
+    { hideLabel: n, ideContext: r } = e,
+    i;
+  t[0] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((i = (0, jK.jsx)(`span`, {
+        children: (0, jK.jsx)(Q, {
+          id: `composer.ideContextIndicator.tooltipText`,
+          defaultMessage: `Include context from IDE such as{br}selection state and open files`,
+          description: `Primary tooltip text for the IDE context footer indicator`,
+          values: { br: (0, jK.jsx)(`br`, {}) },
+        }),
+      })),
+      (t[0] = i))
+    : (i = t[0]);
+ 

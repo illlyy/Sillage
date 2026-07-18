@@ -1,0 +1,171 @@
+t[8] = l))
+      : (l = t[8]),
+    l
+  );
+}
+function TK(e) {
+  let t = (0, kK.c)(12),
+    { hasDefaultMode: n, setSelectedMode: r } = e,
+    i = Jn(),
+    a;
+  t[0] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((a = (0, jK.jsx)(Q, {
+        id: `composer.planModeIndicator.tooltipText`,
+        defaultMessage: `Create a plan`,
+        description: `Tooltip text for the plan mode footer indicator`,
+      })),
+      (t[0] = a))
+    : (a = t[0]);
+  let o;
+  t[1] === i
+    ? (o = t[2])
+    : ((o = i.formatMessage(MK.planModeIndicator)), (t[1] = i), (t[2] = o));
+  let s;
+  t[3] !== n || t[4] !== r
+    ? ((s = () => {
+        r(n ? `default` : null);
+      }),
+      (t[3] = n),
+      (t[4] = r),
+      (t[5] = s))
+    : (s = t[5]);
+  let c, l;
+  t[6] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((c = (0, jK.jsx)(WD, {
+        "aria-hidden": !0,
+        className: `icon-xs shrink-0 group-hover:hidden`,
+      })),
+      (l = (0, jK.jsx)(Rh, {
+        "aria-hidden": !0,
+        className: `icon-xs hidden shrink-0 group-hover:block`,
+      })),
+      (t[6] = c),
+      (t[7] = l))
+    : ((c = t[6]), (l = t[7]));
+  let u;
+  t[8] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((u = (0, jK.jsx)(xW.FooterLabel, {
+        width: `narrow`,
+        children: (0, jK.jsx)(Q, { ...MK.planModeIndicator }),
+      })),
+      (t[8] = u))
+    : (u = t[8]);
+  let d;
+  return (
+    t[9] !== o || t[10] !== s
+      ? ((d = (0, jK.jsx)(Vo, {
+          tooltipContent: a,
+          side: `top`,
+          align: `center`,
+          sideOffset: 4,
+          children: (0, jK.jsxs)(Ri, {
+            "aria-label": o,
+            className: `group flex items-center gap-1 text-token-text-tertiary`,
+            size: `composer`,
+            color: `ghostActive`,
+            onClick: s,
+            children: [c, l, u],
+          }),
+        })),
+        (t[9] = o),
+        (t[10] = s),
+        (t[11] = d))
+      : (d = t[11]),
+    d
+  );
+}
+function EK(e) {
+  let t = (0, kK.c)(11),
+    { hideLabel: n, ideContext: r } = e,
+    i;
+  t[0] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((i = (0, jK.jsx)(`span`, {
+        children: (0, jK.jsx)(Q, {
+          id: `composer.ideContextIndicator.tooltipText`,
+          defaultMessage: `Include context from IDE such as{br}selection state and open files`,
+          description: `Primary tooltip text for the IDE context footer indicator`,
+          values: { br: (0, jK.jsx)(`br`, {}) },
+        }),
+      })),
+      (t[0] = i))
+    : (i = t[0]);
+  let a;
+  t[1] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((a = (0, jK.jsxs)(`div`, {
+        className: `flex flex-col items-center text-center leading-tight`,
+        children: [
+          i,
+          (0, jK.jsx)(`span`, {
+            children: (0, jK.jsxs)(`span`, {
+              className: `inline-flex items-center gap-1`,
+              children: [
+                (0, jK.jsx)(Ug, {
+                  className: `px-1.5 py-0 text-xs leading-none`,
+                  children: (0, jK.jsx)(Q, {
+                    id: `composer.ideContextIndicator.tooltipSlashCommand`,
+                    defaultMessage: `/ide`,
+                    description: `Slash command badge in the IDE context indicator tooltip`,
+                  }),
+                }),
+                (0, jK.jsx)(Q, {
+                  id: `composer.ideContextIndicator.tooltipToggle`,
+                  defaultMessage: `to toggle`,
+                  description: `Secondary tooltip text showing the slash command action for IDE context`,
+                }),
+              ],
+            }),
+          }),
+        ],
+      })),
+      (t[1] = a))
+    : (a = t[1]);
+  let o;
+  t[2] === r
+    ? (o = t[3])
+    : ((o = () => {
+        r.setIsAutoContextOn(!1);
+      }),
+      (t[2] = r),
+      (t[3] = o));
+  let s, c;
+  t[4] === Symbol.for(`react.memo_cache_sentinel`)
+    ? ((s = (0, jK.jsx)(RU, {
+        "aria-hidden": !0,
+        className: `icon-xs shrink-0 group-hover:hidden`,
+      })),
+      (c = (0, jK.jsx)(Rh, {
+        "aria-hidden": !0,
+        className: `icon-xs hidden shrink-0 group-hover:block`,
+      })),
+      (t[4] = s),
+      (t[5] = c))
+    : ((s = t[4]), (c = t[5]));
+  let l;
+  t[6] === n
+    ? (l = t[7])
+    : ((l = n
+        ? null
+        : (0, jK.jsx)(xW.FooterLabel, {
+            width: `medium`,
+            children: (0, jK.jsx)(Q, {
+              id: `composer.ideContextIndicator`,
+              defaultMessage: `IDE context`,
+              description: `Include IDE context indicator shown next to the reasoning dropdown`,
+            }),
+          })),
+      (t[6] = n),
+      (t[7] = l));
+  let u;
+  return (
+    t[8] !== o || t[9] !== l
+      ? ((u = (0, jK.jsx)(Vo, {
+          tooltipContent: a,
+          side: `top`,
+          align: `center`,
+          sideOffset: 4,
+          children: (0, jK.jsxs)(Ri, {
+            className: `group flex items-center gap-1 text-token-text-link-foreground`,
+            size: `composer`,
+            color: `ghost`,
+            onClick: o,
+ 

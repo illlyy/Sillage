@@ -1,0 +1,327 @@
+),
+      (n[17] = m),
+      (n[18] = v),
+      (n[19] = x))
+    : (x = n[19]);
+  let S = x,
+    C;
+  n[20] !== r || n[21] !== S || n[22] !== l
+    ? ((C = (e) => {
+        if ((qs(), r)) {
+          try {
+            Wa(`update-thread-settings-for-next-turn`, {
+              conversationId: r,
+              threadSettings: { collaborationMode: S(e) },
+            }).catch((e) => {
+              wt.error(`Failed to set collaboration mode`, {
+                safe: { conversationId: r },
+                sensitive: { error: e },
+              });
+            });
+          } catch (e) {
+            let t = e;
+            wt.error(`Failed to set collaboration mode`, {
+              safe: { conversationId: r },
+              sensitive: { error: t },
+            });
+          }
+          return;
+        }
+        l(e);
+      }),
+      (n[20] = r),
+      (n[21] = S),
+      (n[22] = l),
+      (n[23] = C))
+    : (C = n[23]);
+  let w = C,
+    T;
+  n[24] !== v || n[25] !== _ || n[26] !== w
+    ? ((T = () => {
+        let e = v.find((e) => e.mode === _)?.mode ?? `default`;
+        e !== _ && w(e);
+      }),
+      (n[24] = v),
+      (n[25] = _),
+      (n[26] = w),
+      (n[27] = T))
+    : (T = n[27]);
+  let E = (0, $y.useEffectEvent)(T),
+    D;
+  n[28] !== h || n[29] !== v.length || n[30] !== E
+    ? ((D = () => {
+        h && v.length > 0 && E();
+      }),
+      (n[28] = h),
+      (n[29] = v.length),
+      (n[30] = E),
+      (n[31] = D))
+    : (D = n[31]);
+  let O;
+  (n[32] !== h || n[33] !== v
+    ? ((O = [v, h]), (n[32] = h), (n[33] = v), (n[34] = O))
+    : (O = n[34]),
+    (0, $y.useEffect)(D, O));
+  let k;
+  n[35] !== b.settings || n[36] !== s.model || n[37] !== s.reasoningEffort
+    ? ((k = {
+        ...b.settings,
+        model: s.model,
+        reasoning_effort: s.reasoningEffort,
+      }),
+      (n[35] = b.settings),
+      (n[36] = s.model),
+      (n[37] = s.reasoningEffort),
+      (n[38] = k))
+    : (k = n[38]);
+  let A;
+  n[39] !== b || n[40] !== k
+    ? ((A = { ...b, settings: k }), (n[39] = b), (n[40] = k), (n[41] = A))
+    : (A = n[41]);
+  let j = !h,
+    M;
+  return (
+    n[42] !== S ||
+    n[43] !== v ||
+    n[44] !== _ ||
+    n[45] !== w ||
+    n[46] !== A ||
+    n[47] !== j
+      ? ((M = {
+          modes: v,
+          activeMode: A,
+          selectedMode: _,
+          getModeForSelection: S,
+          setSelectedMode: w,
+          isLoading: j,
+        }),
+        (n[42] = S),
+        (n[43] = v),
+        (n[44] = _),
+        (n[45] = w),
+        (n[46] = A),
+        (n[47] = j),
+        (n[48] = M))
+      : (M = n[48]),
+    M
+  );
+}
+var JSe,
+  $y,
+  eb = e(() => {
+    ((JSe = G()),
+      Ds(),
+      su(),
+      ($y = r(U(), 1)),
+      pv(),
+      jl(),
+      da(),
+      uo(),
+      ree(),
+      BSe(),
+      Fv(),
+      qSe(),
+      ma());
+  });
+async function YSe(e, t) {
+  let n = [],
+    r = null;
+  do {
+    let i = await Wa(`list-permission-profiles`, {
+      hostId: e,
+      cursor: r,
+      limit: QSe,
+      cwd: t,
+    });
+    (n.push(...i.data), (r = i.nextCursor));
+  } while (r != null);
+  return n;
+}
+function XSe(e, t) {
+  return [`permission-profiles`, `list`, e, t ?? `no-cwd`];
+}
+function ZSe(e, t, n) {
+  let r = t?.allowedPermissionProfiles,
+    i = e.filter(({ allowed: e, id: t }) => e && (r == null || r[t] === !0)),
+    a = i.some(({ id: e }) => e === n) ? n : null,
+    o =
+      t?.defaultPermissions ??
+      a ??
+      (r?.[$Se] === !0 && r[tb] === !0 ? tb : null);
+  return {
+    profiles: i,
+    defaultProfileId: o != null && i.some(({ id: e }) => e === o) ? o : null,
+  };
+}
+var QSe,
+  $Se,
+  tb,
+  nb,
+  eCe = e(() => {
+    (su(),
+      da(),
+      C(),
+      Mr(),
+      (QSe = 100),
+      ($Se = `:read-only`),
+      (tb = `:workspace`),
+      (nb = ft(jc, ({ hostId: e, cwd: t }) => ({
+        queryKey: XSe(e, t),
+        queryFn: () => YSe(e, t),
+        staleTime: Qn.ONE_MINUTE,
+      }))));
+  });
+function tCe(e) {
+  let t = de(e);
+  return t === `custom` ? `read-only` : t;
+}
+function nCe(e, t, n, r) {
+  return e == null ||
+    (r === `granular` && e === `auto`) ||
+    (r === `auto` && e === `granular`) ||
+    !t.includes(e) ||
+    (e === `guardian-approvals` && !n)
+    ? null
+    : e;
+}
+function rCe({
+  isConfigDataPending: e,
+  requirements: t,
+  resolvedConfig: n,
+  isGuardianApprovalEnabledByStatsig: r,
+  hasAuthoritativeGuardianApprovalDefault: i = !1,
+  defaultWorkspaceWriteMode: a = `auto`,
+}) {
+  let o = e
+      ? [`read-only`, `auto`, `granular`, `full-access`, `custom`]
+      : Ci(t, n),
+    s = as(n ?? void 0) ?? !0,
+    c = r || i,
+    l = o.filter((e) => e !== `guardian-approvals`),
+    u = o.includes(`guardian-approvals`) && l.length === 0,
+    d = (c && s) || u ? o : l,
+    f = d.includes(`guardian-approvals`),
+    p = d.filter((e) => e !== `custom`),
+    m = tl(n ?? void 0, a),
+    h = m === `full-access` ? null : m,
+    g = f && m === `auto` && Wee(Rl(n ?? void 0)),
+    _ = tCe(p);
+  return (
+    g ? (_ = `guardian-approvals`) : h != null && p.includes(h) && (_ = h),
+    {
+      availableAgentModes: d,
+      canShowCustom: d.includes(`custom`),
+      canUnlock: d.includes(`full-access`),
+      customEquivalentMode: g ? `guardian-approvals` : m,
+      isGuardianModeAvailable: f,
+      isConfigDataPending: e,
+      configNonFullAccessMode: _,
+      showGuardianOption: c,
+    }
+  );
+}
+function rb(e, t, n = null) {
+  return (e === `custom` && n != null) || !t.includes(e)
+    ? !1
+    : e === `guardian-approvals` || e === `full-access` || e === `custom`;
+}
+function iCe(e, t) {
+  switch (e) {
+    case `:read-only`:
+      return `read-only`;
+    case `:workspace`:
+      return t;
+    case `:danger-full-access`:
+      return `full-access`;
+    case null:
+    case void 0:
+    default:
+      return null;
+  }
+}
+function aCe(e, t) {
+  return !e && t !== `not-thread` && t !== `empty`;
+}
+function oCe({ defaultWorkspaceWriteMode: e, isWindowsSandboxRequired: t }) {
+  return t ? `read-only` : e;
+}
+function sCe(e, t, n, r = null, i = null) {
+  return i != null && e.includes(i)
+    ? i
+    : r != null && e.includes(r)
+      ? r
+      : e.includes(`custom`)
+        ? `custom`
+        : !lCe(e) && e.includes(`full-access`)
+          ? `full-access`
+          : t != null && e.includes(t)
+            ? t
+            : n;
+}
+function cCe(e, t, n, r, i = null, a, o, s = null) {
+  return s != null && r.includes(s)
+    ? e === s
+      ? null
+      : s
+    : t == null
+      ? rb(e, r, i)
+        ? null
+        : o &&
+            r.includes(a) &&
+            e !== `guardian-approvals` &&
+            e !== `full-access` &&
+            e !== `custom`
+          ? e === a
+            ? null
+            : a
+          : !lCe(r) && r.includes(`full-access`)
+            ? e === `full-access`
+              ? null
+              : `full-access`
+            : i == null && r.includes(`custom`)
+              ? e === `custom`
+                ? null
+                : `custom`
+              : e === n
+                ? null
+                : n
+      : e === t
+        ? null
+        : t;
+}
+function lCe(e) {
+  return e.some((e) => e !== `full-access` && e !== `custom`);
+}
+function uCe({
+  availableAgentModes: e,
+  preferredNonFullAccessMode: t,
+  isGuardianModeAvailable: n,
+  isConfigDataPending: r,
+  configNonFullAccessMode: i,
+}) {
+  let a = nCe(t, e, n, i);
+  return {
+    canSelectGuardianMode: n,
+    resolvedNonFullAccessMode: a ?? i,
+    validPreferredNonFullAccessMode: a,
+    shouldClearPreferredNonFullAccessMode:
+      !r &&
+      ((t != null && a == null) ||
+        (!e.includes(`custom`) && a != null && a === i)),
+  };
+}
+var dCe = e(() => {
+  Yr();
+});
+function ib({ isProjectless: e, requirements: t }) {
+  return e && Ro(`granular`, t) ? `granular` : `auto`;
+}
+function fCe(e) {
+  if (e == null) return !0;
+  let t =
+      (e.allowedPermissionProfiles == null ||
+        e.allowedPermissionProfiles[`:workspace`] === !0) &&
+      (e.allowedSandboxModes == null ||
+        e.allowedSandboxModes.includes(`workspace-write`)),
+    n =
+      e.allowedApprov

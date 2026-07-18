@@ -1,0 +1,91 @@
+﻿Applications Graphics Acceleration Info:
+Uptime: 200228810 Realtime: 463679895
+
+** Graphics info for pid 4618 [com.ilyop.codex] **
+
+Stats since: 200190087730315ns
+Total frames rendered: 3884
+Janky frames: 220 (5.66%)
+Janky frames (legacy): 873 (22.48%)
+50th percentile: 9ms
+90th percentile: 17ms
+95th percentile: 19ms
+99th percentile: 27ms
+Number Missed Vsync: 90
+Number High input latency: 7290
+Number Slow UI thread: 200
+Number Slow bitmap uploads: 0
+Number Slow issue draw commands: 147
+Number Frame deadline missed: 220
+Number Frame deadline missed (legacy): 198
+HISTOGRAM: 5ms=12 6ms=29 7ms=744 8ms=585 9ms=1026 10ms=357 11ms=149 12ms=122 13ms=88 14ms=113 15ms=104 16ms=106 17ms=93 18ms=128 19ms=65 20ms=38 21ms=26 22ms=15 23ms=13 24ms=12 25ms=9 26ms=9 27ms=7 28ms=4 29ms=1 30ms=5 31ms=0 32ms=5 34ms=3 36ms=5 38ms=2 40ms=0 42ms=0 44ms=1 46ms=0 48ms=0 53ms=3 57ms=0 61ms=0 65ms=0 69ms=1 73ms=0 77ms=3 81ms=0 85ms=0 89ms=0 93ms=0 97ms=0 101ms=1 105ms=0 109ms=0 113ms=0 117ms=0 121ms=0 125ms=0 129ms=0 133ms=0 150ms=0 200ms=0 250ms=0 300ms=0 350ms=0 400ms=0 450ms=0 500ms=0 550ms=0 600ms=0 650ms=0 700ms=0 750ms=0 800ms=0 850ms=0 900ms=0 950ms=0 1000ms=0 1050ms=0 1100ms=0 1150ms=0 1200ms=0 1250ms=0 1300ms=0 1350ms=0 1400ms=0 1450ms=0 1500ms=0 1550ms=0 1600ms=0 1650ms=0 1700ms=0 1750ms=0 1800ms=0 1850ms=0 1900ms=0 1950ms=0 2000ms=0 2050ms=0 2100ms=0 2150ms=0 2200ms=0 2250ms=0 2300ms=0 2350ms=0 2400ms=0 2450ms=0 2500ms=0 2550ms=0 2600ms=0 2650ms=0 2700ms=0 2750ms=0 2800ms=0 2850ms=0 2900ms=0 2950ms=0 3000ms=0 3050ms=0 3100ms=0 3150ms=0 3200ms=0 3250ms=0 3300ms=0 3350ms=0 3400ms=0 3450ms=0 3500ms=0 3550ms=0 3600ms=0 3650ms=0 3700ms=0 3750ms=0 3800ms=0 3850ms=0 3900ms=0 3950ms=0 4000ms=0 4050ms=0 4100ms=0 4150ms=0 4200ms=0 4250ms=0 4300ms=0 4350ms=0 4400ms=0 4450ms=0 4500ms=0 4550ms=0 4600ms=0 4650ms=0 4700ms=0 4750ms=0 4800ms=0 4850ms=0 4900ms=0 4950ms=0
+50th gpu percentile: 5ms
+90th gpu percentile: 7ms
+95th gpu percentile: 10ms
+99th gpu percentile: 15ms
+GPU HISTOGRAM: 1ms=0 2ms=16 3ms=29 4ms=1384 5ms=691 6ms=996 7ms=432 8ms=75 9ms=47 10ms=23 11ms=16 12ms=9 13ms=34 14ms=35 15ms=69 16ms=17 17ms=2 18ms=6 19ms=1 20ms=1 21ms=0 22ms=0 23ms=1 24ms=0 25ms=0 4950ms=0
+
+Pipeline=Skia (OpenGL)
+Memory policy:
+  Max surface area: 5697536
+  Max resource usage: 820.45MB (x144)
+  Background retention: 50% (altUiHidden = true)
+  GPU Context timeout: 10
+Contexts: 2 (stopped = 1)
+CPU Caches:
+  Glyph Cache: 960.00 KB (1 entry)
+  Shadows: 5.64 KB (1 entry)
+  Glyph Count: 62 
+Total CPU memory usage:
+  988811 bytes, 965.64 KB (0.00 bytes is purgeable)
+
+GPU Caches:
+  Other:
+    Other: 17.70 KB (1 entry)
+    Buffer Object: 2.05 KB (2 entries)
+  SW Path Mask:
+    Texture: 728.49 KB (1 entry)
+  Image:
+    Texture: 103.06 KB (24 entries)
+  Scratch:
+    RenderTarget: 16.41 MB (1 entry)
+    Texture: 2.00 MB (2 entries)
+    Buffer Object: 78.00 KB (2 entries)
+Total GPU memory usage:
+  20252086 bytes, 19.31 MB (17.16 MB is purgeable)
+
+GraphicBufferAllocator buffers:
+        Handle |        Size |     W (Stride) x H | Layers |   Format |      Usage | Requestor
+  0x7c6cf630b0 | 18000.00 KiB | 1440 (1440) x 3200 |      1 |        1 | 0x40000000000b00 | VRI[CodexChatActivity]#1(BLAST Consumer)1
+  0x7c6cf6c530 | 18000.00 KiB | 1440 (1440) x 3200 |      1 |        1 | 0x40000000000b00 | VRI[CodexChatActivity]#1(BLAST Consumer)1
+  0x7c6cf6c950 | 18000.00 KiB | 1440 (1440) x 3200 |      1 |        1 | 0x40000000000b00 | VRI[CodexChatActivity]#1(BLAST Consumer)1
+  0x7c6cf6ebb0 | 18000.00 KiB | 1440 (1440) x 3200 |      1 |        1 | 0x40000000000b00 | VRI[CodexChatActivity]#1(BLAST Consumer)1
+Total allocated by GraphicBufferAllocator (estimate): 72000.00 KB
+Imported gralloc buffers:
++ name:VRI[CodexChatActivity]#1(BLAST Consumer)1, id:4325032121962, size:18282.00KiB, w/h:1440x3200, usage: 0x40000000000b00, req fmt:1, fourcc/mod:875708993/576460752303423602, dataspace: 0x0, compressed: true
+	planes: R/G/B/A:	 w/h:1440x3200, stride:5760 bytes, size:18720768
++ name:VRI[CodexChatActivity]#1(BLAST Consumer)1, id:4325032121961, size:18282.00KiB, w/h:1440x3200, usage: 0x40000000000b00, req fmt:1, fourcc/mod:875708993/576460752303423602, dataspace: 0x0, compressed: true
+	planes: R/G/B/A:	 w/h:1440x3200, stride:5760 bytes, size:18720768
++ name:VRI[CodexChatActivity]#1(BLAST Consumer)1, id:4325032121959, size:18282.00KiB, w/h:1440x3200, usage: 0x40000000000b00, req fmt:1, fourcc/mod:875708993/576460752303423602, dataspace: 0x0, compressed: true
+	planes: R/G/B/A:	 w/h:1440x3200, stride:5760 bytes, size:18720768
++ name:VRI[CodexChatActivity]#1(BLAST Consumer)1, id:4325032121960, size:18282.00KiB, w/h:1440x3200, usage: 0x40000000000b00, req fmt:1, fourcc/mod:875708993/576460752303423602, dataspace: 0x0, compressed: true
+	planes: R/G/B/A:	 w/h:1440x3200, stride:5760 bytes, size:18720768
+Total imported by gralloc: 73128.00KiB
+
+Profile data in ms:
+
+	com.ilyop.codex/com.termux.app.CodexHomeActivity/android.view.ViewRootImpl@b7cfe91 (visibility=8)
+	com.ilyop.codex/com.termux.app.CodexChatActivity/android.view.ViewRootImpl@4188369 (visibility=0)
+View hierarchy:
+
+  com.ilyop.codex/com.termux.app.CodexHomeActivity/android.view.ViewRootImpl@b7cfe91
+  324 views, 460.74 kB of render nodes
+
+  com.ilyop.codex/com.termux.app.CodexChatActivity/android.view.ViewRootImpl@4188369
+  11 views, 22.82 kB of render nodes
+
+
+Total ViewRootImpl   : 2
+Total attached Views : 335
+Total RenderNode     : 483.56 kB (used) / 519.28 kB (capacity)
+
