@@ -948,10 +948,10 @@ private fun EmptyChatState(ready: Boolean, onPrompt: (String) -> Unit) {
     val language = LocalNativeLanguage.current
     val prompts = remember {
         listOf(
-            StarterPrompt(HugeIcons.Code, "理解项目", "分析当前工作区结构和核心逻辑", "请分析当前项目的目录结构，说明核心模块、启动流程和值得优先改进的地方。"),
-            StarterPrompt(HugeIcons.Bug01, "检查问题", "查找潜在 bug、崩溃和异常边界", "请检查当前项目中可能的 bug、崩溃点和异常边界，优先修复高风险问题并运行验证。"),
-            StarterPrompt(HugeIcons.MagicWand01, "改进体验", "优化 UI、性能和用户交互", "请审查当前项目的用户体验，直接实现一项最有价值的 UI 或交互优化，并完成测试。"),
-            StarterPrompt(HugeIcons.Files02, "继续开发", "读取变更并建议下一步", "请检查当前 Git 变更和项目状态，总结已完成的工作，然后直接继续最合理的下一步。"),
+            StarterPrompt(HugeIcons.Code, nativeText(language, "\u7406\u89e3\u9879\u76ee", "Understand project"), nativeText(language, "\u5206\u6790\u5f53\u524d\u5de5\u4f5c\u533a\u7ed3\u6784\u548c\u6838\u5fc3\u903b\u8f91", "Analyze workspace structure and core logic"), nativeText(language, "\u8bf7\u5206\u6790\u5f53\u524d\u9879\u76ee\u7684\u76ee\u5f55\u7ed3\u6784\u3002", "Analyze the current project structure.")),
+            StarterPrompt(HugeIcons.Bug01, nativeText(language, "\u68c0\u67e5\u95ee\u9898", "Find problems"), nativeText(language, "\u67e5\u627e\u6f5c\u5728 bug\u3001\u5d29\u6e83\u548c\u5f02\u5e38\u8fb9\u754c", "Find bugs, crashes and edge cases"), nativeText(language, "\u8bf7\u68c0\u67e5\u5f53\u524d\u9879\u76ee\u4e2d\u53ef\u80fd\u7684 bug\u3002", "Check the current project for possible bugs.")),
+            StarterPrompt(HugeIcons.MagicWand01, nativeText(language, "\u6539\u8fdb\u4f53\u9a8c", "Improve experience"), nativeText(language, "\u4f18\u5316 UI\u3001\u6027\u80fd\u548c\u7528\u6237\u4ea4\u4e92", "Improve UI, performance and interaction"), nativeText(language, "\u8bf7\u5ba1\u67e5\u5f53\u524d\u9879\u76ee\u7684\u7528\u6237\u4f53\u9a8c\u3002", "Review and improve the current user experience.")),
+            StarterPrompt(HugeIcons.Files02, nativeText(language, "\u7ee7\u7eed\u5f00\u53d1", "Continue development"), nativeText(language, "\u8bfb\u53d6\u53d8\u66f4\u5e76\u5efa\u8bae\u4e0b\u4e00\u6b65", "Review changes and continue"), nativeText(language, "\u8bf7\u68c0\u67e5 Git \u53d8\u66f4\u548c\u9879\u76ee\u72b6\u6001\uff0c\u7136\u540e\u7ee7\u7eed\u4e0b\u4e00\u6b65\u3002", "Review Git changes and continue with the next step.")),
         )
     }
     Column(
@@ -968,7 +968,7 @@ private fun EmptyChatState(ready: Boolean, onPrompt: (String) -> Unit) {
         Text(nativeText(language, "\u4eca\u5929\u60f3\u505a\u4ec0\u4e48\uff1f", "What would you like to do today?"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
         Text(
-            if (ready) "Codex 已准备好，可以与你一起处理当前项目" else "正在连接 Codex…",
+            if (ready) nativeText(language, "Codex \u5df2\u51c6\u5907\u597d\uff0c\u53ef\u4ee5\u4e0e\u4f60\u4e00\u8d77\u5904\u7406\u5f53\u524d\u9879\u76ee", "Codex is ready to work on your project") else nativeText(language, "\u6b63\u5728\u8fde\u63a5 Codex\u2026", "Connecting to Codex\u2026"),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
