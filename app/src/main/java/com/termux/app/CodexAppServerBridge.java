@@ -57,6 +57,8 @@ final class CodexAppServerBridge {
     private volatile int initializeRequestId = -1;
     private volatile int editRollbackRequestId = -1;
     private volatile int compactRequestId = -1;
+    private volatile int collaborationModesRequestId = -1;
+    private volatile JSONObject planCollaborationMode;
     private volatile String pendingEditedText;
     private volatile String pendingEditedModel;
     private volatile String pendingEditedEffort;
@@ -303,13 +305,15 @@ final class CodexAppServerBridge {
             if (model != null && !model.trim().isEmpty()) params.put("model", model);
             if (effort != null && !effort.trim().isEmpty()) params.put("effort", effort);
             if (collaborationMode != null && !collaborationMode.trim().isEmpty()) {
-                JSONObject settings = new JSONObject();
-                if (model != null && !model.trim().isEmpty()) settings.put("model", model);
-                if (effort != null && !effort.trim().isEmpty()) settings.put("reasoning_effort", effort);
-                settings.put("developer_instructions", JSONObject.NULL);
-                params.put("collaborationMode", new JSONObject()
-                    .put("mode", collaborationMode)
-                    .put("settings", settings));
+                // collaborationMode/list returns the exact wire schema. Its model and
+                // reasoning_effort are top-level fields (not a nested settings object).
+                // Sending the desktop wrapper shape here is accepted but silently ignored.
+                JSONObject requestedMode = "plan".equals(collaborationMode) && planCollaborationMode != null
+                    ? new JSONObject(planCollaborationMode.toString())
+                    : new JSONObject().put("mode", collaborationMode);
+                if (model != null && !model.trim().isEmpty()) requestedMode.put("model", model);
+                if (effort != null && !effort.trim().isEmpty()) requestedMode.put("reasoning_effort", effort);
+                params.put("collaborationMode", requestedMode);
             }
             sendRequest("turn/start", params);
         } catch (Exception e) {
@@ -700,6 +704,8 @@ final class CodexAppServerBridge {
                 && message.optInt("id", -1) == initializeRequestId) {
             initializeRequestId = -1;
             sendJson(new JSONObject().put("method", "initialized"));
+            try { collaborationModesRequestId = sendRequest("collaborationMode/list", new JSONObject()); }
+            catch (Exception error) { android.util.Log.w(TAG, "Unable to list collaboration modes", error); }
             if (desktopBridge != null) desktopBridge.onAppServerInitialized();
             else sendThreadStart();
             return;
@@ -726,6 +732,21 @@ final class CodexAppServerBridge {
             if (message.has("error")) emit("onNativeError", message.optJSONObject("error").optString("message", "Unable to edit message"));
             else sendMessage(text, model, effort, "[]");
             return;
+        }
+        if (message.has("id") && message.optInt("id", -1) == collaborationModesRequestId) {
+            collaborationModesRequestId = -1;
+            JSONObject wrapper = message.optJSONObject("result");
+            JSONArray modes = wrapper == null ? null : wrapper.optJSONArray("data");
+            if (modes == null && wrapper != null) modes = wrapper.optJSONArray("modes");
+            if (modes != null) {
+                for (int index = 0; index < modes.length(); index++) {
+                    JSONObject candidate = modes.optJSONObject(index);
+                    if (candidate == null) continue;
+                    String mode = candidate.optString("mode", candidate.optString("id", candidate.optString("name", "")));
+                    if ("plan".equalsIgnoreCase(mode)) { planCollaborationMode = candidate; break; }
+                }
+            }
+            android.util.Log.i(TAG, "COLLAB_MODES " + redactSensitiveLogLine(String.valueOf(message.opt("result"))));
         }
         if (message.has("id") && message.has("result")) {
             int id = message.optInt("id", -1);
