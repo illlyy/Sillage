@@ -701,7 +701,7 @@ internal fun NativeChatScreen(
     }
     if (showModelPicker) {
         ChoiceDialog(
-            title = "选择模型",
+            title = nativeText(LocalNativeLanguage.current, "\u9009\u62e9\u6a21\u578b", "Select model"),
             options = state.modelOptions.map { it.id to it.name },
             selected = state.selectedModel,
             onDismiss = { showModelPicker = false },
