@@ -1641,6 +1641,7 @@ private fun RichResponseText(text: String) {
 
 @Composable
 private fun RikkaCodeBlock(language: String, code: String) {
+    val languageUi = LocalNativeLanguage.current
     val clipboard = LocalClipboardManager.current
     val lines = remember(code) { code.lines() }
     val collapsible = lines.size > 18 || code.length > 1800
@@ -1659,17 +1660,17 @@ private fun RikkaCodeBlock(language: String, code: String) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    language.ifBlank { "代码" },
+                    language.ifBlank { nativeText(languageUi, "\u4ee3\u7801", "Code") },
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Text("${lines.size} 行", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                Text(nativeText(languageUi, "${lines.size} \u884c", "${lines.size} lines"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
                 IconButton(
                     onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(code)) },
                     modifier = Modifier.size(32.dp),
                 ) {
-                    Icon(HugeIcons.Copy01, "复制代码", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(HugeIcons.Copy01, nativeText(languageUi, "\u590d\u5236\u4ee3\u7801", "Copy code"), modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             Row(
@@ -1687,7 +1688,7 @@ private fun RikkaCodeBlock(language: String, code: String) {
                 ) {
                     Icon(if (expanded) HugeIcons.ArrowUp01 else HugeIcons.ArrowDown01, null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(if (expanded) "收起代码" else "展开全部 ${lines.size} 行")
+                    Text(if (expanded) nativeText(languageUi, "\u6536\u8d77\u4ee3\u7801", "Collapse code") else nativeText(languageUi, "\u5c55\u5f00\u5168\u90e8 ${lines.size} \u884c", "Expand all ${lines.size} lines"))
                 }
             }
         }
