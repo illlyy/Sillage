@@ -2916,6 +2916,7 @@ private fun DirectoryOutputCard(content: String) {
         val name = line.trim().substringAfterLast(' ')
         !(name.endsWith("/") || line.startsWith("d"))
     }.thenBy { it.lowercase() })
+    val language = LocalNativeLanguage.current
     var expanded by remember { mutableStateOf(false) }
     val visible = if (expanded) lines else lines.take(12)
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
@@ -2923,7 +2924,7 @@ private fun DirectoryOutputCard(content: String) {
             Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(HugeIcons.Folder01, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp)); Text("目录内容", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                Text("${lines.size} 项", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(nativeText(language, "${lines.size} \u9879", "${lines.size} items"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             visible.forEach { line ->
@@ -2935,7 +2936,7 @@ private fun DirectoryOutputCard(content: String) {
                     Spacer(Modifier.width(8.dp)); SelectionContainer { Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
                 }
             }
-            if (lines.size > 12) TextButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) { Text(if (expanded) "收起" else "显示剩余 ${lines.size - 12} 项") }
+            if (lines.size > 12) TextButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) { Text(if (expanded) nativeText(language, "\u6536\u8d77", "Collapse") else nativeText(language, "\u663e\u793a\u5269\u4f59 ${lines.size - 12} \u9879", "Show ${lines.size - 12} more")) }
         }
     }
 }
@@ -2954,13 +2955,14 @@ private fun SearchOutputCard(content: String) {
         val match = Regex("^(.+?):(\\d+):(.*)$").find(line)
         match?.groupValues?.get(1) ?: "搜索输出"
     }
+    val language = LocalNativeLanguage.current
     var expanded by remember { mutableStateOf(false) }
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
         Column {
             Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(HugeIcons.Search01, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp)); Text("搜索结果", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                Text("${results.size} 条 · ${grouped.size} 个文件", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(nativeText(language, "${results.size} \u6761 \u00b7 ${grouped.size} \u4e2a\u6587\u4ef6", "${results.size} matches ? ${grouped.size} files"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             QElasticExpand(expanded) {
                 SafeExpandableViewport(maxHeight = 420.dp) {
