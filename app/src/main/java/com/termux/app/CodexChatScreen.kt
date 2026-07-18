@@ -511,7 +511,7 @@ internal fun NativeChatScreen(
                                     onPreviewAttachment = { previewAttachment = it },
                                 )
                             }
-                            if (state.busy && liveAssistantId == null) {
+                            if (state.busy && liveAssistantId == null && state.messages.none { it.role == NativeChatRole.ASSISTANT && !it.streaming }) {
                                 item("processing") { ProcessingPanel(state, elapsedSeconds, false, onLoadSubagentHistory, {}) }
                             }
                             // A temporary runway lets streamed lines grow upward instead of
@@ -1379,8 +1379,8 @@ private fun FadingTailText(text: String, tailStart: Int, generation: Int, reason
     androidx.compose.runtime.key(generation) {
         var visible by remember { mutableStateOf(false) }
         val tailAlpha by animateFloatAsState(
-            targetValue = if (visible) 1f else 0.30f,
-            animationSpec = tween(260, easing = LinearEasing),
+            targetValue = if (visible) 1f else 0.08f,
+            animationSpec = tween(420, easing = LinearEasing),
             label = if (reasoning) "reasoningTail" else "answerTail",
         )
         LaunchedEffect(Unit) { visible = true }
