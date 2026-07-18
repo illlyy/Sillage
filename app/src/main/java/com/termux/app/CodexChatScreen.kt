@@ -3912,11 +3912,11 @@ private fun ConversationMenu(
     val language = LocalNativeLanguage.current
     var expanded by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { expanded = true }, modifier = Modifier.size(32.dp)) { Icon(HugeIcons.MoreVertical, "更多", modifier = Modifier.size(18.dp)) }
+        IconButton(onClick = { expanded = true }, modifier = Modifier.size(32.dp)) { Icon(HugeIcons.MoreVertical, nativeText(language, "\u66f4\u591a", "More"), modifier = Modifier.size(18.dp)) }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(text = { Text(if (conversation.favorite) nativeText(language, "\u53d6\u6d88\u6536\u85cf", "Unfavorite") else nativeText(language, "\u6536\u85cf", "Favorite")) }, leadingIcon = { Icon(HugeIcons.InLove, null) }, onClick = { expanded = false; onToggleFavorite(conversation) })
-            DropdownMenuItem(text = { Text("重命名") }, leadingIcon = { Icon(HugeIcons.PencilEdit01, null) }, onClick = { expanded = false; onRename(conversation) })
-            DropdownMenuItem(text = { Text("删除") }, leadingIcon = { Icon(HugeIcons.Delete01, null) }, onClick = { expanded = false; onDelete(conversation) })
+            DropdownMenuItem(text = { Text(nativeText(language, "\u91cd\u547d\u540d", "Rename")) }, leadingIcon = { Icon(HugeIcons.PencilEdit01, null) }, onClick = { expanded = false; onRename(conversation) })
+            DropdownMenuItem(text = { Text(nativeText(language, "\u5220\u9664", "Delete")) }, leadingIcon = { Icon(HugeIcons.Delete01, null) }, onClick = { expanded = false; onDelete(conversation) })
         }
     }
 }
@@ -3924,13 +3924,14 @@ private fun ConversationMenu(
 @Composable
 private fun ConversationSearchDialog(conversations: List<NativeConversation>, onDismiss: () -> Unit, onSelect: (NativeConversation) -> Unit) {
     var query by remember { mutableStateOf("") }
+    val language = LocalNativeLanguage.current
     val results = conversations.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text("搜索对话") },
+        title = { Text(nativeText(language, "\u641c\u7d22\u5bf9\u8bdd", "Search conversations")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(HugeIcons.Search01, null) }, placeholder = { Text("重命名对话") })
+                OutlinedTextField(value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(HugeIcons.Search01, null) }, placeholder = { Text(nativeText(language, "\u641c\u7d22\u5bf9\u8bdd", "Search conversations")) })
                 LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
                     items(results, key = { it.threadId }) { conversation ->
                         NavigationDrawerItem(label = { Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }, selected = false, onClick = { onSelect(conversation) })
@@ -3938,19 +3939,20 @@ private fun ConversationSearchDialog(conversations: List<NativeConversation>, on
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5173\u95ed", "Close")) } },
     )
 }
 
 @Composable
 private fun RenameConversationDialog(conversation: NativeConversation, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var title by remember(conversation.threadId) { mutableStateOf(conversation.title) }
+    val language = LocalNativeLanguage.current
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text("重命名对话") },
+        title = { Text(nativeText(language, "\u91cd\u547d\u540d\u5bf9\u8bdd", "Rename conversation")) },
         text = { OutlinedTextField(value = title, onValueChange = { title = it }, modifier = Modifier.fillMaxWidth(), singleLine = true) },
-        confirmButton = { TextButton(onClick = { if (title.isNotBlank()) onConfirm(title.trim()) }) { Text("保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = { TextButton(onClick = { if (title.isNotBlank()) onConfirm(title.trim()) }) { Text(nativeText(language, "\u4fdd\u5b58", "Save")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
     )
 }
 
