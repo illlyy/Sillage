@@ -788,6 +788,10 @@ final class CodexAppServerBridge {
         } else if ("turn/completed".equals(method)) {
             clearPendingTurn(params);
             String completedThread = params == null ? "" : params.optString("threadId", "");
+            if (completedThread.isEmpty() && params != null) {
+                JSONObject completedTurn = params.optJSONObject("turn");
+                if (completedTurn != null) completedThread = completedTurn.optString("threadId", "");
+            }
             if (primaryEvent) emit("onTurnComplete", "");
             if (isPrimaryTurn(params)) {
                 CodexTaskStore.markCompleted(activity, completedThread, turnFailed(params));
@@ -1447,6 +1451,10 @@ final class CodexAppServerBridge {
         if (visibleThread == null || visibleThread.isEmpty()) return false;
         if (params == null) return true;
         String candidate = params.optString("threadId", "");
+        if (candidate.isEmpty()) {
+            JSONObject turn = params.optJSONObject("turn");
+            if (turn != null) candidate = turn.optString("threadId", "");
+        }
         return candidate.isEmpty() || candidate.equals(visibleThread);
     }
 
@@ -1457,6 +1465,10 @@ final class CodexAppServerBridge {
     private boolean isPrimaryTurn(JSONObject params) {
         if (params == null) return false;
         String candidate = params.optString("threadId", "");
+        if (candidate.isEmpty()) {
+            JSONObject turn = params.optJSONObject("turn");
+            if (turn != null) candidate = turn.optString("threadId", "");
+        }
         return !candidate.isEmpty() && (primaryThreadIds.contains(candidate) || candidate.equals(threadId));
     }
 
