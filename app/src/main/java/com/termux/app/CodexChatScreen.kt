@@ -1218,7 +1218,7 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
             tailStart = tailStart,
             generation = text.length,
             reasoning = false,
-            animateTail = false,
+            animateTail = true,
         )
     }
 }
@@ -1373,7 +1373,7 @@ private fun FadingTailText(text: String, tailStart: Int, generation: Int, reason
         var visible by remember { mutableStateOf(false) }
         val tailAlpha by animateFloatAsState(
             targetValue = if (visible) 1f else 0.30f,
-            animationSpec = tween(620, easing = LinearOutSlowInEasing),
+            animationSpec = tween(260, easing = LinearEasing),
             label = if (reasoning) "reasoningTail" else "answerTail",
         )
         LaunchedEffect(Unit) { visible = true }
@@ -1432,9 +1432,8 @@ private fun LiveReasoningText(text: String) {
         tailStart = tailStart,
         generation = text.length,
         reasoning = true,
-        // The bounded preview and inner follow motor provide motion without forcing
-        // a color/layout recomposition for every display frame.
-        animateTail = false,
+        // Reveal only the newly appended tail; completed chunks remain stable.
+        animateTail = true,
     )
 }
 

@@ -1054,7 +1054,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 pendingAnswer.append(value)
                 if (!answerFlushScheduled) {
                     answerFlushScheduled = true
-                    streamHandler.postDelayed(flushAnswerRunnable, 50L)
+                    streamHandler.postDelayed(flushAnswerRunnable, 56L)
                 }
             }
             "onFinalAnswer" -> {
@@ -1068,7 +1068,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 pendingReasoning.append(value)
                 if (!reasoningFlushScheduled) {
                     reasoningFlushScheduled = true
-                    streamHandler.postDelayed(flushReasoningRunnable, 50L)
+                    streamHandler.postDelayed(flushReasoningRunnable, 56L)
                 }
             }
             "onReasoningComplete" -> {
