@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.termux.app
 
@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -56,6 +57,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
@@ -141,6 +146,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onSizeChanged
@@ -178,6 +184,7 @@ import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.collectLatest
 import io.noties.markwon.Markwon
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.MarkwonSpansFactory
@@ -186,6 +193,7 @@ import org.commonmark.node.Code
 import org.commonmark.node.BlockQuote
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
+import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import org.json.JSONArray
@@ -310,11 +318,13 @@ internal fun NativeChatScreen(
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
     onModeChange: (String) -> Unit,
+    onPermissionModeChange: (String) -> Unit,
     onSetGoal: (String) -> Unit,
     onClearGoal: () -> Unit,
     onToggleGoalPause: () -> Unit,
     onCompact: () -> Unit,
     onAnswerUserInput: (Int, String, String) -> Unit,
+    onAnswerApproval: (String, String) -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -330,6 +340,7 @@ internal fun NativeChatScreen(
     val autoFollowEnabled = LocalAutoFollowOutput.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    var drawerContentReady by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val listDragged by listState.interactionSource.collectIsDraggedAsState()
     var followOutput by remember { mutableStateOf(true) }
@@ -338,8 +349,9 @@ internal fun NativeChatScreen(
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
-    val imeBottomPx = WindowInsets.ime.getBottom(density)
-    val imeVisible = imeBottomPx > 0
+    // Visibility is a stable boolean. Reading the animated IME bottom inset here used to
+    // invalidate the entire chat composition on every keyboard frame.
+    val imeVisible = WindowInsets.isImeVisible
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -382,10 +394,23 @@ internal fun NativeChatScreen(
         }
     }
 
-    LaunchedEffect(inputHeightPx, imeBottomPx) {
+    val latestMessageId = state.messages.lastOrNull()?.id
+    LaunchedEffect(latestMessageId) {
+        if (latestMessageId != null && autoFollowEnabled && followOutput && !listDragged) {
+            // A new plan/assistant item is a structural list change, not just text growth.
+            // Move to the new item once; the frame-based follow motor handles later deltas.
+            withFrameNanos { }
+            listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
+        }
+    }
+
+    LaunchedEffect(imeVisible) {
         if (autoFollowEnabled && followOutput && !listDragged && state.messages.isNotEmpty()) {
-            val visibleCount = minOf(historyLimit, state.messages.size)
-            val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
+            // WindowInsets.ime changes on every keyboard-animation frame. Keying this effect
+            // by the raw inset forced a full LazyColumn jump/re-layout every frame. Keep the
+            // input animation, then align the list once after its geometry settles.
+            if (imeVisible) delay(180L)
+            withFrameNanos { }
             listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
         }
     }
@@ -438,26 +463,32 @@ internal fun NativeChatScreen(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled = drawerContentReady,
         drawerContent = {
-            RikkaDrawer(
-                modelLabel = state.modelLabel,
-                conversations = state.conversations,
-                onSearch = { showConversationSearch = true },
-                onRenameConversation = { renameConversation = it },
-                onDeleteConversation = { deleteConversation = it },
-                onToggleFavorite = onToggleFavorite,
-                onResumeConversation = { threadId ->
-                    onResumeConversation(threadId)
-                    scope.launch { drawerState.close() }
-                },
-                onClose = { scope.launch { drawerState.close() } },
-                onNewConversation = {
-                    onNewConversation()
-                    scope.launch { drawerState.close() }
-                },
-                onBackHome = onBackHome,
-                onOpenLegacyWebUi = onOpenLegacyWebUi,
-            )
+            if (drawerContentReady) {
+                RikkaDrawer(
+                    currentThreadId = state.currentThreadId,
+                    modelLabel = state.modelLabel,
+                    conversations = state.conversations,
+                    onSearch = { showConversationSearch = true },
+                    onRenameConversation = { renameConversation = it },
+                    onDeleteConversation = { deleteConversation = it },
+                    onToggleFavorite = onToggleFavorite,
+                    onResumeConversation = { threadId ->
+                        onResumeConversation(threadId)
+                        scope.launch { drawerState.close() }
+                    },
+                    onClose = { scope.launch { drawerState.close() } },
+                    onNewConversation = {
+                        onNewConversation()
+                        scope.launch { drawerState.close() }
+                    },
+                    onBackHome = onBackHome,
+                    onOpenLegacyWebUi = onOpenLegacyWebUi,
+                )
+            } else {
+                ModalDrawerSheet(modifier = Modifier.width(300.dp)) {}
+            }
         },
     ) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -468,7 +499,13 @@ internal fun NativeChatScreen(
                         title = state.conversationTitle,
                         modelLabel = state.modelLabel,
                         ready = state.ready,
-                        onOpenDrawer = { scope.launch { drawerState.open() } },
+                        onOpenDrawer = {
+                            drawerContentReady = true
+                            scope.launch {
+                                withFrameNanos { }
+                                drawerState.open()
+                            }
+                        },
                         onOpenWorkPanel = { showWorkPanel = true },
                         onSearch = { showMessageSearch = true },
                         onExport = { shareConversation(context, state.conversationTitle, state.messages) },
@@ -567,7 +604,7 @@ internal fun NativeChatScreen(
                                 Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                                     Spacer(Modifier.width(10.dp))
-                                    Text(nativeText(language, "???????", "Loading conversation?"), style = MaterialTheme.typography.labelLarge)
+                                    Text(nativeText(language, "\u6b63\u5728\u52a0\u8f7d\u5bf9\u8bdd\u2026", "Loading conversation\u2026"), style = MaterialTheme.typography.labelLarge)
                                 }
                             }
                         }
@@ -615,6 +652,8 @@ internal fun NativeChatScreen(
                         selectedEffort = state.selectedEffort,
                         onEffortSelected = onEffortSelected,
                         selectedMode = state.selectedMode,
+                        permissionMode = state.permissionMode,
+                        onPermissionModeSelected = onPermissionModeChange,
                         activeGoal = state.activeGoalObjective,
                         onModeSelected = onModeChange,
                         onRequestGoal = { showGoalDialog = true },
@@ -629,7 +668,20 @@ internal fun NativeChatScreen(
                         onRemoveAttachment = onRemoveAttachment,
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
-                        onSend = { if (state.phase.active) onStop() else onSend(state.input) },
+                        onSend = { inputText ->
+                            if (state.phase.active) {
+                                onStop()
+                            } else {
+                                followOutput = true
+                                followPausedUntil = 0L
+                                scope.launch {
+                                    listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
+                                }
+                                // TextFieldState is local to the composer; do not wait for its
+                                // debounced draft mirror before sending the authoritative text.
+                                onSend(inputText)
+                            }
+                        },
                         onHeightChanged = { inputHeightPx = it },
                         modifier = Modifier.align(Alignment.BottomCenter),
                     )
@@ -679,6 +731,12 @@ internal fun NativeChatScreen(
         NativeUserInputDialog(
             raw = state.pendingUserInputRequest,
             onAnswer = onAnswerUserInput,
+        )
+    }
+    if (state.pendingApprovalRequest.isNotBlank()) {
+        NativeApprovalDialog(
+            raw = state.pendingApprovalRequest,
+            onDecision = { decision -> onAnswerApproval(state.pendingApprovalRequest, decision) },
         )
     }
     previewAttachment?.let { attachment ->
@@ -880,6 +938,80 @@ private fun NativeUserInputDialog(raw: String, onAnswer: (Int, String, String) -
             }
         },
         confirmButton = { TextButton(enabled = requestId >= 0 && value.isNotBlank(), onClick = { onAnswer(requestId, questionId, value.trim()) }) { Text(nativeText(language, "\u63d0\u4ea4", "Submit")) } },
+    )
+}
+
+@Composable
+private fun NativeApprovalDialog(raw: String, onDecision: (String) -> Unit) {
+    val language = LocalNativeLanguage.current
+    val payload = remember(raw) { runCatching { JSONObject(raw) }.getOrNull() }
+    val method = payload?.optString("method").orEmpty()
+    val params = payload?.optJSONObject("params") ?: JSONObject()
+    val isCommand = method.contains("commandExecution") || method == "execCommandApproval"
+    val isPermission = method.contains("permissions/requestApproval")
+    val command = NativeCommandPresentation.rawCommand(params)
+    val action = NativeCommandPresentation.action(params)
+    val actionLabel = NativeCommandPresentation.label(action, language != "en")
+    val reason = params.optString("reason")
+    val cwd = params.optString("cwd")
+    val available = params.optJSONArray("availableDecisions")
+    val allowForSession = available == null || (0 until available.length()).any { index ->
+        available.opt(index)?.toString()?.contains("acceptForSession") == true
+    }
+    val title = when {
+        isCommand -> nativeText(language, "\u5141\u8bb8\u6267\u884c\u547d\u4ee4\uff1f", "Allow command?")
+        isPermission -> nativeText(language, "\u5141\u8bb8\u989d\u5916\u6743\u9650\uff1f", "Allow additional permissions?")
+        else -> nativeText(language, "\u5141\u8bb8\u4fee\u6539\u6587\u4ef6\uff1f", "Allow file changes?")
+    }
+    val summary = when {
+        isCommand -> actionLabel
+        isPermission -> nativeText(language, "\u6a21\u578b\u8bf7\u6c42\u6269\u5927\u5f53\u524d\u8bbf\u95ee\u8303\u56f4", "The model requests additional access")
+        else -> nativeText(language, "\u6a21\u578b\u8bf7\u6c42\u5199\u5165\u5de5\u4f5c\u533a\u4ee5\u5916\u7684\u4f4d\u7f6e", "The model requests writes outside the workspace")
+    }
+    FlClashAnimatedDialog(
+        onDismissRequest = { onDecision("decline") },
+        title = { Text(title) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(summary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                if (reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (command.isNotBlank()) {
+                    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                        SelectionContainer {
+                            Text(
+                                command.take(4_000),
+                                Modifier.fillMaxWidth().padding(12.dp),
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+                if (cwd.isNotBlank()) Text(cwd, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (isPermission) {
+                    Text(params.optJSONObject("permissions")?.toString(2).orEmpty().take(2_000), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    nativeText(language, "\u4ec5\u5728\u4f60\u7406\u89e3\u8be5\u64cd\u4f5c\u65f6\u5141\u8bb8\u3002\u9009\u62e9\u201c\u672c\u4f1a\u8bdd\u5141\u8bb8\u201d\u540e\uff0c\u76f8\u4f3c\u64cd\u4f5c\u672c\u6b21\u5bf9\u8bdd\u4e0d\u518d\u8be2\u95ee\u3002", "Only allow operations you understand. Session approval skips similar prompts for this conversation."),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { onDecision("decline") }) { Text(nativeText(language, "\u62d2\u7edd", "Deny")) }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (allowForSession) TextButton(onClick = { onDecision("acceptForSession") }) {
+                    Text(nativeText(language, "\u672c\u4f1a\u8bdd\u5141\u8bb8", "Allow session"))
+                }
+                TextButton(onClick = { onDecision("accept") }) { Text(nativeText(language, "\u5141\u8bb8\u4e00\u6b21", "Allow once")) }
+            }
+        },
     )
 }
 
@@ -1331,7 +1463,10 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
     // Keep long answers in the chunk renderer even after the final delta. Promoting
     // a large document to one Markdown tree here causes every previously rendered
     // paragraph to be measured again and is the main source of end-of-stream jank.
-    if (showRichText && text.length < 1200) {
+    val containsTable = remember(text) { NativeUiRenderSafety.containsMarkdownTable(text) }
+    if (showRichText && (text.length < 1200 || containsTable)) {
+        // GFM tables must reach Markwon after streaming ends; leaving a long answer in the
+        // plain live renderer exposes literal pipes instead of cells.
         RichResponseText(text)
     } else {
         ChunkedLiveText(
@@ -1496,33 +1631,33 @@ private fun FadingTailText(text: String, tailStart: Int, generation: Int, reason
         StableLiveTextChunk(text, reasoning)
         return
     }
-    androidx.compose.runtime.key(generation) {
-        var visible by remember { mutableStateOf(false) }
-        val tailAlpha by animateFloatAsState(
-            targetValue = if (visible) 1f else 0.30f,
-            animationSpec = tween(260, easing = LinearEasing),
-            label = if (reasoning) "reasoningTail" else "answerTail",
-        )
-        LaunchedEffect(Unit) { visible = true }
-        val safeTailStart = tailStart.coerceIn(0, text.length)
-        val baseColor = if (reasoning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
-        val animatedText = remember(text, safeTailStart, tailAlpha, baseColor) {
-            androidx.compose.ui.text.buildAnnotatedString {
-                if (safeTailStart > 0) append(text.substring(0, safeTailStart))
-                withStyle(androidx.compose.ui.text.SpanStyle(color = baseColor.copy(alpha = tailAlpha))) {
-                    append(text.substring(safeTailStart))
-                }
+    // A 260 ms color tween restarted for every 56 ms stream batch kept Text in
+    // continuous re-layout. Dim only the latest batch, then settle once after the
+    // stream pauses; this preserves arrival feedback without a per-frame text pass.
+    var settledGeneration by remember { mutableIntStateOf(generation - 1) }
+    LaunchedEffect(generation) {
+        delay(96L)
+        settledGeneration = generation
+    }
+    val safeTailStart = tailStart.coerceIn(0, text.length)
+    val baseColor = if (reasoning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+    val tailAlpha = if (settledGeneration == generation) 1f else 0.52f
+    val annotatedText = remember(text, safeTailStart, tailAlpha, baseColor) {
+        androidx.compose.ui.text.buildAnnotatedString {
+            if (safeTailStart > 0) append(text.substring(0, safeTailStart))
+            withStyle(androidx.compose.ui.text.SpanStyle(color = baseColor.copy(alpha = tailAlpha))) {
+                append(text.substring(safeTailStart))
             }
         }
-        Text(
-            text = animatedText,
-            modifier = Modifier.fillMaxWidth(),
-            style = if (reasoning) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
-            lineHeight = if (reasoning) 22.sp else 24.sp,
-            letterSpacing = if (reasoning) 0.sp else 0.1.sp,
-            color = baseColor,
-        )
     }
+    Text(
+        text = annotatedText,
+        modifier = Modifier.fillMaxWidth(),
+        style = if (reasoning) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
+        lineHeight = if (reasoning) 22.sp else 24.sp,
+        letterSpacing = if (reasoning) 0.sp else 0.1.sp,
+        color = baseColor,
+    )
 }
 
 @Composable
@@ -1581,26 +1716,42 @@ private fun DeferredHistoricalRichText(text: String) {
             Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.8.dp)
                 Spacer(Modifier.width(8.dp))
-                Text(nativeText(LocalNativeLanguage.current, "?????????", "Loading reasoning?"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(nativeText(LocalNativeLanguage.current, "\u6b63\u5728\u52a0\u8f7d\u63a8\u7406\u2026", "Loading reasoning\u2026"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
 }
 
 @Composable
-private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
+private fun ProcessingPanel(
+    state: NativeChatState,
+    elapsedSeconds: Long,
+    answerStarted: Boolean,
+    onLoadSubagentHistory: (String) -> Unit,
+    onAutomaticCollapse: () -> Unit,
+) {
     var expanded by remember { mutableStateOf(true) }
     var userControlledExpansion by remember { mutableStateOf(false) }
-    var fullReasoning by remember { mutableStateOf(false) }
     val language = LocalNativeLanguage.current
     val showReasoning = LocalShowReasoning.current
     val reasoningScrollState = rememberScrollState()
-    val reasoningPreview = expanded && !state.reasoningComplete && !fullReasoning
-    val reasoningLive = expanded && !state.reasoningComplete
+    val reasoningLive = expanded && state.phase == NativeTurnPhase.REASONING && !state.reasoningComplete
+    val liveCommand = remember(state.liveCommandJson) {
+        state.liveCommandJson.takeIf { it.isNotBlank() }?.let { runCatching { JSONObject(it) }.getOrNull() }
+    }
+    // Snapshot list equality keeps expensive JSON parsing isolated from reasoning/answer
+    // revisions. Tool details change rarely; stream deltas can update dozens of times a second.
+    val completedCommandPayloads = state.toolDetails.toList()
+    val completedCommands = remember(completedCommandPayloads) {
+        completedCommandPayloads.mapNotNull { raw ->
+            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "commandExecution" }
+        }
+    }
+    val commandCount = completedCommands.size + if (liveCommand != null) 1 else 0
+    val commandRunning = liveCommand != null
 
-    // Match RikkaHub's important performance behavior: while reasoning is live, keep it
-    // inside a bounded inner viewport. Only that viewport scrolls as text grows, so the
-    // outer LazyColumn is not remeasured and displaced by thousands of reasoning lines.
+    // Keep live reasoning in a bounded inner viewport. Only this viewport follows new text,
+    // so the outer LazyColumn does not remeasure thousands of lines during generation.
     LaunchedEffect(reasoningLive) {
         if (!reasoningLive) return@LaunchedEffect
         var previousFrame = withFrameNanos { it }
@@ -1612,107 +1763,145 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
             if (remaining > 0.5f) {
                 val interpolation = (1f - kotlin.math.exp(-9f * seconds)).coerceIn(0f, 1f)
                 reasoningScrollState.scrollBy((remaining * interpolation).coerceAtLeast(0.5f).coerceAtMost(remaining))
-            } else {
-                delay(32L)
-            }
+            } else delay(32L)
         }
     }
     LaunchedEffect(state.reasoningComplete, answerStarted) {
         if (state.reasoningComplete && answerStarted && !userControlledExpansion) {
-            delay(260L)
-            if (userControlledExpansion) return@LaunchedEffect
-            onAutomaticCollapse()
-            expanded = false
-            fullReasoning = false
+            delay(220L)
+            if (!userControlledExpansion) {
+                onAutomaticCollapse()
+                expanded = false
+            }
         }
     }
+
     val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
         (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
     } else elapsedSeconds
     val statusText = when {
         state.phase == NativeTurnPhase.FAILED -> nativeText(language, "\u751f\u6210\u5931\u8d25", "Generation failed")
-        state.phase == NativeTurnPhase.COMPLETED || state.reasoningComplete -> nativeText(language, "\u601d\u8003\u4e86 ${reasoningSeconds}s", "Thought for ${reasoningSeconds}s")
+        commandRunning -> nativeText(language, "\u6b63\u5728\u8fd0\u884c\u547d\u4ee4", "Running command")
         state.phase == NativeTurnPhase.WAITING && elapsedSeconds >= 12L -> nativeText(language, "\u7b49\u5f85\u6a21\u578b\u54cd\u5e94 ${elapsedSeconds}s", "Waiting for model ${elapsedSeconds}s")
         state.phase == NativeTurnPhase.REASONING -> nativeText(language, "\u6b63\u5728\u601d\u8003 ${elapsedSeconds}s", "Thinking ${elapsedSeconds}s")
+        state.phase == NativeTurnPhase.TOOL_RUNNING && completedCommands.isNotEmpty() -> nativeText(language, "\u5df2\u6267\u884c\u547d\u4ee4", "Command completed")
         state.phase == NativeTurnPhase.TOOL_RUNNING -> nativeText(language, "\u6b63\u5728\u8c03\u7528\u5de5\u5177 ${elapsedSeconds}s", "Running tools ${elapsedSeconds}s")
-        state.phase == NativeTurnPhase.ANSWERING -> nativeText(language, "\u6b63\u5728\u751f\u6210 ${elapsedSeconds}s", "Generating ${elapsedSeconds}s")
+        state.phase == NativeTurnPhase.ANSWERING || state.phase == NativeTurnPhase.COMPLETED || state.reasoningComplete -> nativeText(language, "\u601d\u8003\u4e86 ${reasoningSeconds}s", "Thought for ${reasoningSeconds}s")
         else -> nativeText(language, "\u5904\u7406\u4e2d ${elapsedSeconds}s", "Processing ${elapsedSeconds}s")
     }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.72f), RoundedCornerShape(18.dp))
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+    val activityRunning = state.phase in setOf(NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING) &&
+        !(state.phase == NativeTurnPhase.TOOL_RUNNING && !commandRunning && completedCommands.isNotEmpty())
+    val arrowRotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        tween(160, easing = FastOutSlowInEasing),
+        label = "reasoningArrow",
+    )
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.78f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().clickable {
-                userControlledExpansion = true
-                when {
-                    !expanded -> expanded = true
-                    reasoningPreview -> fullReasoning = true
-                    else -> {
-                        expanded = false
-                        fullReasoning = false
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable {
+                    userControlledExpansion = true
+                    expanded = !expanded
+                }.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (activityRunning) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                else Icon(HugeIcons.Tick02, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text(statusText, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (commandCount > 0) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                        Text(
+                            nativeText(language, "$commandCount \u6761\u547d\u4ee4", "$commandCount commands"),
+                            Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
+                Icon(
+                    HugeIcons.ArrowDown01,
+                    if (expanded) nativeText(language, "\u6536\u8d77", "Collapse") else nativeText(language, "\u5c55\u5f00", "Expand"),
+                    Modifier.size(16.dp).graphicsLayer { rotationZ = arrowRotation },
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            QElasticExpand(expanded) {
+                Column {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    if (state.phase.active) {
+                        ProcessingPanelBody(
+                            state = state,
+                            liveCommand = liveCommand,
+                            completedCommands = completedCommands,
+                            showReasoning = showReasoning,
+                            reasoningScrollState = reasoningScrollState,
+                            reasoningLive = reasoningLive,
+                            onLoadSubagentHistory = onLoadSubagentHistory,
+                        )
+                    } else {
+                        SafeExpandableViewport(maxHeight = 520.dp) {
+                            ProcessingPanelBody(
+                                state = state,
+                                liveCommand = liveCommand,
+                                completedCommands = completedCommands,
+                                showReasoning = showReasoning,
+                                reasoningScrollState = reasoningScrollState,
+                                reasoningLive = false,
+                                onLoadSubagentHistory = onLoadSubagentHistory,
+                            )
+                        }
                     }
                 }
-            }.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (state.reasoningComplete) {
-                Text("✓", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-            } else {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            }
-            Spacer(Modifier.width(8.dp))
-            Text(statusText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (reasoningPreview && state.reasoningText.length > 520) {
-                Spacer(Modifier.weight(1f))
-                Text(nativeText(language, "\u5c55\u5f00", "Expand"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-        QElasticExpand(expanded) {
-            SafeExpandableViewport(maxHeight = 520.dp) {
-                Column {
-                if (showReasoning && state.reasoningText.isNotBlank()) {
-                    val liveReasoningModifier = if (reasoningLive) {
-                        Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 132.dp)
-                            .verticalScroll(reasoningScrollState)
-                    } else {
-                        Modifier.fillMaxWidth()
-                    }
-                    Box(modifier = Modifier.padding(top = 10.dp).then(liveReasoningModifier)) {
-                        if (state.reasoningComplete) {
-                            DeferredHistoricalRichText(state.reasoningText)
-                        } else {
-                            LiveReasoningText(state.reasoningText)
-                        }
-                    }
-                }
-                if (state.commandText.isNotBlank()) Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) { SelectionContainer { Text(state.commandText, modifier = Modifier.padding(10.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) } }
-                if (state.liveSubagents.isNotEmpty()) {
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(7.dp),
-                        verticalArrangement = Arrangement.spacedBy(7.dp),
-                    ) {
-                        state.liveSubagents.forEach { raw ->
-                            runCatching { JSONObject(raw) }.getOrNull()?.let { item ->
-                                val thread = subagentThreadId(item)
-                                CollabAgentCapsule(
-                                    item = item,
-                                    state = state,
-                                    history = state.subagentHistories[thread],
-                                    historyLoading = thread in state.loadingSubagentHistories,
-                                    onLoadHistory = onLoadSubagentHistory,
-                                )
-                            }
-                        }
-                    }
-                }
+    }
+}
+
+@Composable
+private fun ProcessingPanelBody(
+    state: NativeChatState,
+    liveCommand: JSONObject?,
+    completedCommands: List<JSONObject>,
+    showReasoning: Boolean,
+    reasoningScrollState: androidx.compose.foundation.ScrollState,
+    reasoningLive: Boolean,
+    onLoadSubagentHistory: (String) -> Unit,
+) {
+    if (showReasoning && state.reasoningText.isNotBlank()) {
+        val modifier = if (state.phase.active) {
+            Modifier.fillMaxWidth().heightIn(max = 156.dp).verticalScroll(reasoningScrollState)
+        } else Modifier.fillMaxWidth()
+        Box(Modifier.padding(top = 10.dp).then(modifier)) {
+            if (reasoningLive) LiveReasoningText(state.reasoningText)
+            else DeferredHistoricalRichText(state.reasoningText)
+        }
+    }
+    completedCommands.forEach { item -> CommandExecutionCard(item) }
+    if (liveCommand != null) CommandExecutionCard(liveCommand, running = true, liveOutput = state.commandText)
+    if (state.liveSubagents.isNotEmpty()) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            state.liveSubagents.forEach { raw ->
+                runCatching { JSONObject(raw) }.getOrNull()?.let { item ->
+                    val thread = subagentThreadId(item)
+                    CollabAgentCapsule(
+                        item = item,
+                        state = state,
+                        history = state.subagentHistories[thread],
+                        historyLoading = thread in state.loadingSubagentHistories,
+                        onLoadHistory = onLoadSubagentHistory,
+                    )
                 }
             }
         }
@@ -1859,6 +2048,7 @@ private object NativeMarkdownRenderer {
                 }
             })
             .usePlugin(StrikethroughPlugin.create())
+            .usePlugin(TablePlugin.create(context))
             .usePlugin(LinkifyPlugin.create())
             .usePlugin(MarkwonInlineParserPlugin.create())
             .usePlugin(JLatexMathPlugin.create(42f) { builder -> builder.inlinesEnabled(true) })
@@ -2043,6 +2233,51 @@ private fun MarkdownLikeText(text: String) {
 private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatState, onLoadSubagentHistory: (String) -> Unit) {
     val language = LocalNativeLanguage.current
     val text = message.content
+    if (text.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)) {
+        val planText = remember(text) { decodeNativeProposedPlan(text) }
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.58f),
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(9.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(nativeText(language, "\u5efa\u8bae\u8ba1\u5212", "Proposed plan"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (message.streaming) nativeText(language, "\u6b63\u5728\u6574\u7406\u8ba1\u5212\u2026", "Drafting the plan...")
+                            else nativeText(language, "\u8ba1\u5212\u5df2\u51c6\u5907\u597d", "Plan ready"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
+                        )
+                    }
+                    if (message.streaming) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                    else Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = Color(0xFF5E8B68))
+                }
+                if (planText.isNotBlank()) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+                        if (message.streaming) {
+                            StreamingResponseText(message.id, planText, true, message.revealStartedAt, false)
+                        } else {
+                            // Plans are commonly longer than the generic answer renderer's
+                            // 1200-character rich-text cutoff. Always finish them as chunked
+                            // Markdown so history reloads cannot degrade to literal # / - text.
+                            DeferredHistoricalRichText(planText)
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
     if (text.startsWith("PLAN_PANEL|")) {
         val language = LocalNativeLanguage.current
         val parts = text.split('|')
@@ -2060,10 +2295,10 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(nativeText(language, "??", "Plan"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Text(nativeText(language, "\u8ba1\u5212", "Plan"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (completed) nativeText(language, "?????${if (count > 0) " ? $count ?" else ""}", "Plan ready${if (count > 0) " ? $count steps" else ""}")
-                        else nativeText(language, "????????", "Preparing the plan"),
+                        if (completed) nativeText(language, "\u8ba1\u5212\u5df2\u51c6\u5907\u597d${if (count > 0) " \u00b7 $count \u6b65" else ""}", "Plan ready${if (count > 0) " \u00b7 $count steps" else ""}")
+                        else nativeText(language, "\u6b63\u5728\u51c6\u5907\u8ba1\u5212\u2026", "Preparing the plan\u2026"),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -2113,17 +2348,32 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
     // The live panel owns the expanded reasoning view. When completion inserts this
     // durable activity row, enter collapsed so the panel is not opened a second time.
     var expanded by remember(message.id) { mutableStateOf(false) }
+    val historicalCommandCount = remember(text) {
+        if (tools == null) 0 else (0 until tools.length()).count { index ->
+            runCatching { JSONObject(tools.optString(index)) }.getOrNull()?.optString("type") == "commandExecution"
+        }
+    }
+    val historicalArrowRotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        tween(150, easing = FastOutSlowInEasing),
+        label = "historicalReasoningArrow",
+    )
     Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
         Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(HugeIcons.Zap, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(8.dp))
-            Text("思考了 ${duration}s", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(nativeText(language, "\u601d\u8003\u4e86 ${duration}s", "Thought for ${duration}s"), modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (historicalCommandCount > 0) {
+                Text(nativeText(language, "$historicalCommandCount \u6761\u547d\u4ee4", "$historicalCommandCount commands"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(6.dp))
+            }
+            Icon(HugeIcons.ArrowDown01, null, Modifier.size(15.dp).graphicsLayer { rotationZ = historicalArrowRotation }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
         QElasticExpand(expanded) {
             SafeExpandableViewport(maxHeight = 520.dp) {
                 Column {
-        if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(reasoning) }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+        if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { DeferredHistoricalRichText(reasoning) }
         else if (reasoningUnavailable) Text(
             nativeText(language, "\u6a21\u578b\u672a\u8fd4\u56de\u53ef\u89c1\u7684\u601d\u8003\u6458\u8981", "The model did not return a visible reasoning summary"),
             modifier = Modifier.padding(top = 10.dp),
@@ -2921,7 +3171,7 @@ private fun SubagentActivityView(content: String) {
                 SafeExpandableViewport(maxHeight = 520.dp) {
                     Column(Modifier.padding(start = 13.dp, end = 13.dp, bottom = 13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                        if (reasoning.isNotBlank()) RichResponseText(reasoning)
+                        if (reasoning.isNotBlank()) DeferredHistoricalRichText(reasoning)
                         if (command.isNotBlank()) ToolTextCard("\u547d\u4ee4\u6267\u884c", command, false)
                         if (tools != null) for (index in 0 until tools.length()) {
                             val tool = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
@@ -2966,45 +3216,106 @@ private fun AgentTimelineSection(title: String, value: String, monospace: Boolea
 }
 
 @Composable
-private fun CommandExecutionCard(item: JSONObject) {
-    val command = item.optString("command", "")
+private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liveOutput: String = "") {
+    val language = LocalNativeLanguage.current
+    val command = NativeCommandPresentation.rawCommand(item)
+    val action = NativeCommandPresentation.action(item)
+    val actionLabel = NativeCommandPresentation.label(action, language != "en")
+    val subject = NativeCommandPresentation.subject(item)
     val stdout = item.optString("stdout", "")
     val stderr = item.optString("stderr", "")
-    val aggregated = item.optString("aggregatedOutput", item.optString("output", ""))
+    val aggregated = liveOutput.ifBlank { item.optString("aggregatedOutput", item.optString("output", "")) }
     val output = if (stdout.isNotBlank() || stderr.isNotBlank()) stdout else aggregated
     val cwd = item.optString("cwd", "")
     val exitCode = item.opt("exitCode")?.takeUnless { it == JSONObject.NULL }?.toString().orEmpty()
     val durationMs = item.optLong("durationMs", item.optLong("duration_ms", 0L))
-    val failed = item.optString("status").equals("failed", true) || (exitCode.toIntOrNull()?.let { it != 0 } == true)
-    val normalized = buildString {
-        append("$ ").append(command).append('\n')
-        if (output.isNotBlank()) append(output.trimEnd()).append('\n')
-        if (exitCode.isNotBlank()) append("exit ").append(exitCode)
+    val status = item.optString("status")
+    val isRunning = running || status.equals("inProgress", true) || status.equals("running", true)
+    val failed = status.equals("failed", true) || (exitCode.toIntOrNull()?.let { it != 0 } == true)
+    val hasDetails = command.isNotBlank() || output.isNotBlank() || stderr.isNotBlank() || cwd.isNotBlank()
+    var expanded by remember(item.toString(), running) { mutableStateOf(false) }
+    val arrowRotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        tween(150, easing = FastOutSlowInEasing),
+        label = "commandArrow",
+    )
+    val accent = when {
+        failed -> MaterialTheme.colorScheme.error
+        isRunning -> MaterialTheme.colorScheme.primary
+        else -> Color(0xFF5E8B68)
     }
-    if (commandViewType(normalized) != CommandViewType.TERMINAL && stderr.isBlank()) {
-        SmartCommandCard(normalized)
-        return
+    val icon = when (action) {
+        NativeCommandPresentation.LIST_FILES, NativeCommandPresentation.CREATE_DIRECTORY -> HugeIcons.Folder01
+        NativeCommandPresentation.READ_FILE -> HugeIcons.Files02
+        NativeCommandPresentation.SEARCH_FILES -> HugeIcons.Search01
+        NativeCommandPresentation.GIT_DIFF, NativeCommandPresentation.GIT_STATUS, NativeCommandPresentation.GIT_LOG -> HugeIcons.Code
+        NativeCommandPresentation.DEVICE_COMMAND -> HugeIcons.Code
+        else -> HugeIcons.Sparkles
     }
-    var expanded by remember { mutableStateOf(false) }
-    val accent = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+    val statusLabel = when {
+        failed -> nativeText(language, "\u547d\u4ee4\u6267\u884c\u5931\u8d25", "Command failed")
+        isRunning -> nativeText(language, "\u6b63\u5728\u8fd0\u884c\u547d\u4ee4", "Running command")
+        else -> nativeText(language, "\u5df2\u6267\u884c\u547d\u4ee4", "Command completed")
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+        border = BorderStroke(1.dp, accent.copy(alpha = if (isRunning) 0.26f else 0.14f)),
+    ) {
         Column {
-            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(HugeIcons.Sparkles, null, modifier = Modifier.size(17.dp), tint = accent)
-                Spacer(Modifier.width(8.dp)); Column(modifier = Modifier.weight(1f)) {
-                    Text(command.ifBlank { "命令执行" }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
-                    if (cwd.isNotBlank()) Text(cwd, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                val meta = buildList { if (durationMs > 0) add("%.1fs".format(durationMs / 1000.0)); if (exitCode.isNotBlank()) add("exit $exitCode") }.joinToString(" · ")
-                Text(meta.ifBlank { if (failed) "失败" else "完成" }, style = MaterialTheme.typography.labelSmall, color = accent)
-            }
-            QElasticExpand(expanded) {
-                SafeExpandableViewport(maxHeight = 420.dp) {
-                    Column {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                        if (stdout.isNotBlank() || (stdout.isBlank() && aggregated.isNotBlank())) CommandStreamSection("\u8f93\u51fa", if (stdout.isNotBlank()) stdout else aggregated, false)
-                        if (stderr.isNotBlank()) CommandStreamSection("\u9519\u8bef\u8f93\u51fa", stderr, true)
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable(enabled = hasDetails) { expanded = !expanded }.padding(horizontal = 11.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(shape = CircleShape, color = accent.copy(alpha = 0.12f), contentColor = accent) {
+                    Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+                        if (isRunning) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.8.dp, color = accent)
+                        else Icon(icon, null, Modifier.size(16.dp), tint = accent)
                     }
+                }
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(actionLabel, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        subject.ifBlank { statusLabel },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                val meta = buildList {
+                    if (durationMs > 0 && !isRunning) add("%.1fs".format(durationMs / 1000.0))
+                    if (exitCode.isNotBlank() && failed) add("exit $exitCode")
+                }.joinToString(" \u00b7 ")
+                if (meta.isNotBlank()) {
+                    Text(meta, style = MaterialTheme.typography.labelSmall, color = accent)
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (hasDetails) Icon(
+                    HugeIcons.ArrowDown01,
+                    if (expanded) nativeText(language, "\u6536\u8d77\u547d\u4ee4\u8be6\u60c5", "Collapse command details") else nativeText(language, "\u5c55\u5f00\u547d\u4ee4\u8be6\u60c5", "Expand command details"),
+                    Modifier.size(15.dp).graphicsLayer { rotationZ = arrowRotation },
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            QElasticExpand(expanded && hasDetails) {
+                Column {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f))
+                    if (command.isNotBlank()) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 9.dp)) {
+                            Text(nativeText(language, "\u539f\u59cb\u547d\u4ee4", "Raw command"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.height(4.dp))
+                            SelectionContainer {
+                                Text(command, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                            if (cwd.isNotBlank()) Text(cwd, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    if (output.isNotBlank()) CommandStreamSection(nativeText(language, "\u8f93\u51fa", "Output"), output, false)
+                    if (stderr.isNotBlank()) CommandStreamSection(nativeText(language, "\u9519\u8bef\u8f93\u51fa", "Error output"), stderr, true)
                 }
             }
         }
@@ -3013,14 +3324,34 @@ private fun CommandExecutionCard(item: JSONObject) {
 
 @Composable
 private fun CommandStreamSection(title: String, value: String, error: Boolean) {
-    Column(modifier = Modifier.fillMaxWidth().background(if (error) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f) else Color.Transparent).padding(10.dp)) {
+    val chunks = remember(value) { NativeUiRenderSafety.splitPlainText(value.trimEnd()) }
+    var visibleCount by remember(value) { mutableIntStateOf(0) }
+    LaunchedEffect(value) {
+        visibleCount = 0
+        chunks.indices.forEach { index ->
+            withFrameNanos { }
+            visibleCount = index + 1
+        }
+    }
+    Column(
+        modifier = Modifier.fillMaxWidth()
+            .background(if (error) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.30f) else Color.Transparent)
+            .padding(horizontal = 11.dp, vertical = 9.dp),
+    ) {
         Text(title, style = MaterialTheme.typography.labelSmall, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(4.dp))
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                NativeUiRenderSafety.splitPlainText(value.trimEnd()).forEach { chunk ->
+                chunks.take(visibleCount).forEach { chunk ->
                     Text(chunk, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
+            }
+        }
+        if (visibleCount < chunks.size) {
+            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                Spacer(Modifier.width(6.dp))
+                Text(nativeText(LocalNativeLanguage.current, "\u6b63\u5728\u52a0\u8f7d\u8f93\u51fa\u2026", "Loading output\u2026"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -3364,6 +3695,8 @@ private fun RikkaChatInput(
     selectedEffort: String,
     onEffortSelected: (String) -> Unit,
     selectedMode: String,
+    permissionMode: String,
+    onPermissionModeSelected: (String) -> Unit,
     activeGoal: String,
     onModeSelected: (String) -> Unit,
     onRequestGoal: () -> Unit,
@@ -3378,15 +3711,39 @@ private fun RikkaChatInput(
     onRemoveAttachment: (NativeAttachment) -> Unit,
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
-    onSend: () -> Unit,
+    onSend: (String) -> Unit,
     onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
+    val textState = remember { TextFieldState(initialText = value) }
+    val latestExternalValue by rememberUpdatedState(value)
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
     var toolsExpanded by remember { mutableStateOf(false) }
-    val slashCommandMode = value.trimStart().startsWith("/")
-    LaunchedEffect(slashCommandMode) {
-        if (slashCommandMode) toolsExpanded = true
+    var permissionExpanded by remember { mutableStateOf(false) }
+
+    // Do not read textState.text in this parent restart scope. The TextField and send button
+    // below observe it in their own small scopes, so an IME edit cannot recompose attachments,
+    // mode capsules, animated surfaces and the rest of the composer.
+    LaunchedEffect(textState) {
+        snapshotFlow { textState.text.toString() }.collectLatest { localText ->
+            if (localText.trimStart().startsWith("/")) toolsExpanded = true
+            delay(1000L)
+            if (localText != latestExternalValue) latestOnValueChange(localText)
+        }
+    }
+    LaunchedEffect(value) {
+        if (value != textState.text.toString()) textState.setTextAndPlaceCursorAtEnd(value)
+    }
+    if (permissionExpanded) {
+        PermissionModeSheet(
+            selected = permissionMode,
+            onSelect = {
+                onPermissionModeSelected(it)
+                permissionExpanded = false
+            },
+            onDismiss = { permissionExpanded = false },
+        )
     }
     if (toolsExpanded) {
         ModalBottomSheet(
@@ -3402,23 +3759,33 @@ private fun RikkaChatInput(
                         "__compact__" -> onCompact()
                         "__retry__" -> onRetryLast()
                         "__edit__" -> onEditLast()
-                        else -> onValueChange(command)
+                        else -> {
+                            textState.setTextAndPlaceCursorAtEnd(command)
+                            onValueChange(command)
+                        }
                     }
                     toolsExpanded = false
                 },
             )
         }
     }
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    val bottomCorner by animateDpAsState(if (imeVisible) 0.dp else 28.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomCorner")
-    val sidePadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputSidePadding")
-    val bottomPadding by animateDpAsState(if (imeVisible) 0.dp else 8.dp, tween(210, easing = FastOutSlowInEasing), label = "inputBottomPadding")
-    val keyboardOverlap by animateDpAsState(if (imeVisible) 3.dp else 0.dp, tween(180, easing = FastOutSlowInEasing), label = "inputKeyboardOverlap")
-    val inputBorderColor by animateColorAsState(
-        if (imeVisible) MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-        tween(160),
-        label = "inputBorderColor",
+    val imeVisible = WindowInsets.isImeVisible
+    // Keep the visual morph, but drive it from one draw/placement animation. Animating side
+    // and bottom padding independently forced repeated subtree measurement while the system
+    // keyboard was already animating its inset.
+    val keyboardMorph by animateFloatAsState(
+        targetValue = if (imeVisible) 1f else 0f,
+        animationSpec = tween(210, easing = FastOutSlowInEasing),
+        label = "inputKeyboardMorph",
+    )
+    val bottomCorner = 28.dp * (1f - keyboardMorph)
+    val sidePadding = if (imeVisible) 0.dp else 8.dp
+    val bottomPadding = if (imeVisible) 0.dp else 8.dp
+    val keyboardOverlap = 3.dp * keyboardMorph
+    val inputBorderColor = androidx.compose.ui.graphics.lerp(
+        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        MaterialTheme.colorScheme.surfaceContainerLow,
+        keyboardMorph,
     )
     val inputShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = bottomCorner, bottomStart = bottomCorner)
     val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier
@@ -3427,9 +3794,9 @@ private fun RikkaChatInput(
             modifier = insetModifier.padding(start = sidePadding, end = sidePadding, top = 8.dp, bottom = bottomPadding).offset(y = keyboardOverlap),
         ) {
             Surface(
-                modifier = Modifier.fillMaxWidth().onSizeChanged { onHeightChanged(it.height) }.animateContentSize(
-                    animationSpec = spring(dampingRatio = 0.90f, stiffness = 520f),
-                ),
+                // Text entry is a high-frequency interaction. Animating container size makes
+                // non-empty/multiline text remeasure throughout the IME transition.
+                modifier = Modifier.fillMaxWidth().onSizeChanged { onHeightChanged(it.height) },
                 shape = inputShape,
                 tonalElevation = 0.dp,
                 border = BorderStroke(1.dp, inputBorderColor),
@@ -3469,28 +3836,36 @@ private fun RikkaChatInput(
                         selectedSkills = selectedSkills,
                         onRemoveSkill = onRemoveSkill,
                     )
-                    TextField(
-                        value = value,
-                        onValueChange = onValueChange,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 58.dp).onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && value.isNotBlank()) {
-                                onSend()
+                    BasicTextField(
+                        state = textState,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 58.dp).padding(horizontal = 12.dp, vertical = 15.dp).onPreviewKeyEvent { event ->
+                            val currentText = textState.text.toString()
+                            if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && currentText.isNotBlank()) {
+                                onSend(currentText)
+                                textState.setTextAndPlaceCursorAtEnd("")
+                                onValueChange("")
                                 true
                             } else false
                         },
                         enabled = !loading,
-                        minLines = 1,
-                        maxLines = 5,
-                        shape = MaterialTheme.shapes.largeIncreased,
-                        placeholder = { Text(nativeText(language, "\u8f93\u5165\u6d88\u606f", "Type a message")) },
-                        colors = TextFieldDefaults.colors(
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                            disabledIndicatorColor = Color.Transparent,
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = if (loading) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f) else MaterialTheme.colorScheme.onSurface,
+                            lineHeight = 24.sp,
                         ),
+                        lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 5),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        decorator = { innerTextField ->
+                            Box(Modifier.fillMaxWidth()) {
+                                if (textState.text.isEmpty()) {
+                                    Text(
+                                        nativeText(language, "\u8f93\u5165\u6d88\u606f", "Type a message"),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        },
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
@@ -3503,33 +3878,121 @@ private fun RikkaChatInput(
                         ) {
                             InputTool(HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick)
                             LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected)
+                            InputTool(
+                                HugeIcons.Settings03,
+                                NativePermissionMode.label(permissionMode, language != "en"),
+                                { permissionExpanded = true },
+                            )
                             InputTool(HugeIcons.Add01, "\u5de5\u5177", { toolsExpanded = true })
                         }
-                        Surface(
-                            modifier = Modifier.size(42.dp).clickable(enabled = loading || (enabled && value.isNotBlank())) { onSend() },
-                            shape = CircleShape,
-                            color = when {
-                                loading -> MaterialTheme.colorScheme.errorContainer
-                                !enabled || value.isBlank() -> MaterialTheme.colorScheme.surfaceContainerHigh
-                                else -> MaterialTheme.colorScheme.primary
+                        ComposerSendButton(
+                            textState = textState,
+                            enabled = enabled,
+                            loading = loading,
+                            hasAttachments = attachments.isNotEmpty(),
+                            onSend = { currentText ->
+                                onSend(currentText)
+                                if (!loading && enabled && (currentText.isNotBlank() || attachments.isNotEmpty())) {
+                                    textState.setTextAndPlaceCursorAtEnd("")
+                                    onValueChange("")
+                                }
                             },
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    if (loading) HugeIcons.Cancel01 else HugeIcons.ArrowUp02,
-                                    contentDescription = if (loading) "停止" else "发送",
-                                    modifier = Modifier.size(21.dp),
-                                    tint = when {
-                                        loading -> MaterialTheme.colorScheme.onErrorContainer
-                                        !enabled || value.isBlank() -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                        else -> MaterialTheme.colorScheme.onPrimary
-                                    },
-                                )
-                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerSendButton(
+    textState: TextFieldState,
+    enabled: Boolean,
+    loading: Boolean,
+    hasAttachments: Boolean,
+    onSend: (String) -> Unit,
+) {
+    val inputText = textState.text.toString()
+    val canSend = enabled && (inputText.isNotBlank() || hasAttachments)
+    Surface(
+        modifier = Modifier.size(42.dp).clickable(enabled = loading || canSend) { onSend(inputText) },
+        shape = CircleShape,
+        color = when {
+            loading -> MaterialTheme.colorScheme.errorContainer
+            !canSend -> MaterialTheme.colorScheme.surfaceContainerHigh
+            else -> MaterialTheme.colorScheme.primary
+        },
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                if (loading) HugeIcons.Cancel01 else HugeIcons.ArrowUp02,
+                contentDescription = if (loading) "\u505c\u6b62" else "\u53d1\u9001",
+                modifier = Modifier.size(21.dp),
+                tint = when {
+                    loading -> MaterialTheme.colorScheme.onErrorContainer
+                    !canSend -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    else -> MaterialTheme.colorScheme.onPrimary
+                },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PermissionModeSheet(selected: String, onSelect: (String) -> Unit, onDismiss: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    val options = listOf(
+        Triple(
+            NativePermissionMode.WORKSPACE,
+            nativeText(language, "\u5de5\u4f5c\u533a\u8bbf\u95ee", "Workspace access"),
+            nativeText(language, "\u53ef\u8bfb\u5199\u5f53\u524d\u9879\u76ee\uff1b\u8d8a\u754c\u64cd\u4f5c\u4f1a\u5148\u8be2\u95ee", "Read and write the project; ask before broader access"),
+        ),
+        Triple(
+            NativePermissionMode.FULL_ACCESS,
+            nativeText(language, "\u5b8c\u5168\u8bbf\u95ee", "Full access"),
+            nativeText(language, "\u4e0d\u4f7f\u7528\u6c99\u7bb1\u4e14\u4e0d\u8be2\u95ee\uff0c\u547d\u4ee4\u53ef\u4ee5\u76f4\u63a5\u8fd0\u884c", "No sandbox or prompts; commands run directly"),
+        ),
+        Triple(
+            NativePermissionMode.READ_ONLY,
+            nativeText(language, "\u53ea\u8bfb", "Read only"),
+            nativeText(language, "\u5141\u8bb8\u68c0\u67e5\u6587\u4ef6\uff0c\u4fee\u6539\u6216\u8d8a\u754c\u547d\u4ee4\u9700\u8981\u786e\u8ba4", "Inspect files; writes and broader commands require approval"),
+        ),
+    )
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text(nativeText(language, "\u8bbf\u95ee\u6743\u9650", "Access permissions"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                nativeText(language, "\u6743\u9650\u4f1a\u5e94\u7528\u5230\u4e0b\u4e00\u6761\u6d88\u606f\uff0c\u4e5f\u4f1a\u8986\u76d6\u65e7\u5bf9\u8bdd\u4fdd\u5b58\u7684\u6c99\u7bb1\u8bbe\u7f6e\u3002", "Applies to the next message and overrides sandbox settings saved in older conversations."),
+                Modifier.padding(top = 4.dp, bottom = 12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            options.forEach { (mode, title, description) ->
+                val active = NativePermissionMode.normalize(selected) == mode
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onSelect(mode) },
+                    shape = RoundedCornerShape(18.dp),
+                    color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = if (mode == NativePermissionMode.FULL_ACCESS) BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.28f)) else null,
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (active) HugeIcons.Tick02 else HugeIcons.Settings03,
+                            null,
+                            Modifier.size(20.dp),
+                            tint = if (mode == NativePermissionMode.FULL_ACCESS) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
+                            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             }
+            Spacer(Modifier.height(12.dp))
         }
     }
 }
@@ -3954,6 +4417,7 @@ private fun InputTool(icon: ImageVector, description: String, onClick: () -> Uni
 
 @Composable
 private fun RikkaDrawer(
+    currentThreadId: String,
     modelLabel: String,
     conversations: List<NativeConversation>,
     onSearch: () -> Unit,
@@ -4027,9 +4491,17 @@ private fun RikkaDrawer(
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 items(visibleConversations, key = { it.threadId }) { conversation ->
+                    val isCurrent = conversation.threadId == currentThreadId
                     NavigationDrawerItem(
-                        label = { Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        selected = false,
+                        label = {
+                            Text(
+                                conversation.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        },
+                        selected = isCurrent,
                         onClick = { onResumeConversation(conversation.threadId) },
                         icon = {
                             if (conversation.state == CodexTaskStore.RUNNING) {
@@ -4045,7 +4517,12 @@ private fun RikkaDrawer(
                             }
                         },
                         badge = { ConversationMenu(conversation, onRenameConversation, onDeleteConversation, onToggleFavorite) },
-                        colors = NavigationDrawerItemDefaults.colors(unselectedContainerColor = Color.Transparent),
+                        colors = NavigationDrawerItemDefaults.colors(
+                            selectedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.92f),
+                            unselectedContainerColor = Color.Transparent,
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                        ),
                     )
                 }
             }

@@ -19,7 +19,21 @@ object NativeUiRenderSafety {
     fun splitMarkdown(source: String): List<String> = splitText(source, preferParagraphs = true)
 
     @JvmStatic
+    fun containsMarkdownTable(source: String): Boolean {
+        val delimiter = Regex("""^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$""")
+        return source.lineSequence().zipWithNext().any { (header, separator) ->
+            header.contains('|') && delimiter.matches(separator)
+        }
+    }
+
+    @JvmStatic
     fun splitPlainText(source: String): List<String> = splitText(source, preferParagraphs = false)
+
+    /** Terminal protocol events must bypass the tiny-delta debounce or a delayed flush can
+     * reactivate ANSWERING after the turn was already marked complete. */
+    @JvmStatic
+    fun shouldDeferStreamFlush(pendingLength: Int, boundary: Boolean, ageMs: Long, force: Boolean): Boolean =
+        !force && pendingLength < 12 && !boundary && ageMs < 110L
 
     @JvmStatic
     fun sanitizeToolDetail(source: String): String {

@@ -35,6 +35,8 @@ final class CodexAppServerBridge {
     private final Map<String, Long> turnStartedAtMs = new ConcurrentHashMap<>();
     private final Set<String> pendingFinalTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> syntheticCompletedTurns = ConcurrentHashMap.newKeySet();
+    /** Turns whose native UI was already closed by thread/status/changed=idle. */
+    private final Set<String> uiCompletedTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
     private long lastAgentDeltaAt;
     private int agentDeltaCount;
@@ -302,6 +304,12 @@ final class CodexAppServerBridge {
                 }
             }
             params.put("input", input);
+            String permissionMode = configuredPermissionMode();
+            String permissionCwd = configuredCwd();
+            NativePermissionMode.applyTurnParams(params, permissionMode, permissionCwd);
+            Log.i(TAG, "TURN_PERMISSIONS mode=" + permissionMode + " approval="
+                + NativePermissionMode.approvalPolicy(permissionMode) + " sandbox="
+                + NativePermissionMode.sandbox(permissionMode));
             if (model != null && !model.trim().isEmpty()) params.put("model", model);
             if (effort != null && !effort.trim().isEmpty()) params.put("effort", effort);
             if (collaborationMode != null && !collaborationMode.trim().isEmpty()) {
@@ -399,7 +407,12 @@ final class CodexAppServerBridge {
                         return;
                     }
                     try {
-                        sendNavigationRequest("thread/resume", new JSONObject().put("threadId", requestedThread), generation);
+                        JSONObject resumeParams = new JSONObject().put("threadId", requestedThread);
+                        String permissionMode = configuredPermissionMode();
+                        NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
+                        Log.i(TAG, "RESUME_PERMISSIONS mode=" + permissionMode + " sandbox="
+                            + NativePermissionMode.sandbox(permissionMode));
+                        sendNavigationRequest("thread/resume", resumeParams, generation);
                     } catch (Exception error) {
                         emit("onNativeError", error.getMessage());
                     }
@@ -570,6 +583,18 @@ final class CodexAppServerBridge {
         } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
+    void respondApprovalRequest(String rawRequest, String decision) {
+        try {
+            JSONObject request = new JSONObject(rawRequest == null ? "{}" : rawRequest);
+            Object requestId = request.opt("requestId");
+            String method = request.optString("method", "");
+            if (requestId == null || requestId == JSONObject.NULL || method.isEmpty()) return;
+            JSONObject result = NativeApprovalProtocol.result(method, request.optJSONObject("params"), decision);
+            sendJson(new JSONObject().put("id", requestId).put("result", result));
+            Log.i(TAG, "APPROVAL_RESPONSE method=" + method + " decision=" + decision);
+        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
     private void sendInitialize() throws Exception {
         JSONObject clientInfo = new JSONObject()
             .put("name", "ilyop_codex_android")
@@ -579,17 +604,27 @@ final class CodexAppServerBridge {
             .put("capabilities", new JSONObject().put("experimentalApi", true)));
     }
 
-    private void sendThreadStart() throws Exception {
-        JSONObject params = new JSONObject();
+    private String configuredCwd() {
         String cwd = TermuxConstants.TERMUX_HOME_DIR_PATH;
         android.content.SharedPreferences mobile = activity.getSharedPreferences("codex_mobile", Activity.MODE_PRIVATE);
         if (mobile.getBoolean("custom_project_root_enabled", true)) {
             String configured = mobile.getString("custom_project_root", "/storage/emulated/0/");
             if (configured != null && new File(configured).isDirectory()) cwd = configured;
         }
-        params.put("cwd", cwd);
-        params.put("approvalPolicy", "never");
-        params.put("sandbox", "danger-full-access");
+        return cwd;
+    }
+
+    private String configuredPermissionMode() {
+        android.content.SharedPreferences mobile = activity.getSharedPreferences("codex_mobile", Activity.MODE_PRIVATE);
+        return NativePermissionMode.normalize(mobile.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS));
+    }
+
+    private void sendThreadStart() throws Exception {
+        JSONObject params = new JSONObject();
+        String mode = configuredPermissionMode();
+        NativePermissionMode.applyThreadParams(params, mode, configuredCwd());
+        Log.i(TAG, "THREAD_PERMISSIONS mode=" + mode + " approval="
+            + NativePermissionMode.approvalPolicy(mode) + " sandbox=" + NativePermissionMode.sandbox(mode));
         int generation = navigationGeneration.get();
         if (eventListener != null) sendNavigationRequest("thread/start", params, generation);
         else sendRequest("thread/start", params);
@@ -675,7 +710,9 @@ final class CodexAppServerBridge {
             String line;
             while ((line = reader.readLine()) != null) {
                 JSONObject message = new JSONObject(line);
-                android.util.Log.d(TAG, "RECV " + messageSummary(message));
+                if (!isHighFrequencyNotification(message.optString("method", ""))) {
+                    android.util.Log.d(TAG, "RECV " + messageSummary(message));
+                }
                 handleMessage(message);
             }
         } catch (Exception e) {
@@ -699,6 +736,14 @@ final class CodexAppServerBridge {
         if (suppressSyntheticInterruptCompletion(message)) return;
         if (message.has("id") && message.has("method")) {
             String inboundMethod = message.optString("method", "");
+            if (NativeApprovalProtocol.isApprovalMethod(inboundMethod)) {
+                emit("onApprovalRequest", new JSONObject()
+                    .put("requestId", message.opt("id"))
+                    .put("method", inboundMethod)
+                    .put("params", message.optJSONObject("params")).toString());
+                Log.i(TAG, "APPROVAL_REQUEST method=" + inboundMethod);
+                return;
+            }
             if (inboundMethod.contains("requestUserInput") || "item/tool/requestUserInput".equals(inboundMethod)) {
                 emit("onUserInputRequest", new JSONObject()
                     .put("requestId", message.optInt("id", -1))
@@ -808,7 +853,9 @@ final class CodexAppServerBridge {
         }
         boolean planLikeMethod = method.toLowerCase(java.util.Locale.ROOT).contains("plan")
             || (params != null && (params.has("plan") || params.has("proposedPlan")));
-        if (planLikeMethod) {
+        if (planLikeMethod && !"item/plan/delta".equals(method)) {
+            // Plan deltas can arrive a few characters at a time. Persisting every one
+            // floods the diagnostics executor and disk while the UI is streaming.
             NativeChatDiagnostics.record(activity, "plan_signal", new JSONObject()
                 .put("method", method).put("primary", primaryEvent)
                 .put("params", params == null ? JSONObject.NULL : params));
@@ -839,17 +886,25 @@ final class CodexAppServerBridge {
                     .put("thread", shortId(params.optString("threadId", ""))));
             }
         }
-        if (primaryEvent && "item/agentMessage/delta".equals(method) && params != null) {
+        if (primaryEvent && "item/plan/delta".equals(method) && params != null) {
+            // Plan mode emits its final <proposed_plan> block as a dedicated Plan item,
+            // not as an agentMessage. Forward that stream explicitly or the native UI
+            // remains blank until it reparses the rollout after a route change.
+            emit("onPlanDelta", params.toString());
+        } else if (primaryEvent && "item/started".equals(method) && isPlanItem(params)) {
+            emit("onPlanStarted", params.toString());
+        } else if (primaryEvent && "item/completed".equals(method) && isPlanItem(params)) {
+            emit("onPlanComplete", params.toString());
+        } else if (primaryEvent && "item/started".equals(method) && isCommandItem(params)) {
+            JSONObject item = params == null ? null : params.optJSONObject("item");
+            emit("onCommandStarted", item == null ? "{}" : item.toString());
+        } else if (primaryEvent && "item/agentMessage/delta".equals(method) && params != null) {
             String itemId = params.optString("itemId", "");
             if (!itemId.isEmpty()) streamedAgentItemIds.add(itemId);
             String delta = params.optString("delta", "");
-            long now = android.os.SystemClock.uptimeMillis();
-            long gap = lastAgentDeltaAt == 0L ? 0L : now - lastAgentDeltaAt;
-            lastAgentDeltaAt = now;
+            lastAgentDeltaAt = android.os.SystemClock.uptimeMillis();
             agentDeltaCount++;
             agentDeltaChars += delta.length();
-            Log.d(TAG, "agent-delta item=" + itemId + " chars=" + delta.length() + " gapMs=" + gap
-                + " totalChunks=" + agentDeltaCount + " totalChars=" + agentDeltaChars);
             emit("onDelta", delta);
         } else if (primaryEvent && "item/completed".equals(method) && isReasoningItem(params)) {
             JSONObject item = params.optJSONObject("item");
@@ -861,20 +916,24 @@ final class CodexAppServerBridge {
         } else if (primaryEvent && "item/completed".equals(method) && isToolDetailItem(params)) {
             JSONObject item = params.optJSONObject("item");
             emit("onToolComplete", item == null ? "{}" : item.toString());
-        } else if (primaryEvent && "item/completed".equals(method) && isFinalAgentMessage(params)) {
+        } else if (primaryEvent && "item/completed".equals(method) && isAgentMessageItem(params)) {
             JSONObject item = params == null ? null : params.optJSONObject("item");
-            Log.i(TAG, "agent-stream-complete chunks=" + agentDeltaCount + " chars=" + agentDeltaChars);
+            boolean finalAnswer = isFinalAgentMessage(params);
+            Log.i(TAG, "agent-stream-complete chunks=" + agentDeltaCount + " chars=" + agentDeltaChars
+                + " phase=" + (item == null ? "" : item.optString("phase", "missing")));
             lastAgentDeltaAt = 0L;
             agentDeltaCount = 0;
             agentDeltaChars = 0;
             String itemId = item == null ? "" : item.optString("id", "");
             if (!itemId.isEmpty()) streamedAgentItemIds.remove(itemId);
-            // Always deliver the authoritative completed item. appendAssistantFinal()
-            // merges it with streamed content, and it repairs missing prefixes when the
-            // Activity detached and re-attached in the middle of this item.
-            String finalText = extractAgentMessageText(item);
-            if (!finalText.isEmpty()) emit("onFinalAnswer", finalText);
-            scheduleMissingTurnCompletion(params);
+            // Completed agent messages are authoritative even when a provider omits phase.
+            // Seal a commentary/missing-phase item without ending the turn; idle status below
+            // is the protocol-level completion signal. This also repairs a detached Activity.
+            String completedText = extractAgentMessageText(item);
+            if (!completedText.isEmpty()) {
+                emit(finalAnswer ? "onFinalAnswer" : "onAssistantItemComplete", completedText);
+            }
+            if (finalAnswer) scheduleMissingTurnCompletion(params);
         } else if (primaryEvent && ("item/reasoning/summaryTextDelta".equals(method) || "item/reasoning/textDelta".equals(method)) && params != null) {
             emit("onReasoningDelta", params.optString("delta", ""));
         } else if (primaryEvent && "item/commandExecution/outputDelta".equals(method) && params != null) {
@@ -882,19 +941,23 @@ final class CodexAppServerBridge {
         } else if (primaryEvent && "item/started".equals(method) && params != null) {
             JSONObject item = params.optJSONObject("item");
             if (item != null) emit("onItem", item.optString("type", "item"));
+        } else if ("thread/status/changed".equals(method) && isIdleThreadStatus(params)) {
+            completeVisibleTurnFromIdle(params);
         } else if ("turn/completed".equals(method)) {
+            String completedKey = turnKey(params);
+            boolean uiAlreadyCompleted = completedKey != null && uiCompletedTurns.remove(completedKey);
             clearPendingTurn(params);
             String completedThread = params == null ? "" : params.optString("threadId", "");
             if (completedThread.isEmpty() && params != null) {
                 JSONObject completedTurn = params.optJSONObject("turn");
                 if (completedTurn != null) completedThread = completedTurn.optString("threadId", "");
             }
-            if (primaryEvent) emit("onTurnComplete", "");
+            if (primaryEvent && !uiAlreadyCompleted) emit("onTurnComplete", "");
             if (isPrimaryTurn(params)) {
                 CodexTaskStore.markCompleted(activity, completedThread, turnFailed(params));
                 NativeChatDiagnostics.record(activity, primaryEvent ? "turn_complete" : "background_turn_complete", new JSONObject()
                     .put("thread", shortId(completedThread)).put("failed", turnFailed(params)));
-                notifyTaskCompleted();
+                if (!uiAlreadyCompleted) notifyTaskCompleted();
             }
         } else if (primaryEvent && "error".equals(method) && params != null) {
             JSONObject error = params.optJSONObject("error");
@@ -908,6 +971,11 @@ final class CodexAppServerBridge {
         String type = item.optString("type", "");
         return "fileChange".equals(type) || "mcpToolCall".equals(type) || "webSearch".equals(type)
             || "collabAgentToolCall".equals(type);
+    }
+
+    private static boolean isPlanItem(JSONObject params) {
+        JSONObject item = params == null ? null : params.optJSONObject("item");
+        return item != null && "plan".equals(item.optString("type"));
     }
 
     private static boolean isReasoningItem(JSONObject params) {
@@ -1031,6 +1099,27 @@ final class CodexAppServerBridge {
         }, "CodexTurnDiagnostics").start();
     }
 
+    private static void findSessionFiles(File directory, java.util.Set<String> threadIds, java.util.Map<String, File> result) {
+        if (directory == null || !directory.isDirectory() || threadIds.isEmpty() || result.size() >= threadIds.size()) return;
+        File[] children = directory.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (result.size() >= threadIds.size()) return;
+            if (child.isDirectory()) {
+                findSessionFiles(child, threadIds, result);
+                continue;
+            }
+            String name = child.getName();
+            if (!name.endsWith(".jsonl")) continue;
+            for (String threadId : threadIds) {
+                if (!result.containsKey(threadId) && name.endsWith("-" + threadId + ".jsonl")) {
+                    result.put(threadId, child);
+                    break;
+                }
+            }
+        }
+    }
+
     private static File findSessionFile(File directory, String thread) {
         if (directory == null || !directory.isDirectory() || thread == null || thread.isEmpty()) return null;
         File[] children = directory.listFiles();
@@ -1046,10 +1135,8 @@ final class CodexAppServerBridge {
         return null;
     }
 
-    static String resolveConversationProject(String threadId) {
+    private static String resolveConversationProject(File sessionFile) {
         try {
-            File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
-            File sessionFile = findSessionFile(sessionsRoot, threadId);
             if (sessionFile == null) return "";
             String fallback = "";
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
@@ -1075,9 +1162,32 @@ final class CodexAppServerBridge {
             }
             return fallback;
         } catch (Exception error) {
-            Log.w(TAG, "Unable to resolve conversation project " + shortId(threadId), error);
+            Log.w(TAG, "Unable to resolve conversation project from " + sessionFile, error);
             return "";
         }
+    }
+
+    static String resolveConversationProject(String threadId) {
+        File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
+        return resolveConversationProject(findSessionFile(sessionsRoot, threadId));
+    }
+
+    static java.util.Map<String, String> resolveConversationProjects(java.util.Collection<String> requestedThreadIds) {
+        java.util.LinkedHashSet<String> threadIds = new java.util.LinkedHashSet<>();
+        if (requestedThreadIds != null) for (String threadId : requestedThreadIds) {
+            if (threadId != null && !threadId.isEmpty()) threadIds.add(threadId);
+        }
+        java.util.Map<String, String> projects = new java.util.HashMap<>();
+        if (threadIds.isEmpty()) return projects;
+
+        File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
+        java.util.Map<String, File> files = new java.util.HashMap<>();
+        findSessionFiles(sessionsRoot, threadIds, files);
+        for (java.util.Map.Entry<String, File> entry : files.entrySet()) {
+            String project = resolveConversationProject(entry.getValue());
+            if (!project.isEmpty()) projects.put(entry.getKey(), project);
+        }
+        return projects;
     }
 
     static String resolveConversationTitle(String threadId) {
@@ -1254,14 +1364,70 @@ final class CodexAppServerBridge {
                     reasoningStartedAtMs = 0L;
                 }
                 if (!value.isEmpty()) {
-                    JSONObject historyMessage = new JSONObject().put("role", role).put("content", value);
-                    if (referencedSkills.length() > 0) historyMessage.put("skills", referencedSkills);
-                    if (referencedAttachments.length() > 0) historyMessage.put("attachments", referencedAttachments);
-                    messages.put(historyMessage);
+                    if ("assistant".equals(role)) {
+                        appendHistoricalAssistantContent(messages, value);
+                    } else {
+                        JSONObject historyMessage = new JSONObject().put("role", role).put("content", value);
+                        if (referencedSkills.length() > 0) historyMessage.put("skills", referencedSkills);
+                        if (referencedAttachments.length() > 0) historyMessage.put("attachments", referencedAttachments);
+                        messages.put(historyMessage);
+                    }
                 }
             }
         }
         return messages;
+    }
+
+    private static final java.util.regex.Pattern PROPOSED_PLAN_BLOCK = java.util.regex.Pattern.compile(
+        "(?is)<propose(?:d)?_plan(?:\\s[^>]*)?>\\s*(.*?)\\s*</propose(?:d)?_plan\\s*>"
+    );
+    private static final java.util.regex.Pattern PROPOSED_PLAN_TAG = java.util.regex.Pattern.compile(
+        "(?is)</?propose(?:d)?_plan(?:\\s[^>]*)?>"
+    );
+
+    /** Split persisted plan-mode output into normal assistant text and plan Markdown. */
+    static JSONArray splitHistoricalAssistantContent(String value) throws Exception {
+        String source = value == null ? "" : value;
+        JSONArray parts = new JSONArray();
+        java.util.regex.Matcher matcher = PROPOSED_PLAN_BLOCK.matcher(source);
+        int cursor = 0;
+        boolean foundPlan = false;
+        while (matcher.find()) {
+            appendHistoricalContentPart(parts, "assistant", source.substring(cursor, matcher.start()));
+            appendHistoricalContentPart(parts, "plan", matcher.group(1));
+            foundPlan = true;
+            cursor = matcher.end();
+        }
+        if (foundPlan) {
+            appendHistoricalContentPart(parts, "assistant", source.substring(cursor));
+        } else {
+            // Malformed/legacy blocks should still render as Markdown rather than being
+            // swallowed as an unknown HTML element by Markwon.
+            appendHistoricalContentPart(parts, "assistant", PROPOSED_PLAN_TAG.matcher(source).replaceAll(""));
+        }
+        return parts;
+    }
+
+    private static void appendHistoricalContentPart(JSONArray parts, String role, String value) throws Exception {
+        String text = value == null ? "" : value.trim();
+        if (!text.isEmpty()) parts.put(new JSONObject().put("role", role).put("content", text));
+    }
+
+    /** Convert pure parsed parts to the transport format consumed by NativeChatState. */
+    static void appendHistoricalAssistantContent(JSONArray messages, String value) throws Exception {
+        JSONArray parts = splitHistoricalAssistantContent(value);
+        for (int i = 0; i < parts.length(); i++) {
+            JSONObject part = parts.getJSONObject(i);
+            String content = part.getString("content");
+            if ("plan".equals(part.getString("role"))) {
+                // The surrounding messages array is already JSON encoded; a second Base64
+                // layer only creates full-plan allocations on every native stream update.
+                messages.put(new JSONObject().put("role", "activity")
+                    .put("content", "PROPOSED_PLAN|" + content));
+            } else {
+                messages.put(new JSONObject().put("role", "assistant").put("content", content));
+            }
+        }
     }
 
 
@@ -1394,16 +1560,51 @@ final class CodexAppServerBridge {
         JSONObject params = message.optJSONObject("params");
         String key = turnKey(params);
         if (key == null) return false;
+        if (!syntheticCompletedTurns.remove(key)) return false;
         pendingFinalTurns.remove(key);
         turnStartedAtMs.remove(key);
-        return syntheticCompletedTurns.remove(key);
+        uiCompletedTurns.remove(key);
+        JSONObject turn = params.optJSONObject("turn");
+        String completedTurn = turn == null ? params.optString("turnId", "") : turn.optString("id", "");
+        String completedThread = params.optString("threadId", "");
+        if (completedThread.equals(threadId) && completedTurn.equals(activeTurnId)) activeTurnId = null;
+        return true;
+    }
+
+    static boolean isAgentMessageItem(JSONObject params) {
+        JSONObject item = params == null ? null : params.optJSONObject("item");
+        return item != null && "agentMessage".equals(item.optString("type"));
     }
 
     static boolean isFinalAgentMessage(JSONObject params) {
+        if (!isAgentMessageItem(params)) return false;
+        return "final_answer".equals(params.optJSONObject("item").optString("phase"));
+    }
+
+    static boolean isIdleThreadStatus(JSONObject params) {
         if (params == null) return false;
-        JSONObject item = params.optJSONObject("item");
-        return item != null && "agentMessage".equals(item.optString("type"))
-            && "final_answer".equals(item.optString("phase"));
+        JSONObject status = params.optJSONObject("status");
+        return status != null && "idle".equals(status.optString("type"));
+    }
+
+    private void completeVisibleTurnFromIdle(JSONObject params) {
+        if (!isPrimaryEvent(params)) return;
+        String statusThread = params.optString("threadId", "");
+        String turn = activeTurnId;
+        if (turn == null || statusThread.isEmpty() || !statusThread.equals(threadId)) return;
+        String key = turnKey(statusThread, turn);
+        // Ignore initial/resume idle notifications. Only a remembered running turn may
+        // close the native loading state.
+        if (!turnStartedAtMs.containsKey(key) || !uiCompletedTurns.add(key)) return;
+        pendingFinalTurns.remove(key);
+        turnStartedAtMs.remove(key);
+        activeTurnId = null;
+        Log.i(TAG, "Closing native turn from thread idle status turn=" + shortId(turn));
+        emit("onTurnComplete", "");
+        // Keep drawer/task state consistent even when the provider never emits the trailing
+        // turn/completed. A real completion may still correct this to failed milliseconds later.
+        CodexTaskStore.markCompleted(activity, statusThread, false);
+        notifyTaskCompleted();
     }
 
     static boolean shouldSynthesizeMissingTurnCompletion(boolean pending, boolean hasActiveRequests,
@@ -1439,6 +1640,8 @@ final class CodexAppServerBridge {
                         continue;
                     }
                     if (!pendingFinalTurns.remove(key)) return;
+                    turnStartedAtMs.remove(key);
+                    if (thread.equals(threadId) && turnId.equals(activeTurnId)) activeTurnId = null;
 
                     long now = System.currentTimeMillis();
                     long started = turnStartedAtMs.getOrDefault(key, now - 1000L);
@@ -1479,6 +1682,10 @@ final class CodexAppServerBridge {
         if (key == null) return;
         pendingFinalTurns.remove(key);
         turnStartedAtMs.remove(key);
+        JSONObject turn = params == null ? null : params.optJSONObject("turn");
+        String completedTurn = turn == null ? params.optString("turnId", "") : turn.optString("id", "");
+        String completedThread = params == null ? "" : params.optString("threadId", "");
+        if (completedThread.equals(threadId) && completedTurn.equals(activeTurnId)) activeTurnId = null;
     }
 
     private static String turnKey(JSONObject params) {
@@ -1585,10 +1792,27 @@ final class CodexAppServerBridge {
         }
     }
 
+    private static boolean isHighFrequencyNotification(String method) {
+        return "item/agentMessage/delta".equals(method)
+            || "item/plan/delta".equals(method)
+            || "item/reasoning/summaryTextDelta".equals(method)
+            || "item/reasoning/textDelta".equals(method)
+            || "item/commandExecution/outputDelta".equals(method);
+    }
+
+    private static boolean isHighFrequencyEmission(String function) {
+        return "onDelta".equals(function) || "onPlanDelta".equals(function)
+            || "onReasoningDelta".equals(function) || "onCommandDelta".equals(function);
+    }
+
     private void emit(String function, String value) {
-        android.util.Log.d(TAG, "EMIT function=" + function + " length=" + (value == null ? 0 : value.length()));
+        if (!isHighFrequencyEmission(function)) {
+            android.util.Log.d(TAG, "EMIT function=" + function + " length=" + (value == null ? 0 : value.length()));
+        }
         final String safeValue = value == null ? "" : value;
-        final String quoted = JSONObject.quote(safeValue);
+        // Native Compose has no WebView. Avoid JSON-quoting every tiny stream delta when
+        // there is no JavaScript consumer for it.
+        final String quoted = webView == null ? null : JSONObject.quote(safeValue);
         activity.runOnUiThread(() -> {
             if (eventListener != null) eventListener.onEvent(function, safeValue);
             if (webView != null) webView.evaluateJavascript(
@@ -1605,6 +1829,7 @@ final class CodexAppServerBridge {
         turnStartedAtMs.clear();
         pendingFinalTurns.clear();
         syntheticCompletedTurns.clear();
+        uiCompletedTurns.clear();
         streamedAgentItemIds.clear();
         try { if (writer != null) writer.close(); } catch (Exception ignored) {}
         writer = null;

@@ -1,0 +1,5 @@
+﻿Applications Graphics Acceleration Info:
+Uptime: 255575514 Realtime: 545447595
+
+** Graphics info for pid 31522 [com.ilyop.codex] **
+Failure while dumping the app: ProcessRecord{adf72a7 31522:com.ilyop.codex/u0a380}

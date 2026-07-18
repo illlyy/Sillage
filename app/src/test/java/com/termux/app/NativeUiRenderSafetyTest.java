@@ -31,6 +31,14 @@ public class NativeUiRenderSafetyTest {
     }
 
     @Test
+    public void recognizesGfmTablesWithoutMisclassifyingPipedProse() {
+        String table = "| Name | Status | Note |\n|---|:---:|---:|\n| A | done | first |";
+        assertTrue(NativeUiRenderSafety.containsMarkdownTable(table));
+        assertFalse(NativeUiRenderSafety.containsMarkdownTable("Use A | B in prose\nwithout a delimiter row"));
+        assertFalse(NativeUiRenderSafety.containsMarkdownTable("a | b\n--|--"));
+    }
+
+    @Test
     public void markdownChunksDoNotSplitSurrogatePairs() {
         String source = "\uD83D\uDE00".repeat(2200);
         List<String> chunks = NativeUiRenderSafety.splitMarkdown(source);
@@ -58,5 +66,11 @@ public class NativeUiRenderSafetyTest {
         String result = NativeUiRenderSafety.errorSummary(raw);
         assertTrue(result.length() < raw.length());
         assertTrue(result.contains("\u5df2\u6298\u53e0\u663e\u793a"));
+    }
+
+    @Test
+    public void terminalEventsNeverLeaveATinyDeltaScheduled() {
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.shouldDeferStreamFlush(4, false, 20L, false));
+        org.junit.Assert.assertFalse(NativeUiRenderSafety.shouldDeferStreamFlush(4, false, 20L, true));
     }
 }

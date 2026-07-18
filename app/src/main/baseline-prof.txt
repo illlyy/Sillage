@@ -1,0 +1,17 @@
+# Fcode native chat startup and streaming hot path.
+# Keep rules app-owned and narrow; AndroidX/Compose dependencies ship their own profiles.
+Lcom/termux/app/CodexChatActivity;
+HSPLcom/termux/app/CodexChatActivity;->onCreate(Landroid/os/Bundle;)V
+HPLcom/termux/app/CodexChatActivity;->onEvent(Ljava/lang/String;Ljava/lang/String;)V
+Lcom/termux/app/CodexChatScreenKt;
+Lcom/termux/app/CodexAppServerBridge;
+HPLcom/termux/app/CodexAppServerBridge;->sendMessage(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+Lcom/termux/app/NativeUiRenderSafety;
+HPLcom/termux/app/NativeUiRenderSafety;->splitMarkdown(Ljava/lang/String;)Ljava/util/List;
+HPLcom/termux/app/NativeUiRenderSafety;->splitPlainText(Ljava/lang/String;)Ljava/util/List;
+Lcom/termux/app/NativeCommandPresentation;
+HPLcom/termux/app/NativeCommandPresentation;->action(Lorg/json/JSONObject;)Ljava/lang/String;
+HPLcom/termux/app/NativeCommandPresentation;->rawCommand(Lorg/json/JSONObject;)Ljava/lang/String;
+Lcom/termux/app/NativePermissionMode;
+HPLcom/termux/app/NativePermissionMode;->applyTurnParams(Lorg/json/JSONObject;Ljava/lang/String;Ljava/lang/String;)Lorg/json/JSONObject;
+Lcom/termux/app/NativeApprovalProtocol;

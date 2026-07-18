@@ -1,0 +1,37 @@
+--------- beginning of main
+07-18 23:25:15.540 17050 17050 D IlyopCodexBridge: SEND method=turn/start id=8
+07-18 23:25:15.545 17050 17174 D IlyopCodexBridge: RECV id=8 result=true
+07-18 23:25:15.560 17050 17174 D IlyopCodexBridge: RECV method=thread/status/changed
+07-18 23:25:15.560 17050 17174 D IlyopCodexBridge: RECV method=turn/started
+07-18 23:25:15.564 17050 17174 D IlyopCodexBridge: RECV method=item/started
+07-18 23:25:15.564 17050 17174 D IlyopCodexBridge: EMIT function=onItem length=11
+07-18 23:25:15.564 17050 17174 D IlyopCodexBridge: RECV method=item/completed
+07-18 23:25:15.569 17050 20229 I IlyopCodexBridge: RUNTIME thread=019f75cc turn=019f75d4 source=vscode model=deepseek-v4-pro effort=ultra multiAgentVersion=v2 multiAgentMode=proactive
+07-18 23:25:17.194 17050 17174 D IlyopCodexBridge: RECV method=item/started
+07-18 23:25:17.195 17050 17174 D IlyopCodexBridge: EMIT function=onItem length=9
+07-18 23:25:17.195 17050 17174 D IlyopCodexBridge: RECV method=item/reasoning/summaryPartAdded
+07-18 23:25:18.076 17050 17174 D IlyopCodexBridge: RECV method=item/completed
+07-18 23:25:18.076 17050 17174 D IlyopCodexBridge: EMIT function=onReasoningComplete length=128
+07-18 23:25:19.100 17050 17174 D IlyopCodexBridge: RECV method=item/started
+07-18 23:25:19.101 17050 17174 D IlyopCodexBridge: EMIT function=onCommandStarted length=410
+07-18 23:25:24.046 17050 17174 D IlyopCodexBridge: RECV method=thread/tokenUsage/updated
+07-18 23:25:24.047 17050 17174 D IlyopCodexBridge: RECV method=account/rateLimits/updated
+07-18 23:25:24.112 17050 17174 D IlyopCodexBridge: RECV method=item/completed
+07-18 23:25:24.114 17050 17174 D IlyopCodexBridge: EMIT function=onCommandComplete length=765
+07-18 23:25:25.369 17050 17174 D IlyopCodexBridge: RECV method=item/started
+07-18 23:25:25.370 17050 17174 D IlyopCodexBridge: EMIT function=onItem length=9
+07-18 23:25:25.371 17050 17174 D IlyopCodexBridge: RECV method=item/reasoning/summaryPartAdded
+07-18 23:25:25.617 17050 17174 D IlyopCodexBridge: RECV method=item/completed
+07-18 23:25:25.618 17050 17174 D IlyopCodexBridge: EMIT function=onReasoningComplete length=89
+07-18 23:25:25.618 17050 17174 D IlyopCodexBridge: RECV method=item/started
+07-18 23:25:25.619 17050 17174 D IlyopCodexBridge: EMIT function=onItem length=12
+07-18 23:25:25.944 17050 17174 D IlyopCodexBridge: RECV method=item/completed
+07-18 23:25:25.944 17050 17174 I IlyopCodexBridge: agent-stream-complete chunks=12 chars=104 phase=null
+07-18 23:25:25.944 17050 17174 D IlyopCodexBridge: EMIT function=onAssistantItemComplete length=104
+07-18 23:25:26.006 17050 17174 D IlyopCodexBridge: RECV method=thread/tokenUsage/updated
+07-18 23:25:26.006 17050 17174 D IlyopCodexBridge: RECV method=account/rateLimits/updated
+07-18 23:25:26.036 17050 17174 D IlyopCodexBridge: RECV method=thread/status/changed
+07-18 23:25:26.036 17050 17174 I IlyopCodexBridge: Closing native turn from thread idle status turn=019f75d4
+07-18 23:25:26.036 17050 17174 D IlyopCodexBridge: EMIT function=onTurnComplete length=0
+07-18 23:25:26.039 17050 17174 D IlyopCodexBridge: RECV method=turn/completed
+07-18 23:25:26.062 17050 20301 I IlyopCodexBridge: RUNTIME thread=019f75cc turn=019f75d4 source=vscode model=deepseek-v4-pro effort=ultra multiAgentVersion=v2 multiAgentMode=proactive

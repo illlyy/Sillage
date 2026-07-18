@@ -601,16 +601,31 @@ public class CodexModelPipelineTest {
     public void onlyFinalAnswerAgentMessagesScheduleMissingTurnCompletion() throws Exception {
         JSONObject params = new JSONObject().put("item", new JSONObject()
             .put("type", "agentMessage").put("phase", "commentary"));
+        assertTrue(CodexAppServerBridge.isAgentMessageItem(params));
         assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
 
         params.getJSONObject("item").remove("phase");
+        assertTrue(CodexAppServerBridge.isAgentMessageItem(params));
         assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
 
         params.getJSONObject("item").put("phase", "final_answer");
         assertTrue(CodexAppServerBridge.isFinalAgentMessage(params));
 
         params.getJSONObject("item").put("type", "collabAgentToolCall");
+        assertFalse(CodexAppServerBridge.isAgentMessageItem(params));
         assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+    }
+
+    @Test
+    public void nestedThreadIdleStatusIsRecognizedAsAuthoritativeCompletion() throws Exception {
+        JSONObject params = new JSONObject().put("threadId", "thread-1")
+            .put("status", new JSONObject().put("type", "idle"));
+        assertTrue(CodexAppServerBridge.isIdleThreadStatus(params));
+
+        params.getJSONObject("status").put("type", "active");
+        assertFalse(CodexAppServerBridge.isIdleThreadStatus(params));
+        assertFalse(CodexAppServerBridge.isIdleThreadStatus(new JSONObject().put("status", "idle")));
+        assertFalse(CodexAppServerBridge.isIdleThreadStatus(null));
     }
 
     @Test

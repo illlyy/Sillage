@@ -1,0 +1,35 @@
+Metadata-Version: 2.4
+Name: perfetto
+Version: 0.57.2
+Summary: Python APIs and bindings for Perfetto (perfetto.dev)
+Home-page: https://perfetto.dev/
+Download-URL: https://github.com/google/perfetto/archive/refs/tags/v57.2.zip
+Author: Perfetto
+Author-email: perfetto-pypi@google.com
+License: apache-2.0
+Keywords: trace processor,tracing,perfetto
+Classifier: Development Status :: 3 - Alpha
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+License-File: LICENSE
+Requires-Dist: protobuf
+Provides-Extra: numpy
+Requires-Dist: numpy; extra == "numpy"
+Provides-Extra: pandas
+Requires-Dist: pandas; extra == "pandas"
+Provides-Extra: polars
+Requires-Dist: polars; extra == "polars"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: download-url
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: summary

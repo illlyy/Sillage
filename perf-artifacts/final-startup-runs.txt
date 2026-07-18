@@ -1,0 +1,27 @@
+﻿RUN 1
+Starting: Intent { cmp=com.ilyop.codex/com.termux.app.CodexChatActivity }
+Status: ok
+LaunchState: COLD
+Activity: com.ilyop.codex/com.termux.app.CodexChatActivity
+TotalTime: 2075
+WaitTime: 2077
+Complete
+SKIPS=I/Choreographer(25888): Skipped 106 frames!  The application may be doing too much work on its main thread.
+RUN 2
+Starting: Intent { cmp=com.ilyop.codex/com.termux.app.CodexChatActivity }
+Status: ok
+LaunchState: COLD
+Activity: com.ilyop.codex/com.termux.app.CodexChatActivity
+TotalTime: 2079
+WaitTime: 2081
+Complete
+SKIPS=I/Choreographer( 8595): Skipped 106 frames!  The application may be doing too much work on its main thread.
+RUN 3
+Starting: Intent { cmp=com.ilyop.codex/com.termux.app.CodexChatActivity }
+Status: ok
+LaunchState: COLD
+Activity: com.ilyop.codex/com.termux.app.CodexChatActivity
+TotalTime: 2314
+WaitTime: 2316
+Complete
+SKIPS=I/Choreographer(14951): Skipped 104 frames!  The application may be doing too much work on its main thread.

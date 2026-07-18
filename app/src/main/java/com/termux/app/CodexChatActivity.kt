@@ -38,6 +38,10 @@ internal enum class NativeTurnPhase(val active: Boolean) {
     IDLE(false), WAITING(true), REASONING(true), TOOL_RUNNING(true), ANSWERING(true), STOPPING(true), COMPLETED(false), FAILED(false)
 }
 
+internal const val NATIVE_PROPOSED_PLAN_PREFIX = "PROPOSED_PLAN|"
+internal fun encodeNativeProposedPlan(text: String): String = NATIVE_PROPOSED_PLAN_PREFIX + text
+internal fun decodeNativeProposedPlan(content: String): String = content.substringAfter('|')
+
 internal data class NativeAttachment(val name: String, val path: String, val image: Boolean)
 
 internal data class NativeSkill(val name: String, val description: String, val path: String)
@@ -85,15 +89,20 @@ internal class NativeChatState {
     var activeGoalObjective by mutableStateOf("")
     var activeGoalStatus by mutableStateOf("active")
     var pendingUserInputRequest by mutableStateOf("")
+    var pendingApprovalRequest by mutableStateOf("")
+    var permissionMode by mutableStateOf(NativePermissionMode.FULL_ACCESS)
     var planJson by mutableStateOf("[]")
     var planExplanation by mutableStateOf("")
     var planPanelAdded by mutableStateOf(false)
+    private var activeProposedPlanItemId = ""
     var revision by mutableIntStateOf(0)
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
     var reasoningComplete by mutableStateOf(false)
     var reasoningCompletedAt by mutableStateOf(0L)
     var commandText by mutableStateOf("")
+    var liveCommandJson by mutableStateOf("")
+    var currentThreadId by mutableStateOf("")
     var turnStartedAt by mutableStateOf(0L)
     var turnMessageStartIndex by mutableIntStateOf(0)
     var phaseStartedAt by mutableStateOf(0L)
@@ -105,14 +114,18 @@ internal class NativeChatState {
         planJson = "[]"
         planExplanation = ""
         planPanelAdded = false
+        activeProposedPlanItemId = ""
         activeGoalObjective = ""
         activeGoalStatus = "active"
+        pendingUserInputRequest = ""
+        pendingApprovalRequest = ""
         phase = NativeTurnPhase.IDLE
         processingLabel = ""
         reasoningText = ""
         reasoningComplete = false
         reasoningCompletedAt = 0L
         commandText = ""
+        liveCommandJson = ""
         toolDetails.clear()
         liveSubagents.clear()
         subagentHistories.clear()
@@ -135,6 +148,7 @@ internal class NativeChatState {
         reasoningComplete = false
         reasoningCompletedAt = 0L
         commandText = ""
+        liveCommandJson = ""
         toolDetails.clear()
         liveSubagents.clear()
         turnStartedAt = System.currentTimeMillis()
@@ -146,6 +160,14 @@ internal class NativeChatState {
     private fun processPayload(): String {
         val tools = JSONArray()
         toolDetails.forEach { raw -> tools.put(runCatching { JSONObject(raw) }.getOrElse { raw }) }
+        if (liveCommandJson.isNotBlank()) {
+            runCatching { JSONObject(liveCommandJson) }.getOrNull()?.let { item ->
+                item.put("type", "commandExecution")
+                item.put("status", item.optString("status", "inProgress"))
+                if (item.optString("aggregatedOutput").isBlank() && commandText.isNotBlank()) item.put("aggregatedOutput", commandText)
+                tools.put(item)
+            }
+        }
         liveSubagents.forEach { raw ->
             val item = runCatching { JSONObject(raw) }.getOrNull()
             if (item != null) tools.put(item)
@@ -163,10 +185,10 @@ internal class NativeChatState {
     }
 
     private fun sealCurrentPhase() {
-        if (reasoningText.isBlank() && commandText.isBlank() && toolDetails.isEmpty() && liveSubagents.isEmpty()) return
+        if (reasoningText.isBlank() && commandText.isBlank() && liveCommandJson.isBlank() && toolDetails.isEmpty() && liveSubagents.isEmpty()) return
         val process = "PROCESS2|" + Base64.encodeToString(processPayload().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         val insertAt = (phaseMessageStartIndex until messages.size)
-            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT }
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT || messages[it].content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) }
             ?: messages.size
         messages.add(insertAt, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process, revealStartedAt = System.currentTimeMillis()))
     }
@@ -180,6 +202,7 @@ internal class NativeChatState {
         reasoningComplete = false
         reasoningCompletedAt = 0L
         commandText = ""
+        liveCommandJson = ""
         toolDetails.clear()
         liveSubagents.clear()
         processingLabel = "\u6b63\u5728\u601d\u8003"
@@ -193,6 +216,46 @@ internal class NativeChatState {
         reasoningComplete = true
         reasoningCompletedAt = System.currentTimeMillis()
         revision++
+    }
+
+    private fun proposedPlanMessageId(itemId: String): String = "proposed-plan:${itemId.ifBlank { "current" }}"
+
+    private fun upsertProposedPlan(itemId: String, text: String, append: Boolean, streaming: Boolean) {
+        val resolvedItemId = itemId.ifBlank { activeProposedPlanItemId.ifBlank { "current" } }
+        activeProposedPlanItemId = resolvedItemId
+        val messageId = proposedPlanMessageId(resolvedItemId)
+        val existingIndex = messages.indexOfFirst { it.id == messageId && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) }
+        val previous = if (existingIndex >= 0) decodeNativeProposedPlan(messages[existingIndex].content) else ""
+        val next = if (append) previous + text else text.ifEmpty { previous }
+        val message = NativeChatMessage(
+            id = messageId, role = NativeChatRole.ACTIVITY, content = encodeNativeProposedPlan(next), streaming = streaming,
+            revealStartedAt = if (existingIndex >= 0) messages[existingIndex].revealStartedAt else System.currentTimeMillis(),
+        )
+        if (existingIndex >= 0) messages[existingIndex] = message else messages.add(message)
+        phase = if (streaming) NativeTurnPhase.ANSWERING else phase
+        revision++
+    }
+
+    fun startProposedPlan(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val item = payload.optJSONObject("item") ?: payload
+        upsertProposedPlan(item.optString("id", payload.optString("itemId")), item.optString("text"), false, true)
+    }
+
+    fun appendProposedPlanDelta(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        upsertProposedPlan(payload.optString("itemId", payload.optString("item_id")), payload.optString("delta"), true, true)
+    }
+
+    fun completeProposedPlan(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val item = payload.optJSONObject("item") ?: payload
+        upsertProposedPlan(item.optString("id", payload.optString("itemId")), item.optString("text"), false, false)
+    }
+
+    private fun finishProposedPlanIfStreaming() {
+        val index = messages.indexOfLast { it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) && it.streaming }
+        if (index >= 0) messages[index] = messages[index].copy(streaming = false)
     }
 
     fun finishPlanPanel(stepCount: Int = 0) {
@@ -213,7 +276,7 @@ internal class NativeChatState {
     }
 
     private fun cleanProtocolMarkup(text: String): String = text
-        .replace(Regex("""</?propose_plan\s*>""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""</?propose(?:d)?_plan(?:\s[^>]*)?>""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("""</?plan\s*>""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("""</?final\s*>""", RegexOption.IGNORE_CASE), "")
 
@@ -235,6 +298,32 @@ internal class NativeChatState {
                     role = NativeChatRole.ASSISTANT,
                     content = cleanedDelta,
                     streaming = true,
+                    revealStartedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+        revision++
+    }
+
+    fun completeAssistantItem(text: String) {
+        val cleanedText = cleanProtocolMarkup(text)
+        if (cleanedText.isBlank()) return
+        val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT && messages[it].streaming }
+        if (existingIndex != null) {
+            val existing = messages[existingIndex]
+            val merged = when {
+                cleanedText.startsWith(existing.content) -> cleanedText
+                existing.content.startsWith(cleanedText) -> existing.content
+                else -> cleanedText
+            }
+            messages[existingIndex] = existing.copy(content = merged, streaming = false, finalOnlyReveal = false)
+        } else {
+            messages.add(
+                NativeChatMessage(
+                    role = NativeChatRole.ASSISTANT,
+                    content = cleanedText,
+                    streaming = false,
                     revealStartedAt = System.currentTimeMillis(),
                 ),
             )
@@ -279,8 +368,13 @@ internal class NativeChatState {
 
     fun replaceHistory(value: String) {
         val parsed = ArrayList<NativeChatMessage>()
+        val cachedPlanJson = planJson
+        val cachedPlanExplanation = planExplanation
+        var planPanelIndex = -1
         planJson = "[]"
         planExplanation = ""
+        planPanelAdded = false
+        activeProposedPlanItemId = ""
         val items = JSONArray(value)
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
@@ -314,14 +408,62 @@ internal class NativeChatState {
                     val planPayload = JSONObject(decoded)
                     planJson = planPayload.optJSONArray("plan")?.toString() ?: "[]"
                     planExplanation = planPayload.optString("explanation")
+                    planPanelIndex = parsed.size
                 }
                 continue
             }
             if (content.isNotEmpty()) parsed.add(NativeChatMessage(role = role, content = content, skills = messageSkills, attachments = messageAttachments))
         }
+        if (planJson == "[]" && cachedPlanJson != "[]") {
+            planJson = cachedPlanJson
+            planExplanation = cachedPlanExplanation
+            planPanelIndex = parsed.size
+        }
+        if (planJson != "[]") {
+            val count = runCatching { JSONArray(planJson).length() }.getOrDefault(0)
+            parsed.add(planPanelIndex.coerceIn(0, parsed.size), NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "PLAN_PANEL|complete|$count"))
+            planPanelAdded = true
+        }
         // One snapshot mutation avoids recomposing the chat once for every historical item.
         messages.clear()
         messages.addAll(parsed)
+        revision++
+    }
+
+    fun startCommand(raw: String) {
+        liveCommandJson = raw
+        commandText = ""
+        phase = NativeTurnPhase.TOOL_RUNNING
+        processingLabel = "\u6b63\u5728\u8fd0\u884c\u547d\u4ee4"
+        revision++
+    }
+
+    fun appendCommandOutput(delta: String) {
+        if (delta.isEmpty()) return
+        commandText += delta
+        revision++
+    }
+
+    fun completeCommand(raw: String) {
+        val item = runCatching { JSONObject(raw) }.getOrNull() ?: JSONObject()
+        val started = runCatching { JSONObject(liveCommandJson) }.getOrNull()
+        if (started != null) {
+            started.keys().forEach { key ->
+                val completedValue = item.opt(key)
+                val missing = completedValue == null || completedValue == JSONObject.NULL ||
+                    (completedValue is String && completedValue.isBlank())
+                if (missing) item.put(key, started.opt(key))
+            }
+        }
+        if (item.optString("aggregatedOutput").isBlank() && commandText.isNotBlank()) {
+            item.put("aggregatedOutput", commandText)
+        }
+        item.put("type", "commandExecution")
+        if (item.optString("status").isBlank()) item.put("status", "completed")
+        toolDetails.add(item.toString())
+        liveCommandJson = ""
+        commandText = ""
+        processingLabel = "\u5df2\u6267\u884c\u547d\u4ee4"
         revision++
     }
 
@@ -383,15 +525,19 @@ internal class NativeChatState {
 
     fun completeTurn() {
         finishReasoning()
+        finishProposedPlanIfStreaming()
         sealCurrentPhase()
         reasoningText = ""
         commandText = ""
+        liveCommandJson = ""
         toolDetails.clear()
         liveSubagents.clear()
         phaseMessageStartIndex = messages.size
-        val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT }
-        if (lastAssistant >= 0) {
-            messages[lastAssistant] = messages[lastAssistant].copy(streaming = false)
+        // A turn can contain commentary, a proposed plan and a final answer. Close every
+        // live item created by this turn; only sealing the last assistant leaves plan/commentary
+        // animations running forever when a provider omits an item phase.
+        for (index in turnMessageStartIndex.coerceAtLeast(0) until messages.size) {
+            if (messages[index].streaming) messages[index] = messages[index].copy(streaming = false)
         }
         phase = NativeTurnPhase.COMPLETED
         connectionLabel = "已连接"
@@ -434,8 +580,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private val streamHandler = Handler(Looper.getMainLooper())
     private val pendingReasoning = StringBuilder()
     private val pendingAnswer = StringBuilder()
+    private val pendingPlan = StringBuilder()
+    private val pendingCommand = StringBuilder()
+    private var pendingPlanItemId = ""
     private var reasoningFlushScheduled = false
     private var answerFlushScheduled = false
+    private var planFlushScheduled = false
+    private var commandFlushScheduled = false
     private var reasoningPendingSince = 0L
     private var answerPendingSince = 0L
     private val flushReasoningRunnable = Runnable {
@@ -445,6 +596,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private val flushAnswerRunnable = Runnable {
         answerFlushScheduled = false
         flushAnswerDeltas()
+    }
+    private val flushPlanRunnable = Runnable {
+        planFlushScheduled = false
+        flushPlanDeltas()
+    }
+    private val flushCommandRunnable = Runnable {
+        commandFlushScheduled = false
+        flushCommandDeltas()
     }
     private var lastFrameNanos = 0L
     private var frameWindowStartedAt = 0L
@@ -510,6 +669,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
         chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
+        chatState.permissionMode = NativePermissionMode.normalize(nativePrefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
         nativeThemeMode = nativePrefs.getString("native_theme_mode_v1", "system").orEmpty().takeIf { it in setOf("system", "light", "dark") } ?: "system"
         nativeLanguage = nativePrefs.getString("native_language_v1", "system").orEmpty().let { if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh" }
         streamAnimationsEnabled = nativePrefs.getBoolean("native_stream_animations_v1", true)
@@ -525,7 +685,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 NativeChatScreen(
                     state = chatState,
                     onSend = ::sendMessage,
-                    onInputChange = ::updateDraft,
+                    // TextFieldState owns live IME edits. Persist drafts without writing
+                    // Compose screen state on every key press.
+                    onInputChange = ::persistDraft,
                     onRetry = ::retryMessage,
                     onEditMessage = ::editMessage,
                     onStop = ::stopCurrentTurn,
@@ -535,11 +697,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onModelSelected = ::selectNativeModel,
                     onEffortSelected = ::selectNativeEffort,
                     onModeChange = ::setChatMode,
+                    onPermissionModeChange = ::setPermissionMode,
                     onSetGoal = ::setGoal,
                     onClearGoal = ::clearGoal,
                     onToggleGoalPause = ::toggleGoalPause,
                     onCompact = { bridge?.compactThread() },
                     onAnswerUserInput = ::answerUserInput,
+                    onAnswerApproval = ::answerApproval,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { chatState.attachments.remove(it) },
@@ -557,8 +721,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
 
         getSharedPreferences("codex_mobile", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(taskPreferenceListener)
-        refreshConversations()
-        startBackend()
+        startRuntimeAfterFirstDraw()
+    }
+
+    private fun startRuntimeAfterFirstDraw() {
+        val decor = window.decorView
+        var scheduled = false
+        val listener = object : android.view.ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                if (scheduled) return
+                scheduled = true
+                decor.post {
+                    if (decor.viewTreeObserver.isAlive) decor.viewTreeObserver.removeOnDrawListener(this)
+                    if (isFinishing || isDestroyed) return@post
+                    refreshConversations()
+                    startBackend()
+                }
+            }
+        }
+        decor.viewTreeObserver.addOnDrawListener(listener)
     }
 
     private fun startBackend() {
@@ -751,6 +932,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.reasoningComplete = false
         chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
+        chatState.liveCommandJson = ""
         chatState.toolDetails.clear()
         chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
@@ -773,6 +955,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.reasoningComplete = false
         chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
+        chatState.liveCommandJson = ""
         chatState.toolDetails.clear()
         chatState.liveSubagents.clear()
         chatState.turnStartedAt = System.currentTimeMillis()
@@ -782,9 +965,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", chatState.selectedMode)
     }
 
+    private fun persistDraft(value: String) {
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString("native_chat_draft_v1", value).apply()
+    }
+
     private fun updateDraft(value: String) {
         chatState.input = value
-        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString("native_chat_draft_v1", value).apply()
+        persistDraft(value)
     }
 
     private fun sendMessage(text: String) {
@@ -820,6 +1007,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun goalPreferenceKey(threadId: String): String = "native_thread_goal_v1_$threadId"
+    private fun setPermissionMode(mode: String) {
+        val normalized = NativePermissionMode.normalize(mode)
+        chatState.permissionMode = normalized
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(NativePermissionMode.PREFERENCE_KEY, normalized)
+            .apply()
+    }
+
     private fun modePreferenceKey(threadId: String): String = "native_thread_mode_v1_$threadId"
     private fun goalStatusPreferenceKey(threadId: String): String = "native_thread_goal_status_v1_$threadId"
     private fun planPreferenceKey(threadId: String): String = "native_thread_plan_v1_$threadId"
@@ -849,6 +1044,22 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val answers = JSONObject().put(questionId, JSONObject().put("answers", JSONArray().put(answer)))
         bridge?.respondUserInput(requestId, answers.toString())
         chatState.pendingUserInputRequest = ""
+    }
+
+    private fun answerApproval(rawRequest: String, decision: String) {
+        if (rawRequest.isBlank()) return
+        bridge?.respondApprovalRequest(rawRequest, decision)
+        if (chatState.pendingApprovalRequest == rawRequest) chatState.pendingApprovalRequest = ""
+        if (chatState.phase == NativeTurnPhase.WAITING) {
+            chatState.phase = NativeTurnPhase.TOOL_RUNNING
+            chatState.processingLabel = nativeText(nativeLanguage, "\u6b63\u5728\u7ee7\u7eed\u6267\u884c", "Continuing")
+        }
+    }
+
+    private fun cancelPendingApproval() {
+        val raw = chatState.pendingApprovalRequest
+        if (raw.isNotBlank()) bridge?.respondApprovalRequest(raw, "cancel")
+        chatState.pendingApprovalRequest = ""
     }
 
     private fun toggleGoalPause() {
@@ -912,6 +1123,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         applyConversationSnapshot(generation, immediate)
 
         Thread {
+            val missingProjectIds = snapshot.asSequence().map { it.threadId }.filter { !conversationProjectCache.containsKey(it) }.toList()
+            if (missingProjectIds.isNotEmpty()) {
+                CodexAppServerBridge.resolveConversationProjects(missingProjectIds).forEach { (threadId, project) ->
+                    if (project.isNotBlank()) conversationProjectCache[threadId] = project
+                }
+            }
             val enriched = snapshot.mapNotNull { task ->
                 var title = conversationTitleCache[task.threadId] ?: task.title
                 val fallbackTitle = title.startsWith("Codex 任务")
@@ -922,9 +1139,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                         conversationTitleCache[task.threadId] = resolvedTitle
                     }
                 }
-                val project = conversationProjectCache[task.threadId] ?: CodexAppServerBridge
-                    .resolveConversationProject(task.threadId)
-                    .also { resolved -> if (resolved.isNotBlank()) conversationProjectCache[task.threadId] = resolved }
+                val project = conversationProjectCache[task.threadId].orEmpty()
                 if (fallbackTitle && title.startsWith("Codex 任务")) null
                 else NativeConversation(task.threadId, title, task.state, project, task.threadId in favorites)
             }.sortedByDescending { it.state == CodexTaskStore.RUNNING }
@@ -1023,18 +1238,29 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun discardPendingStreamEvents(reason: String) {
         streamHandler.removeCallbacks(flushReasoningRunnable)
         streamHandler.removeCallbacks(flushAnswerRunnable)
+        streamHandler.removeCallbacks(flushPlanRunnable)
+        streamHandler.removeCallbacks(flushCommandRunnable)
         reasoningFlushScheduled = false
         answerFlushScheduled = false
+        planFlushScheduled = false
+        commandFlushScheduled = false
         val droppedReasoning = pendingReasoning.length
         val droppedAnswer = pendingAnswer.length
+        val droppedPlan = pendingPlan.length
+        val droppedCommand = pendingCommand.length
         pendingReasoning.setLength(0)
         pendingAnswer.setLength(0)
+        pendingPlan.setLength(0)
+        pendingCommand.setLength(0)
+        pendingPlanItemId = ""
         stopFrameDiagnostics()
         NativeChatDiagnostics.record(this, "stream_route_reset", JSONObject()
-            .put("reason", reason).put("droppedReasoning", droppedReasoning).put("droppedAnswer", droppedAnswer))
+            .put("reason", reason).put("droppedReasoning", droppedReasoning).put("droppedAnswer", droppedAnswer)
+            .put("droppedPlan", droppedPlan).put("droppedCommand", droppedCommand))
     }
 
     private fun resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
+        cancelPendingApproval()
         discardPendingStreamEvents("resume")
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
@@ -1042,6 +1268,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         currentThreadId = threadId
         val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
         chatState.resetConversation()
+        chatState.currentThreadId = threadId
         chatState.historyLoading = true
         chatState.conversationTitle = selectedConversation?.title ?: "对话"
         if (selectedConversation?.state == CodexTaskStore.RUNNING) {
@@ -1058,12 +1285,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun newConversation() {
+        cancelPendingApproval()
         discardPendingStreamEvents("new")
         chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
         pendingConversationAnimationKey = null
         currentThreadId = null
+        chatState.currentThreadId = ""
         chatState.conversationAnimationKey = "new-${UUID.randomUUID()}"
         chatState.resetConversation()
         chatState.conversationTitle = "新对话"
@@ -1086,13 +1315,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         finish()
     }
 
-    private fun flushReasoningDeltas() {
+    private fun flushReasoningDeltas(force: Boolean = false) {
         streamHandler.removeCallbacks(flushReasoningRunnable)
         reasoningFlushScheduled = false
         if (pendingReasoning.isEmpty()) { reasoningPendingSince = 0L; return }
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingReasoning.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
-        if (pendingReasoning.length < 12 && !boundary && now - reasoningPendingSince < 110L) {
+        if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingReasoning.length, boundary, now - reasoningPendingSince, force)) {
             reasoningFlushScheduled = true
             streamHandler.postDelayed(flushReasoningRunnable, 32L)
             return
@@ -1106,17 +1335,23 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .put("messageIndex", chatState.messages.size))
         chatState.reasoningText += value
         chatState.revision++
-        NativeChatDiagnostics.record(this, "reasoning_flush", JSONObject()
-            .put("chars", value.length).put("total", chatState.reasoningText.length))
     }
 
-    private fun flushAnswerDeltas() {
+    private fun answerFlushDelayMs(): Long {
+        val liveChars = chatState.messages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }
+            ?.content?.length ?: 0
+        // Kelivo uses the same 8k/120ms policy. Long answers otherwise repeatedly copy,
+        // split and remeasure the whole growing String fast enough to starve input frames.
+        return if (liveChars + pendingAnswer.length >= 8_000) 120L else 56L
+    }
+
+    private fun flushAnswerDeltas(force: Boolean = false) {
         streamHandler.removeCallbacks(flushAnswerRunnable)
         answerFlushScheduled = false
         if (pendingAnswer.isEmpty()) { answerPendingSince = 0L; return }
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingAnswer.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
-        if (pendingAnswer.length < 12 && !boundary && now - answerPendingSince < 110L) {
+        if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingAnswer.length, boundary, now - answerPendingSince, force)) {
             answerFlushScheduled = true
             streamHandler.postDelayed(flushAnswerRunnable, 32L)
             return
@@ -1126,8 +1361,27 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         answerPendingSince = 0L
         chatState.finishReasoning()
         chatState.appendAssistant(value)
-        NativeChatDiagnostics.record(this, "answer_flush", JSONObject()
-            .put("chars", value.length).put("messages", chatState.messages.size))
+    }
+
+    private fun commandFlushDelayMs(): Long =
+        if (chatState.commandText.length + pendingCommand.length >= 8_000) 120L else 72L
+
+    private fun flushCommandDeltas() {
+        streamHandler.removeCallbacks(flushCommandRunnable)
+        commandFlushScheduled = false
+        if (pendingCommand.isEmpty()) return
+        val delta = pendingCommand.toString()
+        pendingCommand.setLength(0)
+        chatState.appendCommandOutput(delta)
+    }
+
+    private fun flushPlanDeltas() {
+        streamHandler.removeCallbacks(flushPlanRunnable)
+        planFlushScheduled = false
+        if (pendingPlan.isEmpty()) return
+        val delta = pendingPlan.toString()
+        pendingPlan.setLength(0)
+        chatState.appendProposedPlanDelta(JSONObject().put("itemId", pendingPlanItemId).put("delta", delta).toString())
     }
 
     override fun onEvent(function: String, value: String) {
@@ -1137,6 +1391,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 // goal/mode of the conversation the user has already selected.
                 if (currentThreadId != null && currentThreadId != value) return
                 currentThreadId = value
+                chatState.currentThreadId = value
                 restoreGoalForThread(value)
                 chatState.ready = true
                 bridge?.loadSkills()
@@ -1157,22 +1412,32 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 pendingConversationAnimationKey = null
             }
             "onDelta" -> {
-                flushReasoningDeltas()
+                flushReasoningDeltas(force = true)
+                flushCommandDeltas()
                 if (pendingAnswer.isEmpty()) answerPendingSince = android.os.SystemClock.uptimeMillis()
                 pendingAnswer.append(value)
                 if (!answerFlushScheduled) {
                     answerFlushScheduled = true
-                    streamHandler.postDelayed(flushAnswerRunnable, 56L)
+                    streamHandler.postDelayed(flushAnswerRunnable, answerFlushDelayMs())
                 }
             }
+            "onAssistantItemComplete" -> {
+                flushReasoningDeltas(force = true)
+                flushAnswerDeltas(force = true)
+                flushCommandDeltas()
+                chatState.finishReasoning()
+                chatState.completeAssistantItem(value)
+            }
             "onFinalAnswer" -> {
-                flushReasoningDeltas()
-                flushAnswerDeltas()
+                flushReasoningDeltas(force = true)
+                flushAnswerDeltas(force = true)
+                flushCommandDeltas()
                 chatState.finishReasoning()
                 chatState.appendAssistantFinal(value)
             }
             "onReasoningDelta" -> {
-                flushAnswerDeltas()
+                flushAnswerDeltas(force = true)
+                flushCommandDeltas()
                 if (pendingReasoning.isEmpty()) reasoningPendingSince = android.os.SystemClock.uptimeMillis()
                 pendingReasoning.append(value)
                 if (!reasoningFlushScheduled) {
@@ -1181,15 +1446,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }
             }
             "onReasoningComplete" -> {
-                flushReasoningDeltas()
+                flushReasoningDeltas(force = true)
+                flushCommandDeltas()
                 if (value.length > chatState.reasoningText.length) chatState.reasoningText = value
                 chatState.revision++
             }
-            "onCommandDelta" -> { chatState.commandText += value; chatState.revision++ }
+            "onCommandStarted" -> {
+                flushCommandDeltas()
+                chatState.startCommand(value)
+            }
+            "onCommandDelta" -> {
+                pendingCommand.append(value)
+                if (!commandFlushScheduled) {
+                    commandFlushScheduled = true
+                    streamHandler.postDelayed(flushCommandRunnable, commandFlushDelayMs())
+                }
+            }
             "onCommandComplete" -> {
-                chatState.toolDetails.add(value)
-                chatState.commandText = ""
-                chatState.revision++
+                flushCommandDeltas()
+                chatState.completeCommand(value)
             }
             "onToolComplete" -> { chatState.toolDetails.add(value); chatState.revision++ }
             "onSkills" -> {
@@ -1204,6 +1479,22 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }.distinctBy { it.path }.sortedBy { it.name.lowercase() }
                 chatState.skills.clear()
                 chatState.skills.addAll(parsed)
+            }
+            "onPlanStarted" -> {
+                flushAnswerDeltas(force = true); flushPlanDeltas(); chatState.finishReasoning(); chatState.startProposedPlan(value)
+            }
+            "onPlanDelta" -> {
+                flushAnswerDeltas(force = true); chatState.finishReasoning()
+                val payload = runCatching { JSONObject(value) }.getOrNull()
+                val itemId = payload?.optString("itemId", payload.optString("item_id")).orEmpty()
+                val delta = payload?.optString("delta").orEmpty()
+                if (itemId.isNotBlank() && pendingPlanItemId.isNotBlank() && itemId != pendingPlanItemId) flushPlanDeltas()
+                if (itemId.isNotBlank()) pendingPlanItemId = itemId
+                if (delta.isNotEmpty()) pendingPlan.append(delta)
+                if (!planFlushScheduled && pendingPlan.isNotEmpty()) { planFlushScheduled = true; streamHandler.postDelayed(flushPlanRunnable, 56L) }
+            }
+            "onPlanComplete" -> {
+                flushAnswerDeltas(force = true); flushPlanDeltas(); chatState.finishReasoning(); chatState.completeProposedPlan(value); pendingPlanItemId = ""
             }
             "onPlanUpdated" -> {
                 // App-server versions have emitted the plan at params.plan, turn.plan,
@@ -1247,6 +1538,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.phase = NativeTurnPhase.WAITING
                 chatState.processingLabel = "\u7b49\u5f85\u4f60\u7684\u56de\u7b54"
             }
+            "onApprovalRequest" -> {
+                chatState.pendingApprovalRequest = value
+                chatState.phase = NativeTurnPhase.WAITING
+                chatState.processingLabel = nativeText(nativeLanguage, "\u7b49\u5f85\u6743\u9650\u786e\u8ba4", "Waiting for approval")
+            }
             "onSubagentEvent" -> {
                 val thread = chatState.updateSubagent(value)
                 if (thread.isNotBlank()) loadSubagentHistory(thread)
@@ -1254,14 +1550,23 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             "onSubagentHistory" -> handleSubagentHistory(value)
             "onItem" -> chatState.addActivity(value)
             "onTurnComplete" -> {
-                flushReasoningDeltas()
-                flushAnswerDeltas()
+                flushReasoningDeltas(force = true)
+                flushAnswerDeltas(force = true)
+                flushPlanDeltas()
+                flushCommandDeltas()
+                chatState.pendingApprovalRequest = ""
                 chatState.completeTurn()
+                pendingPlanItemId = ""
                 if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
                 stopFrameDiagnostics()
                 refreshConversations()
             }
             "onNativeError" -> {
+                flushReasoningDeltas(force = true)
+                flushAnswerDeltas(force = true)
+                flushPlanDeltas()
+                flushCommandDeltas()
+                chatState.pendingApprovalRequest = ""
                 NativeChatDiagnostics.record(this, "native_error", JSONObject()
                     .put("thread", currentThreadId.orEmpty().take(8))
                     .put("model", chatState.selectedModel)
@@ -1286,6 +1591,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         streamAnimationsEnabled = prefs.getBoolean("native_stream_animations_v1", true)
         showReasoning = prefs.getBoolean("native_show_reasoning_v1", true)
         autoFollowOutput = prefs.getBoolean("native_auto_follow_v1", true)
+        chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
         if (chatState.busy) startFrameDiagnostics()
     }
 

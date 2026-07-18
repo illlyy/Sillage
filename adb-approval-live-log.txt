@@ -1,0 +1,34 @@
+--------- beginning of main
+07-19 00:25:14.853 20975 20975 I IlyopCodexBridge: TURN_PERMISSIONS mode=workspace approval=on-request sandbox=workspace-write
+07-19 00:25:14.858 20975 20975 D IlyopCodexBridge: SEND method=turn/start id=6
+07-19 00:25:14.865 20975 29263 D IlyopCodexBridge: RECV id=6 result=true
+07-19 00:25:14.871 20975 29263 D IlyopCodexBridge: RECV method=thread/settings/updated
+07-19 00:25:14.875 20975 29263 D IlyopCodexBridge: RECV method=thread/status/changed
+07-19 00:25:14.875 20975 29263 D IlyopCodexBridge: RECV method=turn/started
+07-19 00:25:14.884 20975 29752 I IlyopCodexBridge: RUNTIME thread=019f760a turn=019f760b source=vscode model=deepseek-v4-pro effort=ultra multiAgentVersion=v2 multiAgentMode=proactive
+07-19 00:25:14.886 20975 29263 D IlyopCodexBridge: RECV method=item/started
+07-19 00:25:14.886 20975 29263 D IlyopCodexBridge: EMIT function=onItem length=11
+07-19 00:25:14.886 20975 29263 D IlyopCodexBridge: RECV method=item/completed
+07-19 00:25:17.153 20975 29263 D IlyopCodexBridge: RECV method=item/started
+07-19 00:25:17.153 20975 29263 D IlyopCodexBridge: EMIT function=onItem length=9
+07-19 00:25:17.154 20975 29263 D IlyopCodexBridge: RECV method=item/reasoning/summaryPartAdded
+07-19 00:25:17.884 20975 29263 D IlyopCodexBridge: RECV method=item/completed
+07-19 00:25:17.884 20975 29263 D IlyopCodexBridge: EMIT function=onReasoningComplete length=74
+07-19 00:25:18.615 20975 29263 D IlyopCodexBridge: RECV method=thread/tokenUsage/updated
+07-19 00:25:18.616 20975 29263 D IlyopCodexBridge: RECV method=account/rateLimits/updated
+07-19 00:25:19.880 20975 29263 D IlyopCodexBridge: RECV method=item/started
+07-19 00:25:19.880 20975 29263 D IlyopCodexBridge: EMIT function=onItem length=9
+07-19 00:25:19.882 20975 29263 D IlyopCodexBridge: RECV method=item/reasoning/summaryPartAdded
+07-19 00:25:21.291 20975 29263 D IlyopCodexBridge: RECV method=item/completed
+07-19 00:25:21.292 20975 29263 D IlyopCodexBridge: EMIT function=onReasoningComplete length=262
+07-19 00:25:21.300 20975 29263 D IlyopCodexBridge: RECV method=item/started
+07-19 00:25:21.302 20975 29263 D IlyopCodexBridge: EMIT function=onItem length=12
+07-19 00:25:21.937 20975 29263 D IlyopCodexBridge: RECV method=item/completed
+07-19 00:25:21.937 20975 29263 I IlyopCodexBridge: agent-stream-complete chunks=12 chars=102 phase=null
+07-19 00:25:21.937 20975 29263 D IlyopCodexBridge: EMIT function=onAssistantItemComplete length=102
+07-19 00:25:23.389 20975 29263 D IlyopCodexBridge: RECV method=thread/status/changed
+07-19 00:25:23.391 20975 29263 D IlyopCodexBridge: RECV method=item/started
+07-19 00:25:23.395 20975 29263 D IlyopCodexBridge: EMIT function=onCommandStarted length=384
+07-19 00:25:23.397 20975 29263 D IlyopCodexBridge: RECV method=item/commandExecution/requestApproval id=0
+07-19 00:25:23.402 20975 29263 D IlyopCodexBridge: EMIT function=onApprovalRequest length=822
+07-19 00:25:23.402 20975 29263 I IlyopCodexBridge: APPROVAL_REQUEST method=item/commandExecution/requestApproval
