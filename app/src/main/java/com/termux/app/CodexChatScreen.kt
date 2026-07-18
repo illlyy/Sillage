@@ -3532,13 +3532,13 @@ private fun RikkaFileAction(icon: ImageVector, label: String, onClick: () -> Uni
     }
 }
 
-private fun effortLabel(value: String): String = when (value.lowercase()) {
-    "none" -> "关闭"
-    "minimal" -> "极低"
-    "low" -> "低"
-    "medium" -> "中"
-    "high" -> "高"
-    "xhigh" -> "极高"
+private fun effortLabel(value: String, language: String): String = when (value.lowercase()) {
+    "none" -> nativeText(language, "\u5173\u95ed", "Off")
+    "minimal" -> nativeText(language, "\u6781\u4f4e", "Minimal")
+    "low" -> nativeText(language, "\u4f4e", "Low")
+    "medium" -> nativeText(language, "\u4e2d", "Medium")
+    "high" -> nativeText(language, "\u9ad8", "High")
+    "xhigh" -> nativeText(language, "\u6781\u9ad8", "Very high")
     "ultra" -> "Ultra"
     else -> value
 }
@@ -3634,7 +3634,7 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                                             },
                                             label = "effortLabelPreview",
                                         ) { effort ->
-                                            Text(effortLabel(effort), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                            Text(effortLabel(effort, LocalNativeLanguage.current), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                         }
                                     }
                                 }
@@ -3770,7 +3770,7 @@ private fun LiquidEffortSlider(
             options.forEachIndexed { index, effort ->
                 val active = index == previewIndex
                 val tickScale = if (active && dragging) 1.08f else 1f
-                Text(effortLabel(effort), modifier = Modifier.graphicsLayer { scaleX = tickScale; scaleY = tickScale }, style = MaterialTheme.typography.labelSmall, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(effortLabel(effort, LocalNativeLanguage.current), modifier = Modifier.graphicsLayer { scaleX = tickScale; scaleY = tickScale }, style = MaterialTheme.typography.labelSmall, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
