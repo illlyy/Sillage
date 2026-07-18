@@ -33,6 +33,10 @@ internal enum class NativeChatRole {
     ERROR,
 }
 
+internal enum class NativeTurnPhase(val active: Boolean) {
+    IDLE(false), WAITING(true), REASONING(true), TOOL_RUNNING(true), ANSWERING(true), STOPPING(true), COMPLETED(false), FAILED(false)
+}
+
 internal data class NativeAttachment(val name: String, val path: String, val image: Boolean)
 
 internal data class NativeSkill(val name: String, val description: String, val path: String)
@@ -68,7 +72,8 @@ internal class NativeChatState {
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
     var ready by mutableStateOf(false)
-    var busy by mutableStateOf(false)
+    var phase by mutableStateOf(NativeTurnPhase.IDLE)
+    val busy: Boolean get() = phase.active
     var modelLabel by mutableStateOf("")
     var conversationTitle by mutableStateOf("新对话")
     var conversationAnimationKey by mutableStateOf("new-${UUID.randomUUID()}")
@@ -94,7 +99,7 @@ internal class NativeChatState {
         planJson = "[]"
         planExplanation = ""
         activeGoalObjective = ""
-        busy = false
+        phase = NativeTurnPhase.IDLE
         processingLabel = ""
         reasoningText = ""
         reasoningComplete = false
@@ -116,7 +121,7 @@ internal class NativeChatState {
     fun addUser(text: String, skills: List<NativeSkill> = emptyList(), attachments: List<NativeAttachment> = emptyList()) {
         messages.add(NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList()))
         turnMessageStartIndex = messages.size
-        busy = true
+        phase = NativeTurnPhase.WAITING
         processingLabel = "处理中"
         reasoningText = ""
         reasoningComplete = false
@@ -184,6 +189,7 @@ internal class NativeChatState {
 
     fun appendAssistant(delta: String) {
         if (delta.isEmpty()) return
+        phase = NativeTurnPhase.ANSWERING
         val last = messages.lastOrNull()
         if (last != null && last.role == NativeChatRole.ASSISTANT && last.streaming) {
             messages[messages.lastIndex] = last.copy(content = last.content + delta)
@@ -282,6 +288,7 @@ internal class NativeChatState {
     }
 
     fun addActivity(type: String) {
+        phase = if (type == "reasoning") NativeTurnPhase.REASONING else NativeTurnPhase.TOOL_RUNNING
         processingLabel = when (type) {
             "reasoning" -> "正在思考"
             "commandExecution" -> "正在运行命令"
@@ -348,7 +355,7 @@ internal class NativeChatState {
         if (lastAssistant >= 0) {
             messages[lastAssistant] = messages[lastAssistant].copy(streaming = false)
         }
-        busy = false
+        phase = NativeTurnPhase.COMPLETED
         connectionLabel = "已连接"
         revision++
     }
@@ -360,7 +367,7 @@ internal class NativeChatState {
                 content = message.ifBlank { "Codex 后端发生未知错误" },
             ),
         )
-        busy = false
+        phase = NativeTurnPhase.FAILED
         connectionLabel = "连接异常"
         revision++
     }
@@ -682,7 +689,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.messages[userIndex] = chatState.messages[userIndex].copy(content = value)
         while (chatState.messages.size > userIndex + 1) chatState.messages.removeAt(chatState.messages.lastIndex)
         chatState.messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "NOTICE|已从此处重新生成"))
-        chatState.busy = true
+        chatState.phase = NativeTurnPhase.WAITING
         startFrameDiagnostics()
         chatState.processingLabel = "处理中"
         chatState.reasoningText = ""
@@ -704,7 +711,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         while (chatState.messages.isNotEmpty() && chatState.messages.last().role != NativeChatRole.USER) {
             chatState.messages.removeAt(chatState.messages.lastIndex)
         }
-        chatState.busy = true
+        chatState.phase = NativeTurnPhase.WAITING
         startFrameDiagnostics()
         chatState.processingLabel = "处理中"
         chatState.reasoningText = ""
@@ -956,7 +963,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.resetConversation()
         chatState.conversationTitle = selectedConversation?.title ?: "对话"
         if (selectedConversation?.state == CodexTaskStore.RUNNING) {
-            chatState.busy = true
+            chatState.phase = NativeTurnPhase.WAITING
             chatState.processingLabel = "正在重新连接任务"
             chatState.turnStartedAt = System.currentTimeMillis()
             chatState.phaseStartedAt = chatState.turnStartedAt
