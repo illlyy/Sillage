@@ -29,8 +29,9 @@ class NativeSettingsActivity : ComponentActivity() {
             var language by remember { mutableStateOf(prefs.getString("native_language_v1", "system").orEmpty()) }
             var streamAnimations by remember { mutableStateOf(prefs.getBoolean("native_stream_animations_v1", true)) }
             var showReasoning by remember { mutableStateOf(prefs.getBoolean("native_show_reasoning_v1", true)) }
+            var autoFollow by remember { mutableStateOf(prefs.getBoolean("native_auto_follow_v1", true)) }
             val lang = if (language == "en") "en" else "zh"
-            FcodeChatTheme(theme, lang, streamAnimations, showReasoning) {
+            FcodeChatTheme(theme, lang, streamAnimations, showReasoning, autoFollow) {
                 BackHandler { finish() }
                 Scaffold { padding ->
                     LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -42,6 +43,7 @@ class NativeSettingsActivity : ComponentActivity() {
                         }
                         item { SettingsSection(nativeText(lang, "??", "Appearance")) }
                         item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
+                        item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Auto-follow"), if (autoFollow) nativeText(lang, "???", "On") else nativeText(lang, "???", "Off")) { autoFollow = !autoFollow; prefs.edit().putBoolean("native_auto_follow_v1", autoFollow).apply() } }
                         item { SettingsRow(HugeIcons.LanguageCircle, nativeText(lang, "????", "Reasoning"), if (showReasoning) nativeText(lang, "??", "Shown") else nativeText(lang, "??", "Hidden")) { showReasoning = !showReasoning; prefs.edit().putBoolean("native_show_reasoning_v1", showReasoning).apply() } }
                         item { SettingsRow(HugeIcons.Text, nativeText(lang, "??? Markdown", "Typography & Markdown"), nativeText(lang, "???????????", "Math, code and list rendering")) {} }
                         item { SettingsSection(nativeText(lang, "??", "Conversation")) }

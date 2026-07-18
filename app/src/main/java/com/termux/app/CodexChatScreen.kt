@@ -280,17 +280,18 @@ private val FcodeDarkColors = darkColorScheme(
 val LocalNativeLanguage = staticCompositionLocalOf { "zh" }
 val LocalStreamAnimationsEnabled = staticCompositionLocalOf { true }
 val LocalShowReasoning = staticCompositionLocalOf { true }
+val LocalAutoFollowOutput = staticCompositionLocalOf { true }
 
 internal fun nativeText(language: String, zh: String, en: String): String = if (language == "en") en else zh
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", streamAnimations: Boolean = true, showReasoning: Boolean = true, content: @Composable () -> Unit) {
+internal fun FcodeChatTheme(themeMode: String = "system", language: String = "zh", streamAnimations: Boolean = true, showReasoning: Boolean = true, autoFollow: Boolean = true, content: @Composable () -> Unit) {
     val dark = when (themeMode) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
     MaterialExpressiveTheme(
         colorScheme = if (dark) FcodeDarkColors else FcodeLightColors,
         motionScheme = MotionScheme.expressive(),
-        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, LocalStreamAnimationsEnabled provides streamAnimations, LocalShowReasoning provides showReasoning, content = content) },
+        content = { androidx.compose.runtime.CompositionLocalProvider(LocalNativeLanguage provides language, LocalStreamAnimationsEnabled provides streamAnimations, LocalShowReasoning provides showReasoning, LocalAutoFollowOutput provides autoFollow, content = content) },
     )
 }
 
@@ -322,6 +323,7 @@ internal fun NativeChatScreen(
     onToggleTheme: () -> Unit,
 ) {
     val context = LocalContext.current
+    val autoFollowEnabled = LocalAutoFollowOutput.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -357,7 +359,8 @@ internal fun NativeChatScreen(
         elapsedSeconds = 0L
     }
 
-    LaunchedEffect(listDragged) {
+    LaunchedEffect(listDragged, autoFollowEnabled) {
+        if (!autoFollowEnabled) { followOutput = false; return@LaunchedEffect }
         if (listDragged) {
             followOutput = false
         } else if (!listState.canScrollForward) {
@@ -376,7 +379,7 @@ internal fun NativeChatScreen(
     }
 
     LaunchedEffect(inputHeightPx, imeBottomPx) {
-        if (followOutput && !listDragged && state.messages.isNotEmpty()) {
+        if (autoFollowEnabled && followOutput && !listDragged && state.messages.isNotEmpty()) {
             val visibleCount = minOf(historyLimit, state.messages.size)
             val loaderOffset = if (state.messages.size > visibleCount) 1 else 0
             listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
@@ -394,7 +397,7 @@ internal fun NativeChatScreen(
         while (isActive) {
             // Do not keep a frame callback alive for an idle conversation. Poll slowly
             // until generation/layout growth needs the smooth 60/120 Hz follow motor.
-            if (!followOutput || listDragged || state.messages.isEmpty() ||
+            if (!autoFollowEnabled || !followOutput || listDragged || state.messages.isEmpty() ||
                 android.os.SystemClock.uptimeMillis() < followPausedUntil ||
                 (!state.busy && !listState.canScrollForward)
             ) {
