@@ -1489,7 +1489,13 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
     } else {
         "${state.processingLabel.ifBlank { "\u5904\u7406\u4e2d" }} ${elapsedSeconds}s"
     }
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.72f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable {
                 when {
