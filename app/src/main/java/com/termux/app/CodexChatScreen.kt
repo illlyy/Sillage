@@ -312,6 +312,7 @@ internal fun NativeChatScreen(
     onModeChange: (String) -> Unit,
     onSetGoal: (String) -> Unit,
     onClearGoal: () -> Unit,
+    onToggleGoalPause: () -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -577,6 +578,16 @@ internal fun NativeChatScreen(
                                 Icon(HugeIcons.ArrowDown01, "回到底部", modifier = Modifier.size(20.dp))
                             }
                         }
+                    }
+                    if (state.activeGoalObjective.isNotBlank()) {
+                        NativeGoalBanner(
+                            objective = state.activeGoalObjective,
+                            paused = state.activeGoalStatus == "paused",
+                            enabled = state.ready && !state.phase.active,
+                            onEdit = { showGoalDialog = true },
+                            onTogglePause = onToggleGoalPause,
+                            onClear = onClearGoal,
+                        )
                     }
                     RikkaChatInput(
                         value = state.input,
@@ -3064,6 +3075,32 @@ private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
         }
     }
 }
+@Composable
+private fun NativeGoalBanner(objective: String, paused: Boolean, enabled: Boolean, onEdit: () -> Unit, onTogglePause: () -> Unit, onClear: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    var expanded by remember(objective) { mutableStateOf(false) }
+    Surface(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f)) {
+        Column {
+            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.LookTop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(nativeText(language, if (paused) "\u76ee\u6807\u5df2\u6682\u505c" else "\u76ee\u6807\u8fdb\u884c\u4e2d", if (paused) "Goal paused" else "Goal active"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Text(objective, maxLines = if (expanded) 6 else 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                }
+                Icon(if (expanded) HugeIcons.ArrowUp01 else HugeIcons.ArrowDown01, null, Modifier.size(16.dp))
+            }
+            AnimatedVisibility(expanded) {
+                Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onEdit, enabled = enabled) { Text(nativeText(language, "\u7f16\u8f91", "Edit")) }
+                    TextButton(onClick = onTogglePause, enabled = enabled) { Text(nativeText(language, if (paused) "\u6062\u590d" else "\u6682\u505c", if (paused) "Resume" else "Pause")) }
+                    TextButton(onClick = onClear, enabled = enabled) { Text(nativeText(language, "\u6e05\u9664", "Clear")) }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ComposerModeCapsules(
     selectedMode: String,

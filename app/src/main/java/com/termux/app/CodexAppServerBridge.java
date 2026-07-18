@@ -511,6 +511,16 @@ final class CodexAppServerBridge {
         } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
+    void setThreadGoalStatus(String status) {
+        if (threadId == null) return;
+        String normalized = "paused".equals(status) ? "paused" : "active";
+        try {
+            sendRequest("thread/goal/set", new JSONObject()
+                .put("threadId", threadId)
+                .put("status", normalized));
+        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
     void clearThreadGoal() {
         if (threadId == null) return;
         try {

@@ -82,6 +82,7 @@ internal class NativeChatState {
     var selectedEffort by mutableStateOf("high")
     var selectedMode by mutableStateOf("default")
     var activeGoalObjective by mutableStateOf("")
+    var activeGoalStatus by mutableStateOf("active")
     var planJson by mutableStateOf("[]")
     var planExplanation by mutableStateOf("")
     var revision by mutableIntStateOf(0)
@@ -100,6 +101,7 @@ internal class NativeChatState {
         planJson = "[]"
         planExplanation = ""
         activeGoalObjective = ""
+        activeGoalStatus = "active"
         phase = NativeTurnPhase.IDLE
         processingLabel = ""
         reasoningText = ""
@@ -501,6 +503,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onModeChange = ::setChatMode,
                     onSetGoal = ::setGoal,
                     onClearGoal = ::clearGoal,
+                    onToggleGoalPause = ::toggleGoalPause,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { chatState.attachments.remove(it) },
@@ -782,12 +785,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun goalPreferenceKey(threadId: String): String = "native_thread_goal_v1_$threadId"
     private fun modePreferenceKey(threadId: String): String = "native_thread_mode_v1_$threadId"
+    private fun goalStatusPreferenceKey(threadId: String): String = "native_thread_goal_status_v1_$threadId"
     private fun planPreferenceKey(threadId: String): String = "native_thread_plan_v1_$threadId"
     private fun planExplanationPreferenceKey(threadId: String): String = "native_thread_plan_explanation_v1_$threadId"
 
     private fun restoreGoalForThread(threadId: String) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.activeGoalObjective = prefs.getString(goalPreferenceKey(threadId), "").orEmpty()
+        chatState.activeGoalStatus = prefs.getString(goalStatusPreferenceKey(threadId), "active").orEmpty().takeIf { it == "paused" } ?: "active"
         chatState.selectedMode = prefs.getString(modePreferenceKey(threadId), "default").orEmpty().takeIf { it == "plan" } ?: "default"
         chatState.planJson = prefs.getString(planPreferenceKey(threadId), "[]").orEmpty().ifBlank { "[]" }
         chatState.planExplanation = prefs.getString(planExplanationPreferenceKey(threadId), "").orEmpty()
@@ -799,14 +804,24 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (value.isEmpty() || !chatState.ready || threadId.isNullOrBlank()) return
         chatState.activeGoalObjective = value
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
-            .putString(goalPreferenceKey(threadId), value).apply()
+            .putString(goalPreferenceKey(threadId), value).putString(goalStatusPreferenceKey(threadId), "active").apply()
+        chatState.activeGoalStatus = "active"
         bridge?.setThreadGoal(value)
+    }
+
+    private fun toggleGoalPause() {
+        val threadId = currentThreadId ?: return
+        if (chatState.activeGoalObjective.isBlank() || chatState.phase.active) return
+        val next = if (chatState.activeGoalStatus == "paused") "active" else "paused"
+        chatState.activeGoalStatus = next
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString(goalStatusPreferenceKey(threadId), next).apply()
+        bridge?.setThreadGoalStatus(next)
     }
 
     private fun clearGoal() {
         currentThreadId?.let { threadId ->
             getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
-                .remove(goalPreferenceKey(threadId)).apply()
+                .remove(goalPreferenceKey(threadId)).remove(goalStatusPreferenceKey(threadId)).apply()
         }
         chatState.activeGoalObjective = ""
         bridge?.clearThreadGoal()
