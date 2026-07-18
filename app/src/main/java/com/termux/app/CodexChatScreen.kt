@@ -775,6 +775,7 @@ private fun MessageSearchDialog(
     onSelect: (Int) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
+    val language = LocalNativeLanguage.current
     val results = remember(query, messages.size) {
         if (query.isBlank()) emptyList()
         else messages.mapIndexedNotNull { index, message ->
@@ -783,7 +784,7 @@ private fun MessageSearchDialog(
     }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text("搜索当前对话") },
+        title = { Text(nativeText(language, "\u641c\u7d22\u5f53\u524d\u5bf9\u8bdd", "Search conversation")) },
         text = {
             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
@@ -792,10 +793,10 @@ private fun MessageSearchDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     leadingIcon = { Icon(HugeIcons.Search01, null) },
-                    placeholder = { Text(nativeText(LocalNativeLanguage.current, "\u91cd\u8bd5", "Retry")) },
+                    placeholder = { Text(nativeText(language, "\u641c\u7d22\u6d88\u606f", "Search messages")) },
                 )
-                if (query.isNotBlank()) {
-                    Text("找到 ${results.size} 条结果", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (query.isNotBlank()) {
+                    Text(nativeText(language, "\u627e\u5230 ${results.size} \u6761\u7ed3\u679c", "${results.size} results found"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(results, key = { it.first }) { (index, message) ->
                             Surface(
@@ -804,7 +805,7 @@ private fun MessageSearchDialog(
                                 color = MaterialTheme.colorScheme.surfaceContainer,
                             ) {
                                 Column(modifier = Modifier.padding(12.dp)) {
-                                    Text(if (message.role == NativeChatRole.USER) "你" else "助手", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                    Text(if (message.role == NativeChatRole.USER) nativeText(language, "\u7528\u6237", "User") else nativeText(language, "\u52a9\u624b", "Assistant"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                                     Text(message.content.replace('\n', ' '), maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
                                 }
                             }
@@ -813,7 +814,7 @@ private fun MessageSearchDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5173\u95ed", "Close")) } },
     )
 }
 
@@ -3421,6 +3422,7 @@ private fun AttachmentThumbnail(path: String, modifier: Modifier = Modifier) {
 
 @Composable
 private fun AttachmentPreviewDialog(attachment: NativeAttachment, onDismiss: () -> Unit) {
+    val language = LocalNativeLanguage.current
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(attachment.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
@@ -3429,14 +3431,14 @@ private fun AttachmentPreviewDialog(attachment: NativeAttachment, onDismiss: () 
                 if (attachment.image) AttachmentThumbnail(attachment.path, Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 420.dp).clip(MaterialTheme.shapes.large))
                 Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainer) {
                     Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(if (attachment.image) "图片附件" else "文件附件", style = MaterialTheme.typography.labelLarge)
+                        Text(if (attachment.image) nativeText(language, "\u56fe\u7247\u9644\u4ef6", "Image attachment") else nativeText(language, "\u6587\u4ef6\u9644\u4ef6", "File attachment"), style = MaterialTheme.typography.labelLarge)
                         Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(attachment.path, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5b8c\u6210", "Done")) } },
     )
 }
 
