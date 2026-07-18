@@ -43,7 +43,7 @@ class NativeSettingsActivity : ComponentActivity() {
                         item { SettingsRow(HugeIcons.LanguageCircle, "语言", when(language) { "en" -> "English"; "zh" -> "简体中文"; else -> "跟随系统" }) { language = when(language) { "system" -> "zh"; "zh" -> "en"; else -> "system" }; prefs.edit().putString("native_language_v1", language).apply() } }
                         item { SettingsRow(HugeIcons.Text, "字体与 Markdown", "公式、代码块、列表渲染") { } }
                         item { SettingsSection("对话") }
-                        item { SettingsRow(HugeIcons.Moon02, nativeText(if (language == "en") "en" else "zh", "????", "Streaming animation"), if (streamAnimations) nativeText(if (language == "en") "en" else "zh", "???", "On") else nativeText(if (language == "en") "en" else "zh", "???", "Off")) { streamAnimations = !streamAnimations; prefs.edit().putBoolean("native_stream_animations_v1", streamAnimations).apply() } }
+                        item { SettingsRow(HugeIcons.Moon02, nativeText(if (language == "en") "en" else "zh", "\u6d41\u5f0f\u52a8\u753b", "Streaming animation"), if (streamAnimations) nativeText(if (language == "en") "en" else "zh", "\u5df2\u5f00\u542f", "On") else nativeText(if (language == "en") "en" else "zh", "\u5df2\u5173\u95ed", "Off")) { streamAnimations = !streamAnimations; prefs.edit().putBoolean("native_stream_animations_v1", streamAnimations).apply() } }
                         item { SettingsRow(HugeIcons.LanguageCircle, "思考过程", "显示、折叠和自动跟随") { } }
                         item { SettingsSection("系统") }
                         item { SettingsRow(HugeIcons.Text, "诊断日志", "查看原生 UI 和后端事件") { } }
