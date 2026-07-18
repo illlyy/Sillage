@@ -558,6 +558,20 @@ internal fun NativeChatScreen(
                             }
                         }
                         AnimatedVisibility(
+                            visible = state.historyLoading,
+                            modifier = Modifier.align(Alignment.Center),
+                            enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.96f),
+                            exit = fadeOut(tween(90)) + scaleOut(targetScale = 0.98f),
+                        ) {
+                            Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = 3.dp) {
+                                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(nativeText(language, "???????", "Loading conversation?"), style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+                        }
+                        AnimatedVisibility(
                             visible = showScrollToBottom,
                             modifier = Modifier.align(Alignment.BottomEnd).then(floatingInsetModifier).padding(end = 16.dp, bottom = inputBottomPadding + 16.dp),
                             enter = fadeIn() + scaleIn(),
@@ -1548,6 +1562,29 @@ private fun LiveReasoningText(text: String) {
 }
 
 @Composable
+private fun DeferredHistoricalRichText(text: String) {
+    val chunks = remember(text) { splitLiveText(text, targetSize = 1400, maxSize = 2200) }
+    var visibleCount by remember(text) { mutableIntStateOf(0) }
+    LaunchedEffect(text) {
+        visibleCount = 0
+        chunks.indices.forEach { index ->
+            withFrameNanos { }
+            visibleCount = index + 1
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        chunks.take(visibleCount).forEach { chunk -> RichResponseText(chunk.text) }
+        if (visibleCount < chunks.size) {
+            Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.8.dp)
+                Spacer(Modifier.width(8.dp))
+                Text(nativeText(LocalNativeLanguage.current, "?????????", "Loading reasoning?"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
     var userControlledExpansion by remember { mutableStateOf(false) }
@@ -1646,7 +1683,7 @@ private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answer
                     }
                     Box(modifier = Modifier.padding(top = 10.dp).then(liveReasoningModifier)) {
                         if (state.reasoningComplete) {
-                            RichResponseText(state.reasoningText)
+                            DeferredHistoricalRichText(state.reasoningText)
                         } else {
                             LiveReasoningText(state.reasoningText)
                         }

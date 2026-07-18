@@ -73,6 +73,7 @@ internal class NativeChatState {
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
     var ready by mutableStateOf(false)
+    var historyLoading by mutableStateOf(false)
     var phase by mutableStateOf(NativeTurnPhase.IDLE)
     val busy: Boolean get() = phase.active
     var modelLabel by mutableStateOf("")
@@ -99,6 +100,7 @@ internal class NativeChatState {
     var phaseMessageStartIndex by mutableIntStateOf(0)
 
     fun resetConversation() {
+        historyLoading = false
         messages.clear()
         planJson = "[]"
         planExplanation = ""
@@ -1031,6 +1033,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         currentThreadId = threadId
         val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
         chatState.resetConversation()
+        chatState.historyLoading = true
         chatState.conversationTitle = selectedConversation?.title ?: "对话"
         if (selectedConversation?.state == CodexTaskStore.RUNNING) {
             chatState.phase = NativeTurnPhase.WAITING
@@ -1132,6 +1135,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onHistory" -> {
                 chatState.replaceHistory(value)
+                chatState.historyLoading = false
                 if (chatState.busy) {
                     // A resumed running turn starts a fresh live phase after the persisted
                     // snapshot. Never calculate duration from the reset value 0, and never
