@@ -2034,11 +2034,20 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 if (completed) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp))
                 else CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
             }
-            if (expanded && planSteps.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = expanded && planSteps.isNotEmpty(),
+                enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(tween(180)),
+                exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(tween(120)),
+            ) {
                 Column(Modifier.padding(start = 42.dp, end = 16.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     planSteps.forEachIndexed { index, step ->
                         val label = step.optString("step").ifBlank { step.optString("title") }.ifBlank { step.optString("description") }
-                        if (label.isNotBlank()) Text("${index + 1}. $label", style = MaterialTheme.typography.bodySmall, lineHeight = 18.sp)
+                        val status = step.optString("status", "pending")
+                        if (label.isNotBlank()) Row(verticalAlignment = Alignment.Top) {
+                            val mark = if (status == "completed") "?" else "${index + 1}."
+                            Text(mark, modifier = Modifier.width(24.dp), color = if (status == "completed") Color(0xFF5E8B68) else MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                            Text(label, style = MaterialTheme.typography.bodySmall, lineHeight = 18.sp)
+                        }
                     }
                 }
             }
