@@ -191,17 +191,24 @@ internal class NativeChatState {
         revision++
     }
 
+    private fun cleanProtocolMarkup(text: String): String = text
+        .replace(Regex("""</?propose_plan\s*>""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""</?plan\s*>""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""</?final\s*>""", RegexOption.IGNORE_CASE), "")
+
     fun appendAssistant(delta: String) {
         if (delta.isEmpty()) return
+        val cleanedDelta = cleanProtocolMarkup(delta)
+        if (cleanedDelta.isEmpty()) return
         phase = NativeTurnPhase.ANSWERING
         val last = messages.lastOrNull()
         if (last != null && last.role == NativeChatRole.ASSISTANT && last.streaming) {
-            messages[messages.lastIndex] = last.copy(content = last.content + delta)
+            messages[messages.lastIndex] = last.copy(content = last.content + cleanedDelta)
         } else {
             messages.add(
                 NativeChatMessage(
                     role = NativeChatRole.ASSISTANT,
-                    content = delta,
+                    content = cleanedDelta,
                     streaming = true,
                     revealStartedAt = System.currentTimeMillis(),
                 ),
@@ -211,7 +218,8 @@ internal class NativeChatState {
     }
 
     fun appendAssistantFinal(text: String) {
-        if (text.isBlank()) return
+        val cleanedText = cleanProtocolMarkup(text)
+        if (cleanedText.isBlank()) return
         val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
             .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT }
         if (existingIndex != null) {
@@ -220,9 +228,9 @@ internal class NativeChatState {
             // item. Keep the stable message id and merge the authoritative final text;
             // adding a second assistant item makes a whole paragraph flash on screen.
             val merged = when {
-                text.startsWith(existing.content) -> text
-                existing.content.startsWith(text) -> existing.content
-                else -> text
+                cleanedText.startsWith(existing.content) -> text
+                existing.content.startsWith(cleanedText) -> existing.content
+                else -> cleanedText
             }
             messages[existingIndex] = existing.copy(
                 content = merged,
@@ -233,7 +241,7 @@ internal class NativeChatState {
             messages.add(
                 NativeChatMessage(
                     role = NativeChatRole.ASSISTANT,
-                    content = text,
+                    content = cleanedText,
                     streaming = false,
                     revealStartedAt = System.currentTimeMillis(),
                     finalOnlyReveal = true,
