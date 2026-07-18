@@ -3051,6 +3051,7 @@ private fun DiffText(diff: String) {
 
 @Composable
 private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
+    val language = LocalNativeLanguage.current
     val displayText = remember(text) { NativeUiRenderSafety.errorSummary(text) }
     Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.errorContainer) {
         Column(modifier = Modifier.padding(14.dp)) {
