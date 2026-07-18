@@ -3055,10 +3055,10 @@ private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
     val displayText = remember(text) { NativeUiRenderSafety.errorSummary(text) }
     Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.errorContainer) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Text("发生错误", fontWeight = FontWeight.SemiBold)
+            Text(nativeText(language, "\u53d1\u751f\u9519\u8bef", "Error"), fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp)); SelectionContainer { Text(displayText, style = MaterialTheme.typography.bodySmall) }
             if (onRetry != null) TextButton(onClick = onRetry, modifier = Modifier.align(Alignment.End)) {
-                Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("重试")
+                Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text(nativeText(language, "\u91cd\u8bd5", "Retry"))
             }
         }
     }
