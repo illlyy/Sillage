@@ -1342,7 +1342,11 @@ private fun splitLiveText(text: String, targetSize: Int = 520, maxSize: Int = 76
     while (text.length - start > maxSize) {
         val target = (start + targetSize).coerceAtMost(text.length)
         val ceiling = (start + maxSize).coerceAtMost(text.length)
-        var end = text.indexOf('\n', target).let { if (it in target until ceiling) it + 1 else -1 }
+        // Prefer Markdown block boundaries so completed paragraphs, lists and code
+        // fences become stable chunks. Only the final unfinished block is re-rendered.
+        val paragraphEnd = text.indexOf("\n\n", target).let { if (it in target until ceiling) it + 2 else -1 }
+        val fenceEnd = text.indexOf("\n```", target).let { if (it in target until ceiling) it + 4 else -1 }
+        var end = listOf(paragraphEnd, fenceEnd).filter { it > 0 }.minOrNull() ?: -1
         if (end < 0) {
             end = text.lastIndexOf('\n', ceiling - 1).let { if (it > start + targetSize / 2) it + 1 else ceiling }
         }
