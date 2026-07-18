@@ -1330,6 +1330,7 @@ private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Bo
 
 @Composable
 private fun MessageActions(text: String, onEdit: (() -> Unit)? = null, onRetry: (() -> Unit)? = null, allowShare: Boolean = false) {
+    val language = LocalNativeLanguage.current
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
