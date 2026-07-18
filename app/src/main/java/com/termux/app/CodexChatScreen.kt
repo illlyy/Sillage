@@ -781,7 +781,7 @@ private fun MessageSearchDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     leadingIcon = { Icon(HugeIcons.Search01, null) },
-                    placeholder = { Text("??") },
+                    placeholder = { Text(nativeText(LocalNativeLanguage.current, "??", "Retry")) },
                 )
                 if (query.isNotBlank()) {
                     Text("找到 ${results.size} 条结果", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1263,6 +1263,7 @@ private fun StreamingResponseText(messageId: String, text: String, streaming: Bo
 
 @Composable
 private fun RikkaAssistantMessage(messageId: String, text: String, streaming: Boolean, revealStartedAt: Long, finalOnlyReveal: Boolean, liveState: NativeChatState?, elapsedSeconds: Long, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}) {
+    val language = LocalNativeLanguage.current
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1483,6 +1484,7 @@ private fun LiveReasoningText(text: String) {
 private fun ProcessingPanel(state: NativeChatState, elapsedSeconds: Long, answerStarted: Boolean, onLoadSubagentHistory: (String) -> Unit, onAutomaticCollapse: () -> Unit) {
     var expanded by remember { mutableStateOf(true) }
     var fullReasoning by remember { mutableStateOf(false) }
+    val language = LocalNativeLanguage.current
     val reasoningScrollState = rememberScrollState()
     val reasoningPreview = expanded && !state.reasoningComplete && !fullReasoning
     val reasoningLive = expanded && !state.reasoningComplete
