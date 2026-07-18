@@ -788,7 +788,7 @@ private fun MessageSearchDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     leadingIcon = { Icon(HugeIcons.Search01, null) },
-                    placeholder = { Text(nativeText(LocalNativeLanguage.current, "??", "Retry")) },
+                    placeholder = { Text(nativeText(LocalNativeLanguage.current, "\u91cd\u8bd5", "Retry")) },
                 )
                 if (query.isNotBlank()) {
                     Text("找到 ${results.size} 条结果", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -821,15 +821,15 @@ private fun EditMessageDialog(initialText: String, onDismiss: () -> Unit, onConf
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text(nativeText(language, "????", "Edit message")) },
+        title = { Text(nativeText(language, "\u7f16\u8f91\u6d88\u606f", "Edit message")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("保存后将从这条消息重新生成后续内容。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(value = value, onValueChange = { value = it }, modifier = Modifier.fillMaxWidth().focusRequester(focusRequester), minLines = 3, maxLines = 10)
             }
         },
-        confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) { Text(nativeText(language, "???????", "Save and regenerate")) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "??", "Cancel")) } },
+        confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) { Text(nativeText(language, "\u4fdd\u5b58\u5e76\u91cd\u65b0\u751f\u6210", "Save and regenerate")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
     )
 }
 
@@ -1042,10 +1042,10 @@ private fun RikkaTopBar(
                     .background(if (ready) Color(0xFF43A047) else MaterialTheme.colorScheme.outline, CircleShape),
             )
             IconButton(onClick = onToggleTheme) {
-                Icon(HugeIcons.Sparkles, contentDescription = nativeText(language, "????", "Switch theme"))
+                Icon(HugeIcons.Sparkles, contentDescription = nativeText(language, "\u5207\u6362\u4e3b\u9898", "Switch theme"))
             }
             IconButton(onClick = onOpenWorkPanel) {
-                Icon(HugeIcons.LeftToRightListBullet, contentDescription = nativeText(language, "????", "Work panel"))
+                Icon(HugeIcons.LeftToRightListBullet, contentDescription = nativeText(language, "\u5de5\u4f5c\u9762\u677f", "Work panel"))
             }
             IconButton(onClick = onNewConversation) {
                 Icon(HugeIcons.MessageAdd01, contentDescription = "新对话")
@@ -1981,7 +1981,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 Column {
         if (reasoning.isNotBlank()) Box(modifier = Modifier.padding(top = 10.dp)) { RichResponseText(reasoning) }
         else if (reasoningUnavailable) Text(
-            nativeText(language, "?????????????", "The model did not return a visible reasoning summary"),
+            nativeText(language, "\u6a21\u578b\u672a\u8fd4\u56de\u53ef\u89c1\u7684\u601d\u8003\u6458\u8981", "The model did not return a visible reasoning summary"),
             modifier = Modifier.padding(top = 10.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2357,7 +2357,7 @@ private fun WorkPanelDialog(
 private fun WorkPanelTabs(tab: String, planCount: Int, agentCount: Int, onTab: (String) -> Unit) {
     val language = LocalNativeLanguage.current
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf("plan" to "${nativeText(language, "??", "Plan")} $planCount", "agents" to "${nativeText(language, "???", "Agents")} $agentCount").forEach { (id, label) ->
+        listOf("plan" to "${nativeText(language, "\u8ba1\u5212", "Plan")} $planCount", "agents" to "${nativeText(language, "\u5b50\u4ee3\u7406", "Agents")} $agentCount").forEach { (id, label) ->
             Surface(
                 modifier = Modifier.weight(1f).clickable { onTab(id) },
                 shape = CircleShape,
@@ -2386,7 +2386,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditG
             Button(onClick = onExecutePlan, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
                 Icon(HugeIcons.Zap, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(nativeText(language, "????????", "Execute this plan"))
+                Text(nativeText(language, "\u6267\u884c\u6b64\u8ba1\u5212", "Execute this plan"))
             }
         }
         if (goal.isNotBlank()) item(key = "active-goal") {
@@ -2402,7 +2402,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, onEditG
                     }
                     Spacer(Modifier.width(11.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(nativeText(language, "????", "Active goal"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                        Text(nativeText(language, "\u6d3b\u8dc3\u76ee\u6807", "Active goal"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                         Text(goal, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp, modifier = Modifier.padding(top = 3.dp))
                     }
                     IconButton(onClick = onClearGoal, modifier = Modifier.size(34.dp)) {
@@ -3157,7 +3157,7 @@ private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConf
     val language = LocalNativeLanguage.current
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initialValue.isBlank()) nativeText(language, "??????", "Set active goal") else nativeText(language, "??????", "Edit active goal")) },
+        title = { Text(if (initialValue.isBlank()) nativeText(language, "\u8bbe\u7f6e\u6d3b\u8dc3\u76ee\u6807", "Set active goal") else nativeText(language, "\u7f16\u8f91\u6d3b\u8dc3\u76ee\u6807", "Edit active goal")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(nativeText(language, "Codex ??????????????????", "Codex will keep tracking this goal in later turns."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3168,12 +3168,12 @@ private fun GoalEditorDialog(initialValue: String, onDismiss: () -> Unit, onConf
                     minLines = 3,
                     maxLines = 7,
                     shape = RoundedCornerShape(18.dp),
-                    placeholder = { Text(nativeText(language, "????? Codex ???????", "Describe what Codex should keep working toward")) },
+                    placeholder = { Text(nativeText(language, "\u63cf\u8ff0\u5e0c\u671b Codex \u6301\u7eed\u8ddf\u8fdb\u7684\u76ee\u6807", "Describe what Codex should keep working toward")) },
                 )
             }
         },
-        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text(nativeText(language, "????", "Enable goal")) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "??", "Cancel")) } },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onConfirm(value.trim()) }) { Text(nativeText(language, "\u542f\u7528\u76ee\u6807", "Enable goal")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
     )
 }
 

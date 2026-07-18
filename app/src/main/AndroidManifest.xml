@@ -41,6 +41,7 @@
         android:usesCleartextTraffic="true"
         android:banner="@drawable/banner"
         android:extractNativeLibs="true"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@drawable/ic_codex_logo"
         android:label="@string/application_name"
         android:roundIcon="@drawable/ic_codex_logo"
