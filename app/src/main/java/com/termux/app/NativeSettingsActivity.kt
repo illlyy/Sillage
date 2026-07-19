@@ -5,10 +5,12 @@ import android.content.SharedPreferences
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.provider.OpenableColumns
 import android.webkit.WebView
 import android.widget.Toast
 import com.termux.BuildConfig
+import com.termux.R
 import com.termux.shared.termux.TermuxConstants
 import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
@@ -18,13 +20,21 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -78,6 +88,17 @@ private enum class SettingsPage {
     OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY,
 }
 
+private val SettingsPage.navigationDepth: Int
+    get() = when (this) {
+        SettingsPage.ROOT -> 0
+        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
+        SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
+        SettingsPage.WEB_UI, SettingsPage.PROXY -> 1
+        SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE,
+        SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR -> 2
+        SettingsPage.CHAT_BACKGROUND -> 3
+    }
+
 private data class SettingsEnvironmentSnapshot(
     val loaded: Boolean = false,
     val installedToolCount: Int = 0,
@@ -105,6 +126,10 @@ private enum class CodexDependentFeature {
 class NativeSettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= 34) {
+            overrideActivityTransition(OVERRIDE_TRANSITION_OPEN, R.anim.codex_settings_enter, R.anim.codex_chat_hold)
+            overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, R.anim.codex_chat_reenter, R.anim.codex_settings_exit)
+        }
         enableEdgeToEdge()
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val providerStore = CodexProviderStore(prefs)
@@ -174,44 +199,72 @@ class NativeSettingsActivity : ComponentActivity() {
                 val predictiveBackProgress = remember { androidx.compose.animation.core.Animatable(0f) }
                 var predictiveBackFromLeft by remember { mutableStateOf(true) }
                 val latestNavigateBack by rememberUpdatedState(navigateBack)
-                PredictiveBackHandler(enabled = page != SettingsPage.ROOT) { progress ->
+                PredictiveBackHandler(enabled = true) { progress ->
                     try {
                         progress.collect { event ->
                             predictiveBackFromLeft = event.swipeEdge == BackEventCompat.EDGE_LEFT
                             predictiveBackProgress.snapTo(event.progress)
                         }
                         latestNavigateBack()
-                        predictiveBackProgress.snapTo(0f)
+                        // Preserve the presentation value after commit, then settle the
+                        // destination page. A snap here made the gesture disappear on release.
+                        withContext(NonCancellable) {
+                            predictiveBackProgress.animateTo(
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.9f, stiffness = 410f),
+                            )
+                        }
                     } catch (_: CancellationException) {
                         // A cancelled gesture settles from its current presentation value.
                         withContext(NonCancellable) {
                             predictiveBackProgress.animateTo(
                                 targetValue = 0f,
-                                animationSpec = spring(dampingRatio = 0.86f, stiffness = 520f),
+                                animationSpec = spring(dampingRatio = 0.88f, stiffness = 430f),
                             )
                         }
                     }
                 }
-                Box(Modifier.fillMaxSize().background(settingsBackplate)) {
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
                     AnimatedContent(
                         targetState = page,
-                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                        modifier = Modifier.fillMaxSize().background(settingsBackplate).graphicsLayer {
                             val progress = predictiveBackProgress.value
                             val direction = if (predictiveBackFromLeft) 1f else -1f
-                            translationX = size.width * 0.10f * progress * direction
-                            scaleX = 1f - 0.018f * progress
-                            scaleY = 1f - 0.018f * progress
-                            alpha = 1f - 0.045f * progress
-                            transformOrigin = TransformOrigin(if (predictiveBackFromLeft) 0f else 1f, 0.5f)
+                            translationX = size.width * 0.075f * progress * direction
+                            translationY = size.height * 0.012f * progress
+                            scaleX = 1f - 0.055f * progress
+                            scaleY = 1f - 0.055f * progress
+                            alpha = 1f - 0.03f * progress
+                            transformOrigin = TransformOrigin(if (predictiveBackFromLeft) 0.35f else 0.65f, 0.5f)
                             // Clip only while the page separates from the screen edges. At rest the
                             // page remains pixel-identical and edge-to-edge.
                             shape = settingsPageShape
                             clip = progress > 0.001f
-                            shadowElevation = 12.dp.toPx() * progress
+                            shadowElevation = 18.dp.toPx() * progress
                             ambientShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.18f)
                             spotShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.22f)
                         },
-                        transitionSpec = { fadeIn() togetherWith fadeOut() },
+                        transitionSpec = {
+                            val forward = targetState.navigationDepth > initialState.navigationDepth
+                            val enterOffset: (Int) -> Int = { width -> if (forward) width / 9 else -width / 12 }
+                            val exitOffset: (Int) -> Int = { width -> if (forward) -width / 14 else width / 10 }
+                            (fadeIn(tween(175, easing = FastOutSlowInEasing)) +
+                                slideInHorizontally(
+                                    animationSpec = spring(dampingRatio = 0.9f, stiffness = 440f),
+                                    initialOffsetX = enterOffset,
+                                ) +
+                                scaleIn(
+                                    initialScale = 0.988f,
+                                    animationSpec = spring(dampingRatio = 0.92f, stiffness = 470f),
+                                )).togetherWith(
+                                fadeOut(tween(115)) +
+                                    slideOutHorizontally(
+                                        animationSpec = spring(dampingRatio = 0.94f, stiffness = 520f),
+                                        targetOffsetX = exitOffset,
+                                    ) +
+                                    scaleOut(targetScale = 0.992f, animationSpec = tween(150)),
+                            )
+                        },
                         label = "settingsPage",
                     ) { target ->
                     when (target) {
@@ -387,6 +440,14 @@ class NativeSettingsActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun finish() {
+        super.finish()
+        if (Build.VERSION.SDK_INT < 34) {
+            @Suppress("DEPRECATION")
+            overridePendingTransition(R.anim.codex_chat_reenter, R.anim.codex_settings_exit)
         }
     }
 
@@ -3598,9 +3659,20 @@ private fun SettingsSection(title: String) {
 
 @Composable
 private fun NavigationSettingsRow(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.985f else 1f,
+        animationSpec = spring(dampingRatio = 0.82f, stiffness = 650f),
+        label = "settingsNavigationPress",
+    )
     Surface(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        interactionSource = interactionSource,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).graphicsLayer {
+            scaleX = pressScale
+            scaleY = pressScale
+        },
         shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -3617,9 +3689,20 @@ private fun NavigationSettingsRow(icon: ImageVector, title: String, subtitle: St
 
 @Composable
 private fun ToggleSettingsRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.985f else 1f,
+        animationSpec = spring(dampingRatio = 0.82f, stiffness = 650f),
+        label = "settingsTogglePress",
+    )
     Surface(
         onClick = { onCheckedChange(!checked) },
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        interactionSource = interactionSource,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).graphicsLayer {
+            scaleX = pressScale
+            scaleY = pressScale
+        },
         shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {

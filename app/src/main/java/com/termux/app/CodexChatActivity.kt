@@ -1,5 +1,6 @@
 package com.termux.app
 
+import android.app.ActivityOptions
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -22,6 +23,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.termux.R
 import com.termux.shared.termux.TermuxConstants
 import java.io.File
 import java.util.UUID
@@ -1579,7 +1581,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun openHomeSettings() {
-        startActivity(Intent(this, NativeSettingsActivity::class.java))
+        val transition = ActivityOptions.makeCustomAnimation(
+            this,
+            R.anim.codex_settings_enter,
+            R.anim.codex_chat_hold,
+        )
+        startActivity(Intent(this, NativeSettingsActivity::class.java), transition.toBundle())
     }
 
     private fun openLegacyWebUi() {

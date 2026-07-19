@@ -365,6 +365,24 @@ internal fun NativeChatScreen(
     val listState = remember(conversationListKey) {
         androidx.compose.foundation.lazy.LazyListState(initialLastItem, Int.MAX_VALUE)
     }
+    val conversationSurfaceStage = when {
+        state.historyLoading && state.messages.isEmpty() && state.currentThreadId.isNotBlank() -> "loading"
+        state.messages.isEmpty() -> "empty"
+        else -> "messages"
+    }
+    val conversationPresentationKey = "$conversationListKey:$conversationSurfaceStage"
+    var conversationSurfaceEntered by remember(conversationPresentationKey) { mutableStateOf(false) }
+    LaunchedEffect(conversationPresentationKey) {
+        // Present the lightweight route first, then animate only one parent layer. This avoids
+        // per-message transitions and keeps a large Markdown history off the animation clock.
+        withFrameNanos { }
+        conversationSurfaceEntered = true
+    }
+    val conversationSurfaceProgress by animateFloatAsState(
+        targetValue = if (conversationSurfaceEntered) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 390f),
+        label = "conversationSurfaceTransition",
+    )
     val listDragged by listState.interactionSource.collectIsDraggedAsState()
     val listScrolling by remember(listState) { derivedStateOf { listState.isScrollInProgress } }
     val accessibilityManager = remember(context) {
@@ -607,6 +625,16 @@ internal fun NativeChatScreen(
                         .fillMaxSize()
                         .padding(innerPadding),
                 ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                            val progress = conversationSurfaceProgress
+                            alpha = 0.28f + 0.72f * progress
+                            translationY = (1f - progress) * 10.dp.toPx()
+                            scaleX = 0.992f + 0.008f * progress
+                            scaleY = 0.992f + 0.008f * progress
+                            transformOrigin = TransformOrigin.Center
+                        },
+                    ) {
                     if (state.historyLoading && state.messages.isEmpty() && state.currentThreadId.isNotBlank()) {
                         ConversationHistoryLoading(state.conversationTitle)
                     } else if (state.messages.isEmpty()) {
@@ -727,7 +755,7 @@ internal fun NativeChatScreen(
                             }
                         }
                         AnimatedVisibility(
-                            visible = state.historyLoading,
+                            visible = state.historyLoading && state.messages.isNotEmpty(),
                             modifier = Modifier.align(Alignment.Center),
                             enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.96f),
                             exit = fadeOut(tween(90)) + scaleOut(targetScale = 0.98f),
@@ -763,6 +791,7 @@ internal fun NativeChatScreen(
                                 Icon(HugeIcons.ArrowDown01, "回到底部", modifier = Modifier.size(20.dp))
                             }
                         }
+                    }
                     }
                     if (state.activeGoalObjective.isNotBlank()) {
                         NativeGoalBanner(
