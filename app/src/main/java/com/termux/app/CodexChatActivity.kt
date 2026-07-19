@@ -97,6 +97,14 @@ internal class NativeChatState {
     var planPanelAdded by mutableStateOf(false)
     private var activeProposedPlanItemId = ""
     var revision by mutableIntStateOf(0)
+    // The active assistant answer is intentionally not stored in messages on every token batch.
+    // Keeping the LazyColumn backing list structurally stable prevents all visible history items
+    // from being reconsidered whenever the growing answer changes.
+    var liveAssistantMessageId by mutableStateOf("")
+        private set
+    var liveAssistantText by mutableStateOf("")
+        private set
+    private val liveAssistantBuffer = StringBuilder()
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
     var reasoningComplete by mutableStateOf(false)
@@ -131,6 +139,7 @@ internal class NativeChatState {
         commandText = ""
         liveCommandJson = ""
         commandOutputBuffer.setLength(0)
+        clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
         subagentHistoryRefs.clear()
@@ -156,6 +165,7 @@ internal class NativeChatState {
         commandText = ""
         liveCommandJson = ""
         commandOutputBuffer.setLength(0)
+        clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
         turnStartedAt = System.currentTimeMillis()
@@ -204,7 +214,7 @@ internal class NativeChatState {
         if (!reasoningComplete) return
         sealCurrentPhase()
         val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT && it.streaming }
-        if (lastAssistant >= 0) messages[lastAssistant] = messages[lastAssistant].copy(streaming = false)
+        if (lastAssistant >= 0) sealLiveAssistant(lastAssistant)
         reasoningText = ""
         reasoningComplete = false
         reasoningCompletedAt = 0L
@@ -288,6 +298,30 @@ internal class NativeChatState {
         .replace(Regex("""</?plan\s*>""", RegexOption.IGNORE_CASE), "")
         .replace(Regex("""</?final\s*>""", RegexOption.IGNORE_CASE), "")
 
+    private fun clearLiveAssistantBuffer() {
+        liveAssistantBuffer.setLength(0)
+        liveAssistantMessageId = ""
+        liveAssistantText = ""
+    }
+
+    private fun sealLiveAssistant(index: Int, authoritativeText: String = ""): String {
+        val buffered = liveAssistantBuffer.toString()
+        val cleanedAuthoritative = cleanProtocolMarkup(authoritativeText)
+        val full = when {
+            cleanedAuthoritative.isBlank() -> buffered
+            buffered.isBlank() -> cleanedAuthoritative
+            cleanedAuthoritative.startsWith(buffered) -> cleanedAuthoritative
+            buffered.startsWith(cleanedAuthoritative) -> buffered
+            else -> cleanedAuthoritative
+        }
+        if (index in messages.indices) {
+            val existing = messages[index]
+            messages[index] = existing.copy(content = full, streaming = false, finalOnlyReveal = false)
+        }
+        clearLiveAssistantBuffer()
+        return full
+    }
+
     fun appendAssistant(delta: String) {
         if (delta.isEmpty()) return
         if (!planPanelAdded && delta.contains("<propose_plan", ignoreCase = true)) {
@@ -298,35 +332,29 @@ internal class NativeChatState {
         if (cleanedDelta.isEmpty()) return
         phase = NativeTurnPhase.ANSWERING
         val last = messages.lastOrNull()
-        if (last != null && last.role == NativeChatRole.ASSISTANT && last.streaming) {
-            messages[messages.lastIndex] = last.copy(content = last.content + cleanedDelta)
-        } else {
-            messages.add(
-                NativeChatMessage(
-                    role = NativeChatRole.ASSISTANT,
-                    content = cleanedDelta,
-                    streaming = true,
-                    revealStartedAt = System.currentTimeMillis(),
-                ),
+        if (last == null || last.role != NativeChatRole.ASSISTANT || !last.streaming || last.id != liveAssistantMessageId) {
+            clearLiveAssistantBuffer()
+            val message = NativeChatMessage(
+                role = NativeChatRole.ASSISTANT,
+                content = "",
+                streaming = true,
+                revealStartedAt = System.currentTimeMillis(),
             )
+            messages.add(message)
+            liveAssistantMessageId = message.id
         }
-        revision++
+        liveAssistantBuffer.append(cleanedDelta)
+        // Only this scalar state invalidates the live answer subtree. messages itself is untouched.
+        liveAssistantText = liveAssistantBuffer.toString()
     }
 
     fun completeAssistantItem(text: String) {
         val cleanedText = cleanProtocolMarkup(text)
-        if (cleanedText.isBlank()) return
         val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
             .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT && messages[it].streaming }
         if (existingIndex != null) {
-            val existing = messages[existingIndex]
-            val merged = when {
-                cleanedText.startsWith(existing.content) -> cleanedText
-                existing.content.startsWith(cleanedText) -> existing.content
-                else -> cleanedText
-            }
-            messages[existingIndex] = existing.copy(content = merged, streaming = false, finalOnlyReveal = false)
-        } else {
+            sealLiveAssistant(existingIndex, cleanedText)
+        } else if (cleanedText.isNotBlank()) {
             messages.add(
                 NativeChatMessage(
                     role = NativeChatRole.ASSISTANT,
@@ -341,42 +369,42 @@ internal class NativeChatState {
 
     fun appendAssistantFinal(text: String) {
         val cleanedText = cleanProtocolMarkup(text)
-        if (cleanedText.isBlank()) return
-        val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
-            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT }
-        if (existingIndex != null) {
-            val existing = messages[existingIndex]
-            // A few app-server/provider combinations deliver both deltas and the final
-            // item. Keep the stable message id and merge the authoritative final text;
-            // adding a second assistant item makes a whole paragraph flash on screen.
-            val merged = when {
-                cleanedText.startsWith(existing.content) -> text
-                existing.content.startsWith(cleanedText) -> existing.content
-                else -> cleanedText
+        val streamingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT && messages[it].streaming }
+        if (streamingIndex != null) {
+            sealLiveAssistant(streamingIndex, cleanedText)
+        } else if (cleanedText.isNotBlank()) {
+            val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+                .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT }
+            if (existingIndex != null) {
+                val existing = messages[existingIndex]
+                val merged = when {
+                    cleanedText.startsWith(existing.content) -> cleanedText
+                    existing.content.startsWith(cleanedText) -> existing.content
+                    else -> cleanedText
+                }
+                messages[existingIndex] = existing.copy(content = merged, streaming = false, finalOnlyReveal = false)
+            } else {
+                messages.add(
+                    NativeChatMessage(
+                        role = NativeChatRole.ASSISTANT,
+                        content = cleanedText,
+                        streaming = false,
+                        revealStartedAt = System.currentTimeMillis(),
+                        finalOnlyReveal = true,
+                    ),
+                )
             }
-            messages[existingIndex] = existing.copy(
-                content = merged,
-                streaming = false,
-                finalOnlyReveal = false,
-            )
-        } else {
-            messages.add(
-                NativeChatMessage(
-                    role = NativeChatRole.ASSISTANT,
-                    content = cleanedText,
-                    streaming = false,
-                    revealStartedAt = System.currentTimeMillis(),
-                    finalOnlyReveal = true,
-                ),
-            )
         }
         phase = NativeTurnPhase.COMPLETED
+        clearLiveAssistantBuffer()
         revision++
     }
 
     fun replaceHistory(value: String) = applyHistorySnapshot(NativeHistoryParser.parse(value))
 
     fun applyHistorySnapshot(snapshot: NativeHistorySnapshot) {
+        clearLiveAssistantBuffer()
         val cachedPlanJson = planJson
         val cachedPlanExplanation = planExplanation
         planJson = snapshot.planJson
@@ -525,6 +553,10 @@ internal class NativeChatState {
         // A turn can contain commentary, a proposed plan and a final answer. Close every
         // live item created by this turn; only sealing the last assistant leaves plan/commentary
         // animations running forever when a provider omits an item phase.
+        val liveAssistantIndex = messages.indexOfLast {
+            it.role == NativeChatRole.ASSISTANT && it.streaming && it.id == liveAssistantMessageId
+        }
+        if (liveAssistantIndex >= 0) sealLiveAssistant(liveAssistantIndex)
         for (index in turnMessageStartIndex.coerceAtLeast(0) until messages.size) {
             if (messages[index].streaming) messages[index] = messages[index].copy(streaming = false)
         }
@@ -648,6 +680,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var nativeThemeMode by mutableStateOf("system")
     private var nativeColorPalette by mutableStateOf(FcodeColorPalette.ROSE.value)
     private var nativeChatBackground by mutableStateOf(FcodeChatBackgroundStyle.THEME.value)
+    private var nativeChatBackgroundImage by mutableStateOf("")
+    private var nativeChatBackgroundDim by mutableStateOf(0.32f)
     private var nativeLanguage by mutableStateOf("zh")
     private var streamAnimationsEnabled by mutableStateOf(true)
     private var showReasoning by mutableStateOf(true)
@@ -670,6 +704,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         nativeThemeMode = FcodeAppearancePreferences.normalizeColorMode(nativePrefs.getString(FcodeAppearancePreferences.COLOR_MODE, "system"))
         nativeColorPalette = FcodeColorPalette.from(nativePrefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value
         nativeChatBackground = FcodeChatBackgroundStyle.from(nativePrefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value
+        nativeChatBackgroundImage = nativePrefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()
+        nativeChatBackgroundDim = nativePrefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
         nativeLanguage = nativePrefs.getString("native_language_v1", "system").orEmpty().let { if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh" }
         streamAnimationsEnabled = nativePrefs.getBoolean("native_stream_animations_v1", true)
         showReasoning = nativePrefs.getBoolean("native_show_reasoning_v1", true)
@@ -688,6 +724,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 autoFollowOutput,
                 colorPalette = nativeColorPalette,
                 chatBackground = nativeChatBackground,
+                chatBackgroundImage = nativeChatBackgroundImage,
+                chatBackgroundDim = nativeChatBackgroundDim,
             ) {
                 NativeChatScreen(
                     state = chatState,
@@ -1408,13 +1446,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun answerFlushDelayMs(): Long {
-        val liveChars = chatState.messages.lastOrNull { it.role == NativeChatRole.ASSISTANT && it.streaming }
-            ?.content?.length ?: 0
-        return NativeUiRenderSafety.streamFlushDelayMs(liveChars, pendingAnswer.length, 56L)
+        val liveChars = chatState.liveAssistantText.length
+        return NativeUiRenderSafety.streamFlushDelayMs(liveChars, pendingAnswer.length, 88L)
     }
 
     private fun reasoningFlushDelayMs(): Long =
-        NativeUiRenderSafety.streamFlushDelayMs(chatState.reasoningText.length, pendingReasoning.length, 56L)
+        NativeUiRenderSafety.streamFlushDelayMs(chatState.reasoningText.length, pendingReasoning.length, 88L)
 
     private fun flushAnswerDeltas(force: Boolean = false) {
         streamHandler.removeCallbacks(flushAnswerRunnable)
@@ -1693,6 +1730,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         nativeThemeMode = FcodeAppearancePreferences.normalizeColorMode(prefs.getString(FcodeAppearancePreferences.COLOR_MODE, "system"))
         nativeColorPalette = FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value
         nativeChatBackground = FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value
+        nativeChatBackgroundImage = prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()
+        nativeChatBackgroundDim = prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
         nativeLanguage = prefs.getString("native_language_v1", "system").orEmpty().let {
             if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh"
         }

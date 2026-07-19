@@ -22,6 +22,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -61,7 +62,7 @@ import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tick02
 
-private enum class SettingsPage { ROOT, THEME, CHAT_BACKGROUND, OVERLAY, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY }
+private enum class SettingsPage { ROOT, THEME, CHAT_BACKGROUND, OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY }
 
 private enum class CodexDependentFeature {
     WEB_UI,
@@ -82,6 +83,8 @@ class NativeSettingsActivity : ComponentActivity() {
             var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
             var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
             var chatBackground by remember { mutableStateOf(FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value) }
+            var chatBackgroundImage by remember { mutableStateOf(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()) }
+            var chatBackgroundDim by remember { mutableFloatStateOf(prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)) }
             var language by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "system").orEmpty()) }
             var animations by remember { mutableStateOf(prefs.getBoolean(KEY_STREAM_ANIMATIONS, true)) }
             var reasoning by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING, true)) }
@@ -106,7 +109,7 @@ class NativeSettingsActivity : ComponentActivity() {
                 page = when (page) {
                     SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
                     SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
-                    SettingsPage.THEME, SettingsPage.OVERLAY, SettingsPage.MODEL_CONFIGS, SettingsPage.WEB_UI, SettingsPage.PROXY -> SettingsPage.ROOT
+                    SettingsPage.THEME, SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS, SettingsPage.WEB_UI, SettingsPage.PROXY -> SettingsPage.ROOT
                     SettingsPage.ROOT -> { finish(); SettingsPage.ROOT }
                 }
             }
@@ -114,6 +117,8 @@ class NativeSettingsActivity : ComponentActivity() {
                 theme, lang, animations, reasoning, follow,
                 colorPalette = colorPalette,
                 chatBackground = chatBackground,
+                chatBackgroundImage = chatBackgroundImage,
+                chatBackgroundDim = chatBackgroundDim,
             ) {
                 BackHandler(onBack = navigateBack)
                 AnimatedContent(
@@ -132,6 +137,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             codexCliInstalled = codexCliInstalled,
                             onProxy = { page = SettingsPage.PROXY },
                             onOverlay = { page = SettingsPage.OVERLAY },
+                            onDevelopmentTools = { page = SettingsPage.DEVELOPMENT_TOOLS },
                             onTheme = { page = SettingsPage.THEME },
                             onLanguage = { dialog = "language" },
                             onTypography = { dialog = "typography" },
@@ -160,11 +166,26 @@ class NativeSettingsActivity : ComponentActivity() {
                         SettingsPage.CHAT_BACKGROUND -> ChatBackgroundSettingsPage(
                             lang = lang,
                             selectedValue = chatBackground,
+                            imagePath = chatBackgroundImage,
+                            imageDim = chatBackgroundDim,
                             onBack = navigateBack,
                             onSelected = { value ->
                                 chatBackground = FcodeChatBackgroundStyle.from(value).value
                                 prefs.edit().putString(FcodeAppearancePreferences.CHAT_BACKGROUND, chatBackground).apply()
                             },
+                            onImageChanged = { path ->
+                                chatBackgroundImage = path
+                                prefs.edit().putString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, path).apply()
+                            },
+                            onDimChanged = { value ->
+                                chatBackgroundDim = value.coerceIn(0f, 0.72f)
+                                prefs.edit().putFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, chatBackgroundDim).apply()
+                            },
+                        )
+                        SettingsPage.DEVELOPMENT_TOOLS -> DevelopmentToolsSettingsPage(
+                            lang = lang,
+                            prefs = prefs,
+                            onBack = navigateBack,
                         )
                         SettingsPage.OVERLAY -> OverlaySettingsPage(
                             lang = lang,
@@ -275,6 +296,409 @@ class NativeSettingsActivity : ComponentActivity() {
         const val KEY_SHOW_REASONING = "native_show_reasoning_v1"
         const val KEY_AUTO_FOLLOW = "native_auto_follow_v1"
     }
+}
+
+@Composable
+private fun DevelopmentToolsSettingsPage(
+    lang: String,
+    prefs: SharedPreferences,
+    onBack: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = context as? android.app.Activity
+    val selectionKey = "native_development_tool_selection_v1"
+    val initialSelection = remember {
+        if (prefs.contains(selectionKey)) {
+            prefs.getString(selectionKey, "").orEmpty().split(',').filter(String::isNotBlank).toSet()
+        } else {
+            DevelopmentToolCatalog.recommendedIds
+        }
+    }
+    var selectedIds by remember { mutableStateOf(initialSelection) }
+    var installedIds by remember { mutableStateOf(DevelopmentToolInstaller.installedIds()) }
+    var installing by remember { mutableStateOf(false) }
+    var installStage by remember { mutableStateOf("") }
+    var installDetail by remember { mutableStateOf("") }
+    var installError by remember { mutableStateOf<String?>(null) }
+    var confirmInstall by remember { mutableStateOf(false) }
+    var showLog by remember { mutableStateOf(false) }
+
+    fun updateSelection(value: Set<String>) {
+        selectedIds = value.intersect(DevelopmentToolCatalog.allIds)
+        prefs.edit().putString(selectionKey, selectedIds.joinToString(",")).apply()
+    }
+
+    fun installCodexIfSelected(selectedTools: List<DevelopmentTool>) {
+        val codex = selectedTools.firstOrNull { it.codexCli } ?: return
+        if (DevelopmentToolInstaller.isInstalled(codex)) {
+            installedIds = DevelopmentToolInstaller.installedIds()
+            return
+        }
+        val host = activity ?: run {
+            installError = tr(lang, "当前页面无法启动安装器", "The installer cannot be started from this context")
+            return
+        }
+        CodexInstaller.setupBootstrapIfNeeded(host) {
+            installedIds = DevelopmentToolInstaller.installedIds()
+            Toast.makeText(context, tr(lang, "Codex CLI 已安装", "Codex CLI installed"), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun installSelectedTools() {
+        val selectedTools = DevelopmentToolCatalog.tools.filter { it.id in selectedIds }
+        if (selectedTools.isEmpty()) return
+        val aptTools = selectedTools.filter { it.aptPackages.isNotEmpty() }
+        val host = activity ?: run {
+            installError = tr(lang, "当前页面无法启动安装器", "The installer cannot be started from this context")
+            return
+        }
+        if (aptTools.isEmpty()) {
+            installCodexIfSelected(selectedTools)
+            return
+        }
+        installStage = tr(lang, "正在准备基础环境", "Preparing base environment")
+        installDetail = tr(lang, "首次使用需要解压 Termux bootstrap", "The Termux bootstrap is extracted on first use")
+        TermuxInstaller.setupBootstrapIfNeeded(host) {
+            installing = true
+            DevelopmentToolInstaller.installAptTools(
+                activity = host,
+                tools = aptTools,
+                onProgress = { stage, detail ->
+                    installStage = when (stage) {
+                        "bootstrap" -> tr(lang, "正在准备基础环境", "Preparing base environment")
+                        else -> tr(lang, "正在安装所选工具", "Installing selected tools")
+                    }
+                    installDetail = detail.ifBlank { tr(lang, "正在等待包管理器…", "Waiting for the package manager…") }
+                },
+                onComplete = { installed, log ->
+                    installedIds = installed
+                    installing = false
+                    installStage = ""
+                    installDetail = ""
+                    Toast.makeText(
+                        context,
+                        tr(lang, "工具安装完成 · 日志：${log.name}", "Tools installed · log: ${log.name}"),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    installCodexIfSelected(selectedTools)
+                },
+                onError = { message, log ->
+                    installing = false
+                    installError = tr(
+                        lang,
+                        "安装未完成：$message\n\n日志：${log.absolutePath}",
+                        "Installation did not finish: $message\n\nLog: ${log.absolutePath}",
+                    )
+                    installedIds = DevelopmentToolInstaller.installedIds()
+                },
+            )
+        }
+    }
+
+    SettingsScaffold(
+        tr(lang, "开发工具与环境", "Development tools & environment"),
+        tr(lang, "按需安装语言、构建、终端和媒体工具", "Install languages, build, terminal and media tools on demand"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item {
+                DevelopmentEnvironmentStatusCard(
+                    lang = lang,
+                    bootstrapInstalled = DevelopmentToolInstaller.isBootstrapInstalled(),
+                    installedCount = installedIds.size,
+                    selectedCount = selectedIds.size,
+                )
+            }
+            item { SettingsSection(tr(lang, "快速选择", "Quick selection")) }
+            item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton(
+                            onClick = { updateSelection(DevelopmentToolCatalog.recommendedIds) },
+                            modifier = Modifier.weight(1f),
+                            enabled = !installing,
+                            shape = RoundedCornerShape(16.dp),
+                        ) { Text(tr(lang, "推荐环境", "Recommended")) }
+                        FilledTonalButton(
+                            onClick = { updateSelection(DevelopmentToolCatalog.allIds) },
+                            modifier = Modifier.weight(1f),
+                            enabled = !installing,
+                            shape = RoundedCornerShape(16.dp),
+                        ) { Text(tr(lang, "完整环境", "Full environment")) }
+                    }
+                    TextButton(
+                        onClick = { updateSelection(emptySet()) },
+                        modifier = Modifier.align(Alignment.End),
+                        enabled = !installing,
+                    ) { Text(tr(lang, "清除选择", "Clear selection")) }
+                }
+            }
+            DevelopmentToolCategory.entries.forEach { category ->
+                val tools = DevelopmentToolCatalog.tools.filter { it.category == category }
+                item(key = "category-${category.name}") {
+                    SettingsSection(developmentToolCategoryLabel(lang, category))
+                }
+                items(tools, key = { it.id }) { tool ->
+                    DevelopmentToolRow(
+                        lang = lang,
+                        tool = tool,
+                        selected = tool.id in selectedIds,
+                        installed = tool.id in installedIds,
+                        enabled = !installing,
+                    ) {
+                        updateSelection(
+                            if (tool.id in selectedIds) selectedIds - tool.id else selectedIds + tool.id,
+                        )
+                    }
+                }
+            }
+            item { SettingsSection(tr(lang, "安装", "Install")) }
+            item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Button(
+                        onClick = { confirmInstall = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = selectedIds.isNotEmpty() && !installing,
+                        shape = RoundedCornerShape(18.dp),
+                        contentPadding = PaddingValues(vertical = 14.dp),
+                    ) {
+                        Icon(HugeIcons.Code, null, Modifier.size(19.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(tr(lang, "安装所选工具（${selectedIds.size}）", "Install selected tools (${selectedIds.size})"))
+                    }
+                    val log = DevelopmentToolInstaller.logFile()
+                    if (log.exists()) {
+                        TextButton(
+                            onClick = { showLog = true },
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        ) { Text(tr(lang, "查看安装日志", "View installation log")) }
+                    }
+                    Text(
+                        tr(
+                            lang,
+                            "Termux 工具从当前软件源下载；Codex CLI 从 OpenAI 官方 GitHub Release 下载。完整环境可能占用 1 GB 以上空间。",
+                            "Termux tools use the configured package repositories; Codex CLI uses the official OpenAI GitHub Release. The full environment may use more than 1 GB.",
+                        ),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+
+    if (confirmInstall) {
+        val selectedTools = DevelopmentToolCatalog.tools.filter { it.id in selectedIds }
+        AlertDialog(
+            onDismissRequest = { confirmInstall = false },
+            icon = { Icon(HugeIcons.Code, null) },
+            title = { Text(tr(lang, "确认安装", "Confirm installation")) },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(tr(lang, "将安装 ${selectedTools.size} 组工具：", "${selectedTools.size} tool groups will be installed:"))
+                    Text(
+                        selectedTools.joinToString(" · ") { developmentToolTitle(lang, it) },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (selectedIds == DevelopmentToolCatalog.allIds) {
+                        Text(
+                            tr(lang, "完整环境下载量较大，请确认网络稳定并预留足够存储空间。", "The full environment is a large download. Ensure a stable network and sufficient storage."),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmInstall = false }) { Text(tr(lang, "取消", "Cancel")) } },
+            confirmButton = {
+                Button(onClick = {
+                    confirmInstall = false
+                    installSelectedTools()
+                }) { Text(tr(lang, "开始安装", "Start installation")) }
+            },
+            shape = RoundedCornerShape(28.dp),
+        )
+    }
+
+    if (installing) {
+        AlertDialog(
+            onDismissRequest = {},
+            icon = { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) },
+            title = { Text(installStage.ifBlank { tr(lang, "正在安装", "Installing") }) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(
+                        installDetail.ifBlank { tr(lang, "正在等待包管理器…", "Waiting for the package manager…") },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        tr(lang, "安装期间请保持应用在前台，不要强制结束进程。", "Keep the app in the foreground and do not force-stop it during installation."),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {},
+            shape = RoundedCornerShape(28.dp),
+        )
+    }
+
+    installError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { installError = null },
+            title = { Text(tr(lang, "安装未完成", "Installation incomplete")) },
+            text = {
+                Text(
+                    error,
+                    modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { showLog = true }) { Text(tr(lang, "查看日志", "View log")) }
+            },
+            confirmButton = {
+                Button(onClick = { installError = null }) { Text(tr(lang, "关闭", "Close")) }
+            },
+            shape = RoundedCornerShape(28.dp),
+        )
+    }
+
+    if (showLog) {
+        val log = DevelopmentToolInstaller.logFile()
+        val logText = remember(log.lastModified(), log.length()) {
+            runCatching { log.readText(Charsets.UTF_8).takeLast(12_000) }
+                .getOrElse { it.message.orEmpty() }
+        }
+        AlertDialog(
+            onDismissRequest = { showLog = false },
+            title = { Text(tr(lang, "安装日志", "Installation log")) },
+            text = {
+                Text(
+                    logText.ifBlank { tr(lang, "暂无日志", "No log yet") },
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = { Button(onClick = { showLog = false }) { Text(tr(lang, "完成", "Done")) } },
+            shape = RoundedCornerShape(28.dp),
+        )
+    }
+}
+
+@Composable
+private fun DevelopmentEnvironmentStatusCard(
+    lang: String,
+    bootstrapInstalled: Boolean,
+    installedCount: Int,
+    selectedCount: Int,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .3f)),
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(Modifier.size(52.dp), shape = RoundedCornerShape(17.dp), color = MaterialTheme.colorScheme.primary) {
+                    Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Code, null, Modifier.size(25.dp), tint = MaterialTheme.colorScheme.onPrimary) }
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (bootstrapInstalled) tr(lang, "Termux 基础环境已就绪", "Termux base environment ready")
+                        else tr(lang, "等待安装基础环境", "Base environment not installed"),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        tr(lang, "已识别 $installedCount 项 · 已选择 $selectedCount 项", "$installedCount detected · $selectedCount selected"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .78f),
+                    )
+                }
+            }
+            Text(
+                if (bootstrapInstalled) tr(lang, "已安装状态通过真实命令检测，不依赖旧环境标记。", "Installed state is detected from real commands rather than the legacy marker.")
+                else tr(lang, "开始安装时会先解压应用内置的 Termux bootstrap。", "The bundled Termux bootstrap will be extracted before installation starts."),
+                modifier = Modifier.padding(top = 14.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .82f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DevelopmentToolRow(
+    lang: String,
+    tool: DevelopmentTool,
+    selected: Boolean,
+    installed: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .58f) else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(
+            1.dp,
+            if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .48f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .42f),
+        ),
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(developmentToolTitle(lang, tool), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    if (installed) {
+                        Spacer(Modifier.width(8.dp))
+                        Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
+                            Text(tr(lang, "已安装", "Installed"), Modifier.padding(horizontal = 8.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                Text(
+                    developmentToolDescription(lang, tool),
+                    Modifier.padding(top = 3.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    developmentToolSizeHint(lang, tool),
+                    Modifier.padding(top = 5.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+private fun developmentToolTitle(lang: String, tool: DevelopmentTool): String = if (lang == "zh") tool.titleZh else tool.titleEn
+private fun developmentToolDescription(lang: String, tool: DevelopmentTool): String = if (lang == "zh") tool.descriptionZh else tool.descriptionEn
+private fun developmentToolSizeHint(lang: String, tool: DevelopmentTool): String = if (lang == "zh") tool.sizeHintZh else tool.sizeHintEn
+private fun developmentToolCategoryLabel(lang: String, category: DevelopmentToolCategory): String = when (category) {
+    DevelopmentToolCategory.RUNTIME -> tr(lang, "基础与运行组件", "Runtime essentials")
+    DevelopmentToolCategory.LANGUAGE -> tr(lang, "编程语言", "Programming languages")
+    DevelopmentToolCategory.BUILD -> tr(lang, "编译与构建", "Build toolchains")
+    DevelopmentToolCategory.TERMINAL -> tr(lang, "终端与远程", "Terminal & remote access")
+    DevelopmentToolCategory.DATA -> tr(lang, "数据工具", "Data tools")
+    DevelopmentToolCategory.MEDIA -> tr(lang, "媒体工具", "Media tools")
 }
 
 private data class OverlayGestureSetting(
@@ -732,7 +1156,7 @@ private fun ThemeOverviewCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
     ) {
         Box(Modifier.fillMaxWidth().height(190.dp)) {
-            FcodeChatBackdrop(Modifier.fillMaxSize(), background)
+            FcodeChatBackdrop(Modifier.fillMaxSize(), background, customImageMaxDimension = 720)
             Column(Modifier.fillMaxSize().padding(20.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
@@ -859,17 +1283,109 @@ private fun MarkdownThemePreview(lang: String) {
 private fun ChatBackgroundSettingsPage(
     lang: String,
     selectedValue: String,
+    imagePath: String,
+    imageDim: Float,
     onBack: () -> Unit,
     onSelected: (String) -> Unit,
+    onImageChanged: (String) -> Unit,
+    onDimChanged: (Float) -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     val selected = FcodeChatBackgroundStyle.from(selectedValue)
+    val imageInfo = remember(imagePath) { ChatBackgroundImageStore.readInfo(imagePath) }
+    var importing by remember { mutableStateOf(false) }
+    var importError by remember { mutableStateOf<String?>(null) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        importing = true
+        scope.launch {
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ChatBackgroundImageStore.importImage(context, uri, imagePath)
+            }
+            result.onSuccess { imported ->
+                onImageChanged(imported.path)
+                onSelected(FcodeChatBackgroundStyle.CUSTOM.value)
+                Toast.makeText(context, tr(lang, "自定义聊天背景已应用", "Custom chat background applied"), Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                importError = error.message ?: tr(lang, "无法导入所选图片", "Unable to import the selected image")
+            }
+            importing = false
+        }
+    }
+
     SettingsScaffold(
         tr(lang, "聊天背景", "Chat background"),
-        tr(lang, "预览并选择聊天内容区域的背景", "Preview and choose the chat canvas background"),
+        tr(lang, "选择内置样式或导入自己的图片", "Choose a built-in style or import your own image"),
         onBack,
     ) { pad ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
             item { ChatBackgroundPreview(lang, selected) }
+            item { SettingsSection(tr(lang, "自定义图片", "Custom image")) }
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+                ) {
+                    Column(Modifier.padding(17.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(Modifier.size(44.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                                Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Folder01, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+                            }
+                            Spacer(Modifier.width(13.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    if (imageInfo == null) tr(lang, "尚未选择图片", "No image selected") else tr(lang, "自定义图片已保存", "Custom image saved"),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    if (imageInfo == null) tr(lang, "支持系统可识别的 PNG、JPEG、WebP 等图片", "Supports PNG, JPEG, WebP and other system image formats")
+                                    else "${imageInfo.width} × ${imageInfo.height} · ${formatBackgroundImageSize(imageInfo.bytes)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth().padding(top = 15.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { imagePicker.launch("image/*") },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(15.dp),
+                                enabled = !importing,
+                            ) { Text(if (imageInfo == null) tr(lang, "选择图片", "Choose image") else tr(lang, "更换图片", "Replace image")) }
+                            if (imageInfo != null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch(kotlinx.coroutines.Dispatchers.IO) { ChatBackgroundImageStore.remove(context, imagePath) }
+                                        onImageChanged("")
+                                        if (selected == FcodeChatBackgroundStyle.CUSTOM) onSelected(FcodeChatBackgroundStyle.THEME.value)
+                                    },
+                                    shape = RoundedCornerShape(15.dp),
+                                ) { Text(tr(lang, "移除", "Remove")) }
+                            }
+                        }
+                        if (imageInfo != null) {
+                            HorizontalDivider(Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(tr(lang, "图片遮罩", "Image overlay"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                    Text(tr(lang, "降低图片干扰，让消息和文字保持清晰", "Reduce image distraction so messages and text stay readable"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Text("${(imageDim * 100).toInt()}%", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = imageDim.coerceIn(0f, .72f),
+                                onValueChange = onDimChanged,
+                                valueRange = 0f..0.72f,
+                                steps = 11,
+                            )
+                        }
+                    }
+                }
+            }
             item { SettingsSection(tr(lang, "背景样式", "Background style")) }
             item {
                 Column(
@@ -884,7 +1400,10 @@ private fun ChatBackgroundSettingsPage(
                                     lang = lang,
                                     style = style,
                                     selected = style == selected,
-                                    onClick = { onSelected(style.value) },
+                                    onClick = {
+                                        if (style == FcodeChatBackgroundStyle.CUSTOM && imageInfo == null) imagePicker.launch("image/*")
+                                        else onSelected(style.value)
+                                    },
                                 )
                             }
                             if (row.size == 1) Spacer(Modifier.weight(1f))
@@ -896,7 +1415,7 @@ private fun ChatBackgroundSettingsPage(
             item { FutureMotionPreviewCard(lang) }
             item {
                 Text(
-                    tr(lang, "背景只应用于原生聊天内容区域，不会降低终端文字或 WebUI 的可读性。", "The background only applies to the native chat canvas and will not reduce terminal or WebUI readability."),
+                    tr(lang, "图片会复制到应用私有目录，不依赖相册 URI 的长期访问权限。背景只应用于原生聊天内容区域。", "The image is copied into private app storage and does not depend on long-term gallery URI access. It only applies to the native chat canvas."),
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -905,6 +1424,33 @@ private fun ChatBackgroundSettingsPage(
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
+
+    if (importing) {
+        AlertDialog(
+            onDismissRequest = {},
+            icon = { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) },
+            title = { Text(tr(lang, "正在导入图片", "Importing image")) },
+            text = { Text(tr(lang, "正在验证并复制到应用私有目录…", "Validating and copying into private app storage…")) },
+            confirmButton = {},
+            shape = RoundedCornerShape(28.dp),
+        )
+    }
+
+    importError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { importError = null },
+            title = { Text(tr(lang, "无法使用这张图片", "Unable to use this image")) },
+            text = { Text(error) },
+            confirmButton = { Button(onClick = { importError = null }) { Text(tr(lang, "关闭", "Close")) } },
+            shape = RoundedCornerShape(28.dp),
+        )
+    }
+}
+
+private fun formatBackgroundImageSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 @Composable
@@ -916,7 +1462,7 @@ private fun ChatBackgroundPreview(lang: String, style: FcodeChatBackgroundStyle)
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f)),
     ) {
         Box(Modifier.fillMaxWidth().height(270.dp)) {
-            FcodeChatBackdrop(Modifier.fillMaxSize(), style)
+            FcodeChatBackdrop(Modifier.fillMaxSize(), style, customImageMaxDimension = 1280)
             Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(Modifier.size(34.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
@@ -969,7 +1515,7 @@ private fun BackgroundChoiceCard(
     ) {
         Column {
             Box(Modifier.fillMaxWidth().height(88.dp)) {
-                FcodeChatBackdrop(Modifier.fillMaxSize(), style)
+                FcodeChatBackdrop(Modifier.fillMaxSize(), style, customImageMaxDimension = 512)
                 Surface(
                     modifier = Modifier.align(Alignment.Center).width(64.dp).height(24.dp),
                     shape = RoundedCornerShape(10.dp),
@@ -1020,6 +1566,7 @@ private fun backgroundLabel(lang: String, style: FcodeChatBackgroundStyle): Stri
     FcodeChatBackgroundStyle.AURORA -> tr(lang, "极光", "Aurora")
     FcodeChatBackgroundStyle.MIST -> tr(lang, "薄雾", "Mist")
     FcodeChatBackgroundStyle.GRID -> tr(lang, "坐标网格", "Grid")
+    FcodeChatBackgroundStyle.CUSTOM -> tr(lang, "自定义图片", "Custom image")
 }
 
 private fun appearanceLabel(lang: String, paletteValue: String, colorMode: String): String =
@@ -1106,6 +1653,7 @@ private fun SettingsRootPage(
     codexCliInstalled: Boolean,
     onProxy: () -> Unit,
     onOverlay: () -> Unit,
+    onDevelopmentTools: () -> Unit,
     onTheme: () -> Unit,
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
@@ -1164,6 +1712,17 @@ private fun SettingsRootPage(
             item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "思考过程", "Reasoning"), tr(lang, "在回答中显示模型的推理摘要", "Show model reasoning summaries"), reasoning, onReasoning) }
             item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "自动跟随回答", "Auto-follow output"), tr(lang, "生成时保持滚动到最新内容", "Keep the latest output visible"), follow, onFollow) }
             item { SettingsSection(tr(lang, "系统", "System")) }
+            item {
+                val installedTools = DevelopmentToolInstaller.installedIds().size
+                NavigationSettingsRow(
+                    HugeIcons.Code,
+                    tr(lang, "开发工具与环境", "Development tools & environment"),
+                    if (DevelopmentToolInstaller.isBootstrapInstalled())
+                        tr(lang, "已安装 $installedTools 项 · 可选择语言、构建与终端工具", "$installedTools installed · choose languages, build and terminal tools")
+                    else tr(lang, "基础环境未安装 · 可按需或一键安装完整环境", "Base environment missing · install selected tools or the full environment"),
+                    onDevelopmentTools,
+                )
+            }
             item {
                 val overlayGranted = canDrawOverlays(context)
                 val overlayEnabled = prefs.getBoolean("overlay_enabled", false) && overlayGranted

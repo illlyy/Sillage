@@ -29,6 +29,21 @@ object NativeUiRenderSafety {
     @JvmStatic
     fun splitPlainText(source: String): List<String> = splitText(source, preferParagraphs = false)
 
+    /** Fast path for ordinary prose: avoid constructing Markwon/AndroidView when no syntax can
+     * affect presentation. Conservative false positives preserve rendering correctness. */
+    @JvmStatic
+    fun requiresRichMarkdown(source: String): Boolean {
+        if (source.any { it == '*' || it == '_' || it == '`' || it == '[' || it == ']' ||
+                it == '#' || it == '>' || it == '|' || it == '~' }) return true
+        return source.lineSequence().any { line ->
+            val trimmed = line.trimStart()
+            trimmed.startsWith("- ") || trimmed.startsWith("+ ") ||
+                trimmed.takeWhile { it.isDigit() }.let { digits ->
+                    digits.isNotEmpty() && trimmed.drop(digits.length).startsWith(". ")
+                }
+        }
+    }
+
     /** Terminal protocol events must bypass the tiny-delta debounce or a delayed flush can
      * reactivate ANSWERING after the turn was already marked complete. */
     @JvmStatic
@@ -45,9 +60,9 @@ object NativeUiRenderSafety {
         val total = (currentChars.toLong() + pendingChars.toLong()).coerceAtLeast(0L)
         return when {
             total < 8_000L -> baseDelayMs
-            total < 32_000L -> maxOf(baseDelayMs, 96L)
-            total < 96_000L -> maxOf(baseDelayMs, 140L)
-            else -> maxOf(baseDelayMs, 180L)
+            total < 32_000L -> maxOf(baseDelayMs, 120L)
+            total < 96_000L -> maxOf(baseDelayMs, 168L)
+            else -> maxOf(baseDelayMs, 220L)
         }
     }
 

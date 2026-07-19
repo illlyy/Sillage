@@ -22,6 +22,25 @@ data class NativeStreamingMarkdownSnapshot(
  * later deltas. A small completed prefix remains in the tail to avoid creating one TextView per
  * sentence; normal blocks settle around 1.2k characters.
  */
+
+object NativeStreamingMarkdownWindow {
+    /** Selects a bounded suffix for the live viewport; completed rendering still uses all blocks. */
+    @JvmStatic
+    fun firstVisibleBlock(
+        blocks: List<NativeStreamingMarkdownBlock>,
+        tailChars: Int,
+        budgetChars: Int = 6_000,
+    ): Int {
+        var budget = (budgetChars - tailChars).coerceAtLeast(0)
+        var index = blocks.size
+        while (index > 0 && (budget > 0 || index == blocks.size)) {
+            index--
+            budget -= blocks[index].text.length
+        }
+        return index
+    }
+}
+
 class NativeStreamingMarkdownAccumulator {
     private data class Boundary(val offset: Int, val priority: Boolean)
 

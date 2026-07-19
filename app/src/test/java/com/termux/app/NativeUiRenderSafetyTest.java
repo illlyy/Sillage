@@ -71,10 +71,10 @@ public class NativeUiRenderSafetyTest {
     @Test
     public void streamFlushSlowsProgressivelyWithoutMakingShortAnswersLaggy() {
         assertEquals(56L, NativeUiRenderSafety.streamFlushDelayMs(200, 10, 56L));
-        assertEquals(96L, NativeUiRenderSafety.streamFlushDelayMs(8_000, 10, 56L));
-        assertEquals(140L, NativeUiRenderSafety.streamFlushDelayMs(32_000, 10, 56L));
-        assertEquals(180L, NativeUiRenderSafety.streamFlushDelayMs(96_000, 10, 56L));
-        assertEquals(180L, NativeUiRenderSafety.streamFlushDelayMs(Integer.MAX_VALUE, Integer.MAX_VALUE, 56L));
+        assertEquals(120L, NativeUiRenderSafety.streamFlushDelayMs(8_000, 10, 56L));
+        assertEquals(168L, NativeUiRenderSafety.streamFlushDelayMs(32_000, 10, 56L));
+        assertEquals(220L, NativeUiRenderSafety.streamFlushDelayMs(96_000, 10, 56L));
+        assertEquals(220L, NativeUiRenderSafety.streamFlushDelayMs(Integer.MAX_VALUE, Integer.MAX_VALUE, 56L));
         assertEquals(120L, NativeUiRenderSafety.streamFlushDelayMs(9_000, 10, 120L));
     }
 
@@ -83,4 +83,14 @@ public class NativeUiRenderSafetyTest {
         org.junit.Assert.assertTrue(NativeUiRenderSafety.shouldDeferStreamFlush(4, false, 20L, false));
         org.junit.Assert.assertFalse(NativeUiRenderSafety.shouldDeferStreamFlush(4, false, 20L, true));
     }
+
+    @org.junit.Test
+    public void plainProseSkipsRichMarkdownRenderer() {
+        org.junit.Assert.assertFalse(NativeUiRenderSafety.requiresRichMarkdown("?????\nSecond paragraph."));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("## Heading"));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("- item"));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("**bold**"));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("[link](https://example.com)"));
+    }
+
 }

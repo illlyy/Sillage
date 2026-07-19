@@ -1,23 +1,35 @@
-﻿package com.termux.app
+package com.termux.app
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 internal object FcodeAppearancePreferences {
     const val COLOR_MODE = "native_theme_mode_v1"
     const val COLOR_PALETTE = "native_color_palette_v1"
     const val CHAT_BACKGROUND = "native_chat_background_v1"
+    const val CHAT_BACKGROUND_IMAGE = "native_chat_background_image_v1"
+    const val CHAT_BACKGROUND_DIM = "native_chat_background_dim_v1"
 
     fun normalizeColorMode(value: String?): String = value?.takeIf { it in setOf("system", "light", "dark") } ?: "system"
 }
@@ -37,7 +49,8 @@ internal enum class FcodeChatBackgroundStyle(val value: String) {
     THEME("theme"),
     AURORA("aurora"),
     MIST("mist"),
-    GRID("grid");
+    GRID("grid"),
+    CUSTOM("custom");
 
     companion object {
         fun from(value: String?): FcodeChatBackgroundStyle = entries.firstOrNull { it.value == value } ?: THEME
@@ -66,6 +79,8 @@ internal data class FcodeMarkdownColors(
 
 internal val LocalFcodeColorPalette = staticCompositionLocalOf { FcodeColorPalette.ROSE }
 internal val LocalFcodeChatBackground = staticCompositionLocalOf { FcodeChatBackgroundStyle.THEME }
+internal val LocalFcodeChatBackgroundImage = staticCompositionLocalOf { "" }
+internal val LocalFcodeChatBackgroundDim = staticCompositionLocalOf { 0.32f }
 internal val LocalFcodeMarkdownColors = staticCompositionLocalOf {
     fcodeMarkdownColors(FcodeColorPalette.ROSE, dark = false, scheme = fcodeColorScheme(FcodeColorPalette.ROSE, false))
 }
@@ -244,71 +259,104 @@ internal fun fcodeMarkdownColors(
 internal fun FcodeChatBackdrop(
     modifier: Modifier = Modifier,
     style: FcodeChatBackgroundStyle = LocalFcodeChatBackground.current,
+    customImagePath: String = LocalFcodeChatBackgroundImage.current,
+    customImageDim: Float = LocalFcodeChatBackgroundDim.current,
+    customImageMaxDimension: Int = 2048,
 ) {
     val colors = androidx.compose.material3.MaterialTheme.colorScheme
-    Canvas(modifier = modifier) {
-        val longest = maxOf(size.width, size.height)
-        when (style) {
-            FcodeChatBackgroundStyle.THEME -> {
-                drawRect(
-                    Brush.verticalGradient(
-                        listOf(colors.primaryContainer.copy(alpha = 0.20f), Color.Transparent, Color.Transparent),
-                    ),
-                )
-            }
-            FcodeChatBackgroundStyle.AURORA -> {
-                drawRect(
-                    Brush.radialGradient(
-                        colors = listOf(colors.primary.copy(alpha = 0.18f), Color.Transparent),
-                        center = Offset(size.width * 0.12f, size.height * 0.16f),
-                        radius = longest * 0.72f,
-                    ),
-                )
-                drawRect(
-                    Brush.radialGradient(
-                        colors = listOf(colors.tertiary.copy(alpha = 0.14f), Color.Transparent),
-                        center = Offset(size.width * 0.92f, size.height * 0.70f),
-                        radius = longest * 0.66f,
-                    ),
-                )
-            }
-            FcodeChatBackgroundStyle.MIST -> {
-                drawRect(
-                    Brush.linearGradient(
-                        colors = listOf(
-                            colors.secondaryContainer.copy(alpha = 0.34f),
-                            Color.Transparent,
-                            colors.primaryContainer.copy(alpha = 0.24f),
-                        ),
-                        start = Offset.Zero,
-                        end = Offset(size.width, size.height),
-                    ),
-                )
-                drawRect(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, colors.tertiaryContainer.copy(alpha = 0.13f)),
-                    ),
-                )
-            }
-            FcodeChatBackgroundStyle.GRID -> {
-                drawRect(
-                    Brush.verticalGradient(
-                        listOf(colors.primaryContainer.copy(alpha = 0.12f), Color.Transparent),
-                    ),
-                )
-                val step = 28.dp.toPx()
-                val line = colors.outlineVariant.copy(alpha = 0.20f)
-                var x = 0f
-                while (x <= size.width) {
-                    drawLine(line, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
-                    x += step
+    val customBitmapState = produceState<android.graphics.Bitmap?>(
+        initialValue = null,
+        key1 = if (style == FcodeChatBackgroundStyle.CUSTOM) "$customImagePath:$customImageMaxDimension" else "",
+    ) {
+        value = if (style == FcodeChatBackgroundStyle.CUSTOM && customImagePath.isNotBlank()) {
+            withContext(Dispatchers.IO) { ChatBackgroundImageStore.decodeForDisplay(customImagePath, customImageMaxDimension.coerceIn(256, 4096)) }
+        } else null
+    }
+    val customBitmap = customBitmapState.value
+    DisposableEffect(customBitmap) {
+        onDispose { customBitmap?.recycle() }
+    }
+    Box(modifier = modifier) {
+        if (style == FcodeChatBackgroundStyle.CUSTOM && customBitmap != null) {
+            Image(
+                bitmap = customBitmap.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val longest = maxOf(size.width, size.height)
+                when (style) {
+                    FcodeChatBackgroundStyle.THEME, FcodeChatBackgroundStyle.CUSTOM -> {
+                        drawRect(
+                            Brush.verticalGradient(
+                                listOf(colors.primaryContainer.copy(alpha = 0.20f), Color.Transparent, Color.Transparent),
+                            ),
+                        )
+                    }
+                    FcodeChatBackgroundStyle.AURORA -> {
+                        drawRect(
+                            Brush.radialGradient(
+                                colors = listOf(colors.primary.copy(alpha = 0.18f), Color.Transparent),
+                                center = Offset(size.width * 0.12f, size.height * 0.16f),
+                                radius = longest * 0.72f,
+                            ),
+                        )
+                        drawRect(
+                            Brush.radialGradient(
+                                colors = listOf(colors.tertiary.copy(alpha = 0.14f), Color.Transparent),
+                                center = Offset(size.width * 0.92f, size.height * 0.70f),
+                                radius = longest * 0.66f,
+                            ),
+                        )
+                    }
+                    FcodeChatBackgroundStyle.MIST -> {
+                        drawRect(
+                            Brush.linearGradient(
+                                colors = listOf(
+                                    colors.secondaryContainer.copy(alpha = 0.34f),
+                                    Color.Transparent,
+                                    colors.primaryContainer.copy(alpha = 0.24f),
+                                ),
+                                start = Offset.Zero,
+                                end = Offset(size.width, size.height),
+                            ),
+                        )
+                        drawRect(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, colors.tertiaryContainer.copy(alpha = 0.13f)),
+                            ),
+                        )
+                    }
+                    FcodeChatBackgroundStyle.GRID -> {
+                        drawRect(
+                            Brush.verticalGradient(
+                                listOf(colors.primaryContainer.copy(alpha = 0.12f), Color.Transparent),
+                            ),
+                        )
+                        val step = 28.dp.toPx()
+                        val line = colors.outlineVariant.copy(alpha = 0.20f)
+                        var x = 0f
+                        while (x <= size.width) {
+                            drawLine(line, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
+                            x += step
+                        }
+                        var y = 0f
+                        while (y <= size.height) {
+                            drawLine(line, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+                            y += step
+                        }
+                    }
                 }
-                var y = 0f
-                while (y <= size.height) {
-                    drawLine(line, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
-                    y += step
-                }
             }
+        }
+        if (style == FcodeChatBackgroundStyle.CUSTOM && customBitmap != null && customImageDim > 0f) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(colors.background.copy(alpha = customImageDim.coerceIn(0f, 0.72f))),
+            )
         }
     }
 }

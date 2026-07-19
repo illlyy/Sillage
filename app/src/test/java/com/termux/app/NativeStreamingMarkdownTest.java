@@ -133,6 +133,19 @@ public class NativeStreamingMarkdownTest {
     }
 
     @Test
+    public void liveWindowKeepsOnlyABoundedStableSuffix() {
+        java.util.ArrayList<NativeStreamingMarkdownBlock> blocks = new java.util.ArrayList<>();
+        for (int index = 0; index < 10; index++) {
+            int start = index * 1000;
+            blocks.add(new NativeStreamingMarkdownBlock(start, start + 1000, "x".repeat(1000)));
+        }
+        int first = NativeStreamingMarkdownWindow.firstVisibleBlock(blocks, 1500, 6000);
+        assertEquals(5, first);
+        assertEquals(9, NativeStreamingMarkdownWindow.firstVisibleBlock(blocks, 9000, 6000));
+        assertEquals(0, NativeStreamingMarkdownWindow.firstVisibleBlock(java.util.Collections.emptyList(), 0, 6000));
+    }
+
+    @Test
     public void handlesHundredsOfAppendOnlyUpdatesWithoutChangingFrozenPrefix() {
         NativeStreamingMarkdownAccumulator accumulator = new NativeStreamingMarkdownAccumulator();
         StringBuilder source = new StringBuilder();
