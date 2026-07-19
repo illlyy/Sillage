@@ -42,6 +42,8 @@ final class CodexAppServerBridge {
     /** Turns whose native UI was already closed by thread/status/changed=idle. */
     private final Set<String> uiCompletedTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
+    private final Map<Integer, String> pendingGoalGetRequests = new ConcurrentHashMap<>();
+    private final Set<String> autoClearingCompletedGoalThreads = ConcurrentHashMap.newKeySet();
     private long lastAgentDeltaAt;
     private int agentDeltaCount;
     private int agentDeltaChars;
@@ -553,11 +555,23 @@ final class CodexAppServerBridge {
     void setThreadGoal(String objective) {
         if (threadId == null || objective == null || objective.trim().isEmpty()) return;
         try {
+            autoClearingCompletedGoalThreads.remove(threadId);
             sendRequest("thread/goal/set", new JSONObject()
                 .put("threadId", threadId)
                 .put("objective", objective.trim())
                 .put("status", "active"));
         } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
+    void getThreadGoal() {
+        String currentThread = threadId;
+        if (currentThread == null || currentThread.trim().isEmpty()) return;
+        try {
+            int requestId = sendRequest("thread/goal/get", new JSONObject().put("threadId", currentThread));
+            pendingGoalGetRequests.put(requestId, currentThread);
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to synchronize native thread goal", error);
+        }
     }
 
     void compactThread() {
@@ -586,6 +600,32 @@ final class CodexAppServerBridge {
         try {
             sendRequest("thread/goal/clear", new JSONObject().put("threadId", threadId));
         } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+    }
+
+    private void publishNativeGoalState(String goalThread, JSONObject goal) throws Exception {
+        if (desktopBridge != null || goalThread == null || goalThread.isEmpty()) return;
+        JSONObject payload = new JSONObject().put("threadId", goalThread);
+        if (goal == null) {
+            autoClearingCompletedGoalThreads.remove(goalThread);
+            if (goalThread.equals(visibleThreadId)) emit("onGoalCleared", payload.toString());
+            return;
+        }
+        payload.put("goal", goal);
+        if (goalThread.equals(visibleThreadId)) emit("onGoalUpdated", payload.toString());
+        if (!isCompletedGoal(goal)) {
+            autoClearingCompletedGoalThreads.remove(goalThread);
+        } else if (autoClearingCompletedGoalThreads.add(goalThread)) {
+            try {
+                sendRequest("thread/goal/clear", new JSONObject().put("threadId", goalThread));
+            } catch (Exception error) {
+                autoClearingCompletedGoalThreads.remove(goalThread);
+                Log.w(TAG, "Unable to clear completed thread goal for " + shortId(goalThread), error);
+            }
+        }
+    }
+
+    static boolean isCompletedGoal(JSONObject goal) {
+        return goal != null && "complete".equals(goal.optString("status", ""));
     }
 
     @JavascriptInterface public void interruptCurrentTurn() {
@@ -847,12 +887,26 @@ final class CodexAppServerBridge {
         if (mcpStatusRequestId >= 0 && message.optInt("id", -1) == mcpStatusRequestId) {
             mcpStatusRequestId = -1;
             String summary = mcpStatusSummary(message);
+            if (activity != null) NativeMcpRuntimeStatusStore.record(activity, message.toString());
             Log.i(TAG, "MCP_STATUS " + summary);
             emit("onMcpStatus", summary);
             return;
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
         if (message.has("error")) {
+            String goalThread = pendingGoalGetRequests.remove(message.optInt("id", -1));
+            if (goalThread != null) {
+                Log.w(TAG, "Unable to read thread goal for " + shortId(goalThread) + ": "
+                    + message.optJSONObject("error").optString("message", "unknown error"));
+                return;
+            }
+            if (isMcpAvailabilityError(message)) {
+                String detail = message.optJSONObject("error").optString("message", "MCP server unavailable");
+                if (activity != null) NativeMcpRuntimeStatusStore.recordFailure(activity, detail);
+                Log.w(TAG, "MCP unavailable; continuing native chat without the failed server: " + detail);
+                emit("onMcpStatus", "error=" + detail);
+                return;
+            }
             if (message.optInt("id", -1) == compactRequestId) {
                 compactRequestId = -1;
                 emit("onCompactStatus", "failed");
@@ -891,6 +945,12 @@ final class CodexAppServerBridge {
         }
         if (message.has("id") && message.has("result")) {
             int id = message.optInt("id", -1);
+            String goalThread = pendingGoalGetRequests.remove(id);
+            if (goalThread != null) {
+                JSONObject result = message.optJSONObject("result");
+                publishNativeGoalState(goalThread, result == null ? null : result.optJSONObject("goal"));
+                return;
+            }
             if (id == compactRequestId) {
                 compactRequestId = -1;
                 emit("onCompactStatus", "completed");
@@ -922,6 +982,18 @@ final class CodexAppServerBridge {
         JSONObject params = message.optJSONObject("params");
         boolean primaryEvent = isPrimaryEvent(params);
         logCollabAgentEvent(method, params);
+        if ("thread/goal/updated".equals(method) && params != null) {
+            publishNativeGoalState(params.optString("threadId", ""), params.optJSONObject("goal"));
+            return;
+        }
+        if ("thread/goal/cleared".equals(method) && params != null) {
+            String clearedThread = params.optString("threadId", "");
+            autoClearingCompletedGoalThreads.remove(clearedThread);
+            if (desktopBridge == null && isVisibleThreadEvent(params, visibleThreadId)) {
+                emit("onGoalCleared", new JSONObject().put("threadId", clearedThread).toString());
+            }
+            return;
+        }
         if (!primaryEvent && "item/completed".equals(method) && params != null) {
             JSONObject ignoredItem = params.optJSONObject("item");
             String ignoredThread = params.optString("threadId", "");
@@ -1080,6 +1152,17 @@ final class CodexAppServerBridge {
             }
         }
         return "servers=" + data.length() + " tools=" + toolCount + " names=" + String.join(",", names);
+    }
+
+    private static boolean isMcpAvailabilityError(JSONObject message) {
+        JSONObject error = message == null ? null : message.optJSONObject("error");
+        if (error == null) return false;
+        String value = (error.optString("message", "") + " " + error.optString("data", ""))
+            .toLowerCase(java.util.Locale.ROOT);
+        if (!value.contains("mcp")) return false;
+        return value.contains("connect") || value.contains("initializ") || value.contains("start")
+            || value.contains("unavailable") || value.contains("timed out") || value.contains("timeout")
+            || value.contains("closed") || value.contains("refused");
     }
 
     private static boolean isToolDetailItem(JSONObject params) {
@@ -1343,6 +1426,8 @@ final class CodexAppServerBridge {
         StringBuilder command = new StringBuilder();
         JSONArray tools = new JSONArray();
         java.util.Map<String, JSONObject> calls = new java.util.HashMap<>();
+        JSONObject pendingUserMessage = null;
+        boolean sawEventMessage = false;
         int lastProcessIndex = -1;
         long reasoningStartedAtMs = 0L;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(sessionFile), java.nio.charset.StandardCharsets.UTF_8))) {
@@ -1353,24 +1438,12 @@ final class CodexAppServerBridge {
                 JSONObject payload = record.optJSONObject("payload");
                 if (payload == null) continue;
                 long recordAtMs = parseRecordTimestampMs(record.optString("timestamp", ""));
-                if ("event_msg".equals(record.optString("type")) && "user_message".equals(payload.optString("type"))) {
-                    JSONArray localImages = payload.optJSONArray("local_images");
-                    if (localImages != null && localImages.length() > 0) {
-                        for (int messageIndex = messages.length() - 1; messageIndex >= 0; messageIndex--) {
-                            JSONObject userMessage = messages.optJSONObject(messageIndex);
-                            if (userMessage == null || !"user".equals(userMessage.optString("role"))) continue;
-                            JSONArray messageAttachments = userMessage.optJSONArray("attachments");
-                            if (messageAttachments == null) messageAttachments = new JSONArray();
-                            for (int imageIndex = 0; imageIndex < localImages.length(); imageIndex++) {
-                                String path = localImages.optString(imageIndex, "");
-                                if (!path.isEmpty()) messageAttachments.put(new JSONObject()
-                                    .put("name", new File(path).getName()).put("path", path).put("image", true));
-                            }
-                            userMessage.put("attachments", messageAttachments);
-                            messages.put(messageIndex, userMessage);
-                            break;
-                        }
-                    }
+                boolean eventMessageRecord = "event_msg".equals(record.optString("type"));
+                if (eventMessageRecord) sawEventMessage = true;
+                if (eventMessageRecord && "user_message".equals(payload.optString("type"))) {
+                    JSONObject confirmed = confirmedHistoryUserMessage(pendingUserMessage, payload);
+                    if (confirmed != null) messages.put(confirmed);
+                    pendingUserMessage = null;
                     continue;
                 }
                 if ("event_msg".equals(record.optString("type")) && "plan_update".equals(payload.optString("type"))) {
@@ -1469,8 +1542,22 @@ final class CodexAppServerBridge {
                     text.append(partText);
                 }
                 String value = text.toString().trim();
-                if ("user".equals(role) && isInjectedContextMessage(value)) continue;
+                if ("user".equals(role)) {
+                    if (pendingUserMessage != null && !sawEventMessage
+                            && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
+                        messages.put(pendingUserMessage);
+                    }
+                    pendingUserMessage = historyUserMessage(value, referencedSkills, referencedAttachments);
+                    continue;
+                }
                 if ("assistant".equals(role)) {
+                    if (pendingUserMessage != null) {
+                        if (!sawEventMessage
+                                && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
+                            messages.put(pendingUserMessage);
+                        }
+                        pendingUserMessage = null;
+                    }
                     boolean hasProcess = reasoning.length() > 0 || command.length() > 0 || tools.length() > 0;
                     if (hasProcess) {
                         long reasoningDuration = historyReasoningDurationSeconds(
@@ -1489,14 +1576,13 @@ final class CodexAppServerBridge {
                 if (!value.isEmpty()) {
                     if ("assistant".equals(role)) {
                         appendHistoricalAssistantContent(messages, value);
-                    } else {
-                        JSONObject historyMessage = new JSONObject().put("role", role).put("content", value);
-                        if (referencedSkills.length() > 0) historyMessage.put("skills", referencedSkills);
-                        if (referencedAttachments.length() > 0) historyMessage.put("attachments", referencedAttachments);
-                        messages.put(historyMessage);
                     }
                 }
             }
+        }
+        if (pendingUserMessage != null && !sawEventMessage
+                && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
+            messages.put(pendingUserMessage);
         }
         return messages;
     }
@@ -1616,10 +1702,43 @@ final class CodexAppServerBridge {
             .put("arguments", args).put("output", output).put("status", "completed");
     }
 
-    private static boolean isInjectedContextMessage(String value) {
+    private static JSONObject historyUserMessage(String value, JSONArray skills, JSONArray attachments) throws Exception {
+        String text = value == null ? "" : value.trim();
+        JSONObject message = new JSONObject().put("role", "user").put("content", text);
+        if (skills != null && skills.length() > 0) message.put("skills", skills);
+        if (attachments != null && attachments.length() > 0) message.put("attachments", attachments);
+        return message;
+    }
+
+    /** event_msg/user_message is the app-server's authoritative transcript entry. Raw
+     * response_item user messages also contain injected environment/goal context, so use
+     * them only as a source of attachment and skill metadata. */
+    static JSONObject confirmedHistoryUserMessage(JSONObject pending, JSONObject eventPayload) throws Exception {
+        String fallback = pending == null ? "" : pending.optString("content", "");
+        String text = eventPayload == null ? fallback
+            : eventPayload.optString("message", eventPayload.optString("text", fallback)).trim();
+        JSONObject message = pending == null
+            ? new JSONObject().put("role", "user")
+            : new JSONObject(pending.toString());
+        message.put("content", text);
+        JSONArray attachments = message.optJSONArray("attachments");
+        if (attachments == null) attachments = new JSONArray();
+        JSONArray localImages = eventPayload == null ? null : eventPayload.optJSONArray("local_images");
+        if (localImages != null) for (int index = 0; index < localImages.length(); index++) {
+            String path = localImages.optString(index, "");
+            if (!path.isEmpty()) attachments.put(new JSONObject()
+                .put("name", new File(path).getName()).put("path", path).put("image", true));
+        }
+        if (attachments.length() > 0) message.put("attachments", attachments);
+        boolean hasSkills = message.optJSONArray("skills") != null && message.optJSONArray("skills").length() > 0;
+        return text.isEmpty() && attachments.length() == 0 && !hasSkills ? null : message;
+    }
+
+    static boolean isInjectedContextMessage(String value) {
         if (value == null) return true;
         String text = value.trim();
-        return text.startsWith("<environment_context>")
+        if (text.isEmpty()) return true;
+        if (text.startsWith("<environment_context>")
             || text.startsWith("<permissions instructions>")
             || text.startsWith("<app-context>")
             || text.startsWith("<collaboration_mode>")
@@ -1629,7 +1748,20 @@ final class CodexAppServerBridge {
             || text.startsWith("<thread_goal>")
             || text.startsWith("<task_goal>")
             || text.startsWith("<goal_context>")
-            || (text.startsWith("<cwd>") && text.contains("<filesystem>"));
+            || (text.startsWith("<cwd>") && text.contains("<filesystem>"))) return true;
+
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        String[] internalMarkers = new String[] {
+            "<environment_context>", "<permissions instructions>", "<app-context>",
+            "<collaboration_mode>", "<skills_instructions>", "<plugins_instructions>",
+            "<goal>", "<thread_goal>", "<task_goal>", "<goal_context>"
+        };
+        int markerCount = 0;
+        for (String marker : internalMarkers) if (lower.contains(marker)) markerCount++;
+        if (markerCount >= 2 || (markerCount >= 1 && text.length() >= 1_500)) return true;
+        return lower.startsWith("you are codex")
+            && (lower.contains("filesystem sandboxing") || lower.contains("available skills")
+                || lower.contains("developer instructions") || lower.contains("collaboration mode"));
     }
 
     static String readTurnRuntimeDiagnostic(File sessionFile, String turnId) throws Exception {
@@ -1992,6 +2124,8 @@ final class CodexAppServerBridge {
         syntheticCompletedTurns.clear();
         uiCompletedTurns.clear();
         streamedAgentItemIds.clear();
+        pendingGoalGetRequests.clear();
+        autoClearingCompletedGoalThreads.clear();
         try { if (writer != null) writer.close(); } catch (Exception ignored) {}
         writer = null;
         if (process != null) process.destroy();

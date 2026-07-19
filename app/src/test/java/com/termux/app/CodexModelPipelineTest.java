@@ -1035,5 +1035,87 @@ public class CodexModelPipelineTest {
         assertTrue(CodexAppServerBridge.isVisibleThreadEvent(new JSONObject(), "thread-a"));
     }
 
+    @Test
+    public void completedGoalIsRecognizedForAutomaticClear() throws Exception {
+        assertTrue(CodexAppServerBridge.isCompletedGoal(new JSONObject().put("status", "complete")));
+        assertFalse(CodexAppServerBridge.isCompletedGoal(new JSONObject().put("status", "active")));
+        assertFalse(CodexAppServerBridge.isCompletedGoal(null));
+    }
+
+    @Test
+    public void nativeHistoryUsesAuthoritativeUserEventsAndDropsGoalContinuationPrompt() throws Exception {
+        File session = File.createTempFile("native-goal-history", ".jsonl");
+        try {
+            try (FileWriter writer = new FileWriter(session)) {
+                writeRollout(writer, new JSONObject().put("type", "event_msg")
+                    .put("payload", new JSONObject().put("type", "task_started")));
+                writeRollout(writer, responseMessage("user", "<environment_context>hidden</environment_context>"));
+                JSONObject actualUser = responseMessage("user", "inspect this project");
+                actualUser.getJSONObject("payload").getJSONArray("content").put(
+                    new JSONObject().put("type", "skill").put("name", "android").put("path", "/skills/android/SKILL.md"));
+                writeRollout(writer, actualUser);
+                writeRollout(writer, new JSONObject().put("type", "event_msg").put("payload", new JSONObject()
+                    .put("type", "user_message").put("message", "inspect this project")
+                    .put("local_images", new JSONArray().put("/tmp/screen.png"))));
+                writeRollout(writer, responseMessage("assistant", "first answer"));
+                writeRollout(writer, responseMessage("user", "Continue the active goal.\n"
+                    + "<permissions instructions>secret</permissions instructions>\n"
+                    + "<skills_instructions>very large internal prompt</skills_instructions>"));
+                writeRollout(writer, responseMessage("assistant", "goal complete"));
+            }
+
+            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+
+            assertEquals(3, history.length());
+            assertEquals("user", history.getJSONObject(0).getString("role"));
+            assertEquals("inspect this project", history.getJSONObject(0).getString("content"));
+            assertEquals("android", history.getJSONObject(0).getJSONArray("skills").getJSONObject(0).getString("name"));
+            assertEquals("/tmp/screen.png", history.getJSONObject(0).getJSONArray("attachments").getJSONObject(0).getString("path"));
+            assertEquals("first answer", history.getJSONObject(1).getString("content"));
+            assertEquals("goal complete", history.getJSONObject(2).getString("content"));
+        } finally {
+            assertTrue(session.delete() || !session.exists());
+        }
+    }
+
+    @Test
+    public void legacyHistoryWithoutUserEventsStillKeepsRealUserText() throws Exception {
+        File session = File.createTempFile("native-legacy-history", ".jsonl");
+        try {
+            try (FileWriter writer = new FileWriter(session)) {
+                writeRollout(writer, responseMessage("user", "legacy question"));
+                writeRollout(writer, responseMessage("assistant", "legacy answer"));
+            }
+            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            assertEquals(2, history.length());
+            assertEquals("legacy question", history.getJSONObject(0).getString("content"));
+            assertEquals("legacy answer", history.getJSONObject(1).getString("content"));
+        } finally {
+            assertTrue(session.delete() || !session.exists());
+        }
+    }
+
+    @Test
+    public void combinedInternalPromptIsDetectedEvenWhenTagIsNotFirst() {
+        String prompt = "Continue the goal automatically.\n"
+            + "<permissions instructions>secret</permissions instructions>\n"
+            + "<skills_instructions>skills</skills_instructions>";
+        assertTrue(CodexAppServerBridge.isInjectedContextMessage(prompt));
+        assertFalse(CodexAppServerBridge.isInjectedContextMessage("please explain goal mode"));
+    }
+
+    private static JSONObject responseMessage(String role, String text) throws Exception {
+        return new JSONObject().put("type", "response_item").put("payload", new JSONObject()
+            .put("type", "message").put("role", role)
+            .put("content", new JSONArray().put(new JSONObject()
+                .put("type", "assistant".equals(role) ? "output_text" : "input_text")
+                .put("text", text))));
+    }
+
+    private static void writeRollout(FileWriter writer, JSONObject record) throws Exception {
+        writer.write(record.toString());
+        writer.write("\n");
+    }
+
 
 }

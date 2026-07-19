@@ -42,6 +42,8 @@ internal enum class NativeTurnPhase(val active: Boolean) {
 
 internal const val NATIVE_PROPOSED_PLAN_PREFIX = "PROPOSED_PLAN|"
 private const val NATIVE_SHOW_RESPONSE_STATS_PREFERENCE = "native_show_response_stats_v1"
+private const val NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE = "native_show_model_subtitle_v1"
+private const val NATIVE_SHOW_REASONING_TITLES_PREFERENCE = "native_show_reasoning_titles_v1"
 internal fun encodeNativeProposedPlan(text: String): String = NATIVE_PROPOSED_PLAN_PREFIX + text
 internal fun decodeNativeProposedPlan(content: String): String = content.substringAfter('|')
 
@@ -771,6 +773,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var showReasoning by mutableStateOf(true)
     private var autoFollowOutput by mutableStateOf(true)
     private var showResponseStats by mutableStateOf(true)
+    private var showModelSubtitle by mutableStateOf(true)
+    private var showReasoningTitles by mutableStateOf(true)
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -797,6 +801,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         showReasoning = nativePrefs.getBoolean("native_show_reasoning_v1", true)
         autoFollowOutput = nativePrefs.getBoolean("native_auto_follow_v1", true)
         showResponseStats = nativePrefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
+        showModelSubtitle = nativePrefs.getBoolean(NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE, true)
+        showReasoningTitles = nativePrefs.getBoolean(NATIVE_SHOW_REASONING_TITLES_PREFERENCE, true)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
@@ -815,6 +821,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatBackgroundDim = nativeChatBackgroundDim,
                 fixedStreamingViewport = fixedStreamingViewportEnabled,
                 showResponseStats = showResponseStats,
+                showModelSubtitle = showModelSubtitle,
+                showReasoningTitles = showReasoningTitles,
             ) {
                 NativeChatScreen(
                     state = chatState,
@@ -1210,10 +1218,42 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun restoreGoalForThread(threadId: String) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.activeGoalObjective = prefs.getString(goalPreferenceKey(threadId), "").orEmpty()
-        chatState.activeGoalStatus = prefs.getString(goalStatusPreferenceKey(threadId), "active").orEmpty().takeIf { it == "paused" } ?: "active"
+        chatState.activeGoalStatus = prefs.getString(goalStatusPreferenceKey(threadId), "active").orEmpty()
+            .takeIf { it == "active" || it == "paused" || it == "budgetLimited" } ?: "active"
         chatState.selectedMode = prefs.getString(modePreferenceKey(threadId), "default").orEmpty().takeIf { it == "plan" } ?: "default"
         chatState.planJson = prefs.getString(planPreferenceKey(threadId), "[]").orEmpty().ifBlank { "[]" }
         chatState.planExplanation = prefs.getString(planExplanationPreferenceKey(threadId), "").orEmpty()
+    }
+
+    private fun clearLocalGoal(threadId: String) {
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .remove(goalPreferenceKey(threadId))
+            .remove(goalStatusPreferenceKey(threadId))
+            .apply()
+        if (currentThreadId == threadId) {
+            chatState.activeGoalObjective = ""
+            chatState.activeGoalStatus = "active"
+        }
+    }
+
+    private fun applyGoalState(value: String) {
+        val payload = runCatching { JSONObject(value) }.getOrNull() ?: return
+        val threadId = payload.optString("threadId")
+        if (threadId.isBlank() || threadId != currentThreadId) return
+        val goal = payload.optJSONObject("goal")
+        val objective = goal?.optString("objective").orEmpty().trim()
+        val status = goal?.optString("status", "active").orEmpty()
+        if (goal == null || objective.isBlank() || status == "complete") {
+            clearLocalGoal(threadId)
+            return
+        }
+        val normalizedStatus = status.takeIf { it == "active" || it == "paused" || it == "budgetLimited" } ?: "active"
+        chatState.activeGoalObjective = objective
+        chatState.activeGoalStatus = normalizedStatus
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(goalPreferenceKey(threadId), objective)
+            .putString(goalStatusPreferenceKey(threadId), normalizedStatus)
+            .apply()
     }
 
     private fun setGoal(objective: String) {
@@ -1252,18 +1292,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun toggleGoalPause() {
         val threadId = currentThreadId ?: return
         if (chatState.activeGoalObjective.isBlank() || chatState.phase.active) return
-        val next = if (chatState.activeGoalStatus == "paused") "active" else "paused"
+        val next = if (chatState.activeGoalStatus == "active") "paused" else "active"
         chatState.activeGoalStatus = next
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString(goalStatusPreferenceKey(threadId), next).apply()
         bridge?.setThreadGoalStatus(next)
     }
 
     private fun clearGoal() {
-        currentThreadId?.let { threadId ->
-            getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
-                .remove(goalPreferenceKey(threadId)).remove(goalStatusPreferenceKey(threadId)).apply()
-        }
-        chatState.activeGoalObjective = ""
+        currentThreadId?.let(::clearLocalGoal)
         bridge?.clearThreadGoal()
     }
 
@@ -1705,6 +1741,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.currentThreadId = value
                 restoreGoalForThread(value)
                 chatState.ready = true
+                bridge?.getThreadGoal()
                 bridge?.loadSkills()
                 chatState.connectionLabel = "已连接"
             }
@@ -1835,6 +1872,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }
                 chatState.revision++
             }
+            "onGoalUpdated" -> applyGoalState(value)
+            "onGoalCleared" -> {
+                val payload = runCatching { JSONObject(value) }.getOrNull() ?: return
+                val threadId = payload.optString("threadId")
+                if (threadId.isNotBlank() && threadId == currentThreadId) clearLocalGoal(threadId)
+            }
             "onCompactStatus" -> {
                 val text = when (value) {
                     "started" -> nativeText(nativeLanguage, "\u6b63\u5728\u538b\u7f29\u4e0a\u4e0b\u6587\u2026", "Compacting context?")
@@ -1912,6 +1955,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         showReasoning = prefs.getBoolean("native_show_reasoning_v1", true)
         autoFollowOutput = prefs.getBoolean("native_auto_follow_v1", true)
         showResponseStats = prefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
+        showModelSubtitle = prefs.getBoolean(NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE, true)
+        showReasoningTitles = prefs.getBoolean(NATIVE_SHOW_REASONING_TITLES_PREFERENCE, true)
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
         bridge?.loadSkills()
         reloadProviderConfigurationIfChanged()

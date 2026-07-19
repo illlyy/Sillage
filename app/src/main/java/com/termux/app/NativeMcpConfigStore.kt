@@ -61,7 +61,9 @@ object NativeMcpConfigStore {
         configuredServers.forEach { server ->
             val value = JSONObject()
                 .put("enabled", server.enabled)
-                .put("required", server.required)
+                // Native chat must remain usable when an optional upstream disappears. Keep the
+                // persisted WebUI preference, but never make native thread startup depend on it.
+                .put("required", false)
             if (server.isHttp) {
                 value.put("url", server.url)
                 if (server.bearerTokenEnvVar.isNotBlank()) value.put("bearer_token_env_var", server.bearerTokenEnvVar)

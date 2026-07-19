@@ -88,7 +88,12 @@ private data class SettingsEnvironmentSnapshot(
     val mihomoMixedPort: Int = MihomoManager.DEFAULT_MIXED_PORT,
 )
 
-private data class McpSettingsSnapshot(val loaded: Boolean = false, val servers: List<NativeMcpServerConfig> = emptyList(), val error: String = "")
+private data class McpSettingsSnapshot(
+    val loaded: Boolean = false,
+    val servers: List<NativeMcpServerConfig> = emptyList(),
+    val statuses: Map<String, NativeMcpRuntimeStatus> = emptyMap(),
+    val error: String = "",
+)
 private data class SkillSettingsSnapshot(val loaded: Boolean = false, val official: List<NativeOfficialSkill> = emptyList(), val installed: List<NativeInstalledSkill> = emptyList(), val error: String = "")
 
 private enum class CodexDependentFeature {
@@ -119,6 +124,8 @@ class NativeSettingsActivity : ComponentActivity() {
             var reasoning by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING, true)) }
             var follow by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOLLOW, true)) }
             var showResponseStats by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_RESPONSE_STATS, true)) }
+            var showModelSubtitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_MODEL_SUBTITLE, true)) }
+            var showReasoningTitles by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING_TITLES, true)) }
             var dialog by remember { mutableStateOf<String?>(null) }
             var missingCliFeature by remember { mutableStateOf<CodexDependentFeature?>(null) }
             var codexCliInstalled by remember { mutableStateOf(isCodexCliInstalled()) }
@@ -154,6 +161,8 @@ class NativeSettingsActivity : ComponentActivity() {
                 chatBackgroundImage = chatBackgroundImage,
                 chatBackgroundDim = chatBackgroundDim,
                 showResponseStats = showResponseStats,
+                showModelSubtitle = showModelSubtitle,
+                showReasoningTitles = showReasoningTitles,
             ) {
                 val settingsBackplate = MaterialTheme.colorScheme.surfaceContainer
                 val settingsPageShape = remember { RoundedCornerShape(28.dp) }
@@ -256,12 +265,16 @@ class NativeSettingsActivity : ComponentActivity() {
                             reasoning = reasoning,
                             follow = follow,
                             showResponseStats = showResponseStats,
+                            showModelSubtitle = showModelSubtitle,
+                            showReasoningTitles = showReasoningTitles,
                             onBack = navigateBack,
                             onAnimations = { animations = it; prefs.edit().putBoolean(KEY_STREAM_ANIMATIONS, it).apply() },
                             onFixedStreamingViewport = { fixedStreamingViewport = it; prefs.edit().putBoolean(KEY_STREAM_FIXED_VIEWPORT, it).apply() },
                             onReasoning = { reasoning = it; prefs.edit().putBoolean(KEY_SHOW_REASONING, it).apply() },
                             onFollow = { follow = it; prefs.edit().putBoolean(KEY_AUTO_FOLLOW, it).apply() },
                             onShowResponseStats = { showResponseStats = it; prefs.edit().putBoolean(KEY_SHOW_RESPONSE_STATS, it).apply() },
+                            onShowModelSubtitle = { showModelSubtitle = it; prefs.edit().putBoolean(KEY_SHOW_MODEL_SUBTITLE, it).apply() },
+                            onShowReasoningTitles = { showReasoningTitles = it; prefs.edit().putBoolean(KEY_SHOW_REASONING_TITLES, it).apply() },
                         )
                         SettingsPage.CHAT_BACKGROUND -> ChatBackgroundSettingsPage(
                             lang = lang,
@@ -414,6 +427,8 @@ class NativeSettingsActivity : ComponentActivity() {
         const val KEY_SHOW_REASONING = "native_show_reasoning_v1"
         const val KEY_AUTO_FOLLOW = "native_auto_follow_v1"
         const val KEY_SHOW_RESPONSE_STATS = "native_show_response_stats_v1"
+        const val KEY_SHOW_MODEL_SUBTITLE = "native_show_model_subtitle_v1"
+        const val KEY_SHOW_REASONING_TITLES = "native_show_reasoning_titles_v1"
     }
 }
 
@@ -1221,12 +1236,16 @@ private fun ChatAppearanceSettingsPage(
     reasoning: Boolean,
     follow: Boolean,
     showResponseStats: Boolean,
+    showModelSubtitle: Boolean,
+    showReasoningTitles: Boolean,
     onBack: () -> Unit,
     onAnimations: (Boolean) -> Unit,
     onFixedStreamingViewport: (Boolean) -> Unit,
     onReasoning: (Boolean) -> Unit,
     onFollow: (Boolean) -> Unit,
     onShowResponseStats: (Boolean) -> Unit,
+    onShowModelSubtitle: (Boolean) -> Unit,
+    onShowReasoningTitles: (Boolean) -> Unit,
 ) {
     SettingsScaffold(
         tr(lang, "\u804a\u5929", "Chat"),
@@ -1240,6 +1259,8 @@ private fun ChatAppearanceSettingsPage(
             item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "\u81ea\u52a8\u8ddf\u968f\u56de\u7b54", "Auto-follow output"), tr(lang, "\u751f\u6210\u65f6\u4fdd\u6301\u6700\u65b0\u5185\u5bb9\u53ef\u89c1", "Keep the newest output visible while generating"), follow, onFollow) }
             item { SettingsSection(tr(lang, "\u5185\u5bb9", "Content")) }
             item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u601d\u8003\u8fc7\u7a0b", "Reasoning"), tr(lang, "\u5728\u56de\u7b54\u4e2d\u663e\u793a\u6a21\u578b\u7684\u63a8\u7406\u6458\u8981", "Show model reasoning summaries"), reasoning, onReasoning) }
+            item { ToggleSettingsRow(HugeIcons.Sparkles, tr(lang, "\u601d\u8003\u6807\u9898", "Reasoning titles"), tr(lang, "\u5c06 Sol \u7b49\u6a21\u578b\u8f93\u51fa\u7684\u7b80\u77ed\u601d\u8003\u6458\u8981\u663e\u793a\u4e3a\u80f6\u56ca\u6807\u9898", "Use short reasoning summaries from models such as Sol as the capsule title"), showReasoningTitles, onShowReasoningTitles) }
+            item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u9876\u680f\u663e\u793a\u6a21\u578b", "Show model in header"), tr(lang, "\u5728\u5bf9\u8bdd\u6807\u9898\u4e0b\u663e\u793a\u5f53\u524d\u6a21\u578b\u540d\u79f0", "Show the active model below the conversation title"), showModelSubtitle, onShowModelSubtitle) }
             item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u663e\u793a\u56de\u7b54\u5c3e\u90e8\u4fe1\u606f", "Show response footer"), tr(lang, "\u663e\u793a Token\u3001\u8f93\u51fa\u901f\u5ea6\u3001\u8017\u65f6\u4e0e\u7f13\u5b58\u7528\u91cf", "Show tokens, output speed, duration and cached usage"), showResponseStats, onShowResponseStats) }
             item { Spacer(Modifier.height(28.dp)) }
         }
@@ -1854,8 +1875,14 @@ private fun McpSettingsPage(
     var revision by remember { mutableIntStateOf(0) }
     val snapshot by produceState(McpSettingsSnapshot(), revision) {
         value = withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { McpSettingsSnapshot(true, NativeMcpConfigStore.load()) }
-                .getOrElse { McpSettingsSnapshot(true, error = it.message.orEmpty()) }
+            runCatching {
+                val servers = NativeMcpConfigStore.load()
+                McpSettingsSnapshot(
+                    loaded = true,
+                    servers = servers,
+                    statuses = NativeMcpRuntimeStatusStore.load(context, servers),
+                )
+            }.getOrElse { McpSettingsSnapshot(true, error = it.message.orEmpty()) }
         }
     }
     fun markChanged() {
@@ -1883,6 +1910,7 @@ private fun McpSettingsPage(
                 else -> {
                     item { SettingsSection(tr(lang, "\u670d\u52a1\u5668", "Servers")) }
                     items(snapshot.servers, key = { it.key }) { server ->
+                        val runtimeStatus = snapshot.statuses[server.key] ?: NativeMcpRuntimeStatus()
                         Card(
                             onClick = { onEdit(server.key) },
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
@@ -1898,11 +1926,27 @@ private fun McpSettingsPage(
                                         Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
                                             Text(if (server.isHttp) "HTTP" else "STDIO", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
                                         }
+                                        Spacer(Modifier.width(6.dp))
+                                        McpRuntimeStatusBadge(lang, runtimeStatus)
                                     }
                                     Text(
                                         if (server.isHttp) server.url else listOf(server.command, server.args.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" "),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    val statusDetail = when (runtimeStatus.state) {
+                                        "connected" -> tr(lang, "\u5df2\u8fde\u63a5\uff0c${runtimeStatus.toolCount} \u4e2a\u5de5\u5177", "Connected, ${runtimeStatus.toolCount} tools")
+                                        "unavailable" -> runtimeStatus.detail.ifBlank { tr(lang, "\u65e0\u6cd5\u8fde\u63a5\u4e0a\u6e38\u670d\u52a1", "Upstream unavailable") }
+                                        "disabled" -> tr(lang, "\u5df2\u7981\u7528\uff0c\u4e0d\u4f1a\u5f71\u54cd\u5bf9\u8bdd", "Disabled; chat will continue normally")
+                                        else -> tr(lang, "\u7b49\u5f85\u804a\u5929\u540e\u7aef\u68c0\u6d4b", "Waiting for the chat backend probe")
+                                    }
+                                    Text(
+                                        statusDetail,
+                                        modifier = Modifier.padding(top = 5.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (runtimeStatus.state == "unavailable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -1926,6 +1970,24 @@ private fun McpSettingsPage(
             }
             item { Spacer(Modifier.height(28.dp)) }
         }
+    }
+}
+
+@Composable
+private fun McpRuntimeStatusBadge(lang: String, status: NativeMcpRuntimeStatus) {
+    val (label, color) = when (status.state) {
+        "connected" -> tr(lang, "\u53ef\u7528", "Online") to androidx.compose.ui.graphics.Color(0xFF4F8A62)
+        "unavailable" -> tr(lang, "\u65e0\u6cd5\u8fde\u63a5", "Offline") to MaterialTheme.colorScheme.error
+        "disabled" -> tr(lang, "\u5df2\u7981\u7528", "Disabled") to MaterialTheme.colorScheme.onSurfaceVariant
+        else -> tr(lang, "\u5f85\u68c0\u6d4b", "Checking") to MaterialTheme.colorScheme.primary
+    }
+    Surface(shape = RoundedCornerShape(50), color = color.copy(alpha = 0.12f)) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+        )
     }
 }
 

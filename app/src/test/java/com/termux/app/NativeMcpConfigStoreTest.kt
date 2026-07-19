@@ -105,5 +105,6 @@ class NativeMcpConfigStoreTest {
         assertEquals("https://example.com/mcp", server.getString("url"))
         assertEquals("search", server.getJSONArray("enabled_tools").getString(0))
         assertEquals(15.0, server.getDouble("startup_timeout_sec"), 0.0)
+        assertEquals(false, server.getBoolean("required"))
     }
 }

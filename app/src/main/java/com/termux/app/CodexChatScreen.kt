@@ -252,6 +252,8 @@ private const val CHAT_HISTORY_PAGE_SIZE = 24
 val LocalShowReasoning = staticCompositionLocalOf { true }
 val LocalAutoFollowOutput = staticCompositionLocalOf { true }
 val LocalShowResponseStats = staticCompositionLocalOf { true }
+val LocalShowModelSubtitle = staticCompositionLocalOf { true }
+val LocalShowReasoningTitles = staticCompositionLocalOf { true }
 
 internal fun nativeText(language: String, zh: String, en: String): String = if (language == "en") en else zh
 
@@ -269,6 +271,8 @@ internal fun FcodeChatTheme(
     chatBackgroundDim: Float = 0.32f,
     fixedStreamingViewport: Boolean = true,
     showResponseStats: Boolean = true,
+    showModelSubtitle: Boolean = true,
+    showReasoningTitles: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val dark = currentFcodeDarkMode(themeMode)
@@ -295,6 +299,8 @@ internal fun FcodeChatTheme(
                 LocalShowReasoning provides showReasoning,
                 LocalAutoFollowOutput provides autoFollow,
                 LocalShowResponseStats provides showResponseStats,
+                LocalShowModelSubtitle provides showModelSubtitle,
+                LocalShowReasoningTitles provides showReasoningTitles,
                 LocalFcodeColorPalette provides palette,
                 LocalFcodeChatBackground provides background,
                 LocalFcodeChatBackgroundImage provides chatBackgroundImage,
@@ -522,7 +528,7 @@ internal fun NativeChatScreen(
         gesturesEnabled = !textSelectionActive,
         scrimColor = MaterialTheme.colorScheme.scrim,
         drawerContent = {
-            RikkaDrawer(
+            RikkaDrawerV2(
                     currentThreadId = pendingConversationThreadId ?: state.currentThreadId,
                     modelLabel = state.modelLabel,
                     conversations = state.conversations,
@@ -580,7 +586,6 @@ internal fun NativeChatScreen(
                     RikkaTopBar(
                         title = state.conversationTitle,
                         modelLabel = state.modelLabel,
-                        ready = state.ready,
                         onOpenDrawer = {
                             if (!textSelectionActive) {
                                 scope.launch {
@@ -593,7 +598,6 @@ internal fun NativeChatScreen(
                         onExport = { shareConversation(context, state.conversationTitle, state.messages) },
                         canExport = state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT },
                         onNewConversation = onNewConversation,
-                        onToggleTheme = onToggleTheme,
                     )
                 },
                 bottomBar = {},
@@ -763,7 +767,7 @@ internal fun NativeChatScreen(
                     if (state.activeGoalObjective.isNotBlank()) {
                         NativeGoalBanner(
                             objective = state.activeGoalObjective,
-                            paused = state.activeGoalStatus == "paused",
+                            paused = state.activeGoalStatus != "active",
                             enabled = state.ready && !state.phase.active,
                             onEdit = { showGoalDialog = true },
                             onTogglePause = onToggleGoalPause,
@@ -1365,14 +1369,12 @@ private fun EmptyChatState(ready: Boolean, onPrompt: (String) -> Unit) {
 private fun RikkaTopBar(
     title: String,
     modelLabel: String,
-    ready: Boolean,
     onOpenDrawer: () -> Unit,
     onOpenWorkPanel: () -> Unit,
     onSearch: () -> Unit,
     onExport: () -> Unit,
     canExport: Boolean,
     onNewConversation: () -> Unit,
-    onToggleTheme: () -> Unit,
 ) {
     val language = LocalNativeLanguage.current
     TopAppBar(
@@ -1399,24 +1401,16 @@ private fun RikkaTopBar(
                 ) { value ->
                     Text(value, maxLines = 1, style = MaterialTheme.typography.bodyMedium, overflow = TextOverflow.Ellipsis)
                 }
-                Text(
-                    text = "默认助手 / ${modelLabel.ifBlank { "默认模型" }} (Fcode)",
+                if (LocalShowModelSubtitle.current) Text(
+                    text = modelLabel.ifBlank { nativeText(language, "\u9ed8\u8ba4\u6a21\u578b", "Default model") },
                     maxLines = 1,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                    style = MaterialTheme.typography.labelSmall,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         },
         actions = {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(if (ready) Color(0xFF43A047) else MaterialTheme.colorScheme.outline, CircleShape),
-            )
-            IconButton(onClick = onToggleTheme) {
-                Icon(HugeIcons.Sparkles, contentDescription = nativeText(language, "\u5207\u6362\u4e3b\u9898", "Switch theme"))
-            }
             IconButton(onClick = onOpenWorkPanel) {
                 Icon(HugeIcons.LeftToRightListBullet, contentDescription = nativeText(language, "\u5de5\u4f5c\u9762\u677f", "Work panel"))
             }
@@ -1490,6 +1484,12 @@ private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: St
             val liveSnapshot = if (message.streaming && chatState.liveAssistantMessageId == message.id) {
                 chatState.liveAssistantSnapshot
             } else null
+            val historicalFileChanges = remember(message.id, chatState.conversationAnimationKey, chatState.messages.size) {
+                associatedFileChangeItems(chatState.messages, message.id)
+            }
+            val liveFileChanges = liveState?.toolDetails?.mapNotNull { raw ->
+                runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }
+            }.orEmpty()
             RikkaAssistantMessage(
                 message.id,
                 message.content,
@@ -1500,6 +1500,7 @@ private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: St
                 assistantActionText,
                 liveState,
                 liveSnapshot,
+                historicalFileChanges + liveFileChanges,
                 onRetry,
                 onLoadSubagentHistory,
                 onQuote,
@@ -1798,6 +1799,7 @@ private fun RikkaAssistantMessage(
     assistantActionText: String?,
     liveState: NativeChatState?,
     liveSnapshot: NativeStreamingMarkdownSnapshot?,
+    fileChangeItems: List<JSONObject>,
     onRetry: (() -> Unit)?,
     onLoadSubagentHistory: (String) -> Unit,
     onQuote: (String) -> Unit,
@@ -1855,11 +1857,15 @@ private fun RikkaAssistantMessage(
                 }
             }
             if (LocalShowResponseStats.current && (streaming || usage != null)) {
-                Box(Modifier.fillMaxWidth().height(24.dp)) {
+                Box(Modifier.fillMaxWidth().height(32.dp)) {
                     if (!streaming && showChrome && usage != null) {
                         ResponseUsageFooterCompact(usage)
                     }
                 }
+            }
+            val changedFiles = remember(fileChangeItems.map { it.toString() }) { extractChangedFiles(fileChangeItems) }
+            if (!streaming && changedFiles.isNotEmpty()) {
+                FileChangesCapsule(changedFiles)
             }
         }
         DropdownMenu(expanded = showChrome && menuExpanded, onDismissRequest = { menuExpanded = false }) {
@@ -1887,6 +1893,137 @@ private fun RikkaAssistantMessage(
                     context.startActivity(android.content.Intent.createChooser(intent, "分享回答"))
                 },
             )
+        }
+    }
+}
+
+private data class ChangedFileEntry(val path: String, val operation: String)
+
+@Composable
+private fun FileOperationCapsule(file: ChangedFileEntry) {
+    val language = LocalNativeLanguage.current
+    val name = file.path.substringAfterLast('/').substringAfterLast('\\').ifBlank { file.path }
+    val operation = when (file.operation) {
+        "add" -> nativeText(language, "\u65b0\u5efa", "Added")
+        "delete" -> nativeText(language, "\u5220\u9664", "Deleted")
+        else -> nativeText(language, "\u7f16\u8f91", "Edited")
+    }
+    Surface(
+        modifier = Modifier.widthIn(max = 520.dp),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+    ) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(HugeIcons.Files02, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(7.dp))
+            Text("$operation $name", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+private fun associatedFileChangeItems(messages: List<NativeChatMessage>, assistantId: String): List<JSONObject> {
+    val assistantIndex = messages.indexOfFirst { it.id == assistantId }
+    if (assistantIndex <= 0) return emptyList()
+    val result = mutableListOf<JSONObject>()
+    var index = assistantIndex - 1
+    while (index >= 0 && messages[index].role == NativeChatRole.ACTIVITY) {
+        val content = messages[index].content
+        if (content.startsWith("PROCESS2|")) {
+            val payload = runCatching {
+                JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+            }.getOrNull()
+            val tools = payload?.optJSONArray("tools")
+            if (tools != null) for (toolIndex in 0 until tools.length()) {
+                val item = tools.optJSONObject(toolIndex)
+                    ?: runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()
+                    ?: continue
+                if (item.optString("type") == "fileChange") result.add(item)
+            }
+        }
+        index--
+    }
+    return result
+}
+
+private fun extractChangedFiles(items: List<JSONObject>): List<ChangedFileEntry> {
+    val entries = linkedMapOf<String, ChangedFileEntry>()
+    fun add(pathValue: String, operation: String) {
+        val path = pathValue.trim().trim('"', '\'', '`').removePrefix("a/").removePrefix("b/")
+        if (path.isBlank() || path == "/dev/null") return
+        entries[path] = ChangedFileEntry(path, operation)
+    }
+    items.forEach { item ->
+        val detail = item.optString("changes").ifBlank { item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) }
+        listOf("path", "filePath", "file", "name").forEach { key -> item.optString(key).takeIf(String::isNotBlank)?.let { add(it, "edit") } }
+        val changes = item.optJSONArray("changes")
+        if (changes != null) for (index in 0 until changes.length()) {
+            val change = changes.optJSONObject(index) ?: continue
+            val path = listOf("path", "filePath", "file", "name").firstNotNullOfOrNull { key -> change.optString(key).takeIf(String::isNotBlank) }
+            if (path != null) add(path, change.optString("type", "edit").lowercase())
+        }
+        Regex("(?m)^\\*\\*\\*\\s+(Update|Add|Delete) File:\\s*(.+)$", RegexOption.IGNORE_CASE).findAll(detail).forEach { match ->
+            add(match.groupValues[2], match.groupValues[1].lowercase())
+        }
+        Regex("(?m)^(?:\\+\\+\\+|---)\\s+(?:[ab]/)?(.+)$").findAll(detail).forEach { match -> add(match.groupValues[1], "edit") }
+    }
+    return entries.values.toList()
+}
+
+@Composable
+private fun FileChangesCapsule(files: List<ChangedFileEntry>) {
+    val language = LocalNativeLanguage.current
+    var expanded by remember { mutableStateOf(false) }
+    val arrowRotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        spring(dampingRatio = 0.88f, stiffness = 320f),
+        label = "fileChangesArrow",
+    )
+    Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Surface(
+            modifier = Modifier.widthIn(max = 420.dp).clickable { expanded = !expanded },
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+        ) {
+            Row(Modifier.padding(horizontal = 11.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.Files02, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    nativeText(language, "\u66f4\u6539\u4e86 ${files.size} \u4e2a\u6587\u4ef6", "${files.size} files changed"),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                Spacer(Modifier.width(6.dp))
+                Icon(HugeIcons.ArrowDown01, null, Modifier.size(14.dp).graphicsLayer { rotationZ = arrowRotation }, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+            }
+        }
+        ReasoningCapsuleExpand(expanded) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.66f),
+            ) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    files.forEach { file ->
+                        val name = file.path.substringAfterLast('/').substringAfterLast('\\').ifBlank { file.path }
+                        val operation = when (file.operation) {
+                            "add" -> nativeText(language, "\u65b0\u5efa", "Added")
+                            "delete" -> nativeText(language, "\u5220\u9664", "Deleted")
+                            else -> nativeText(language, "\u7f16\u8f91", "Edited")
+                        }
+                        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.Files02, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("$operation $name", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                                if (file.path != name) Text(file.path, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -2270,6 +2407,182 @@ private fun ActiveProcessingPanel(
 
 @Composable
 private fun ProcessingPanel(
+    state: NativeChatState,
+    elapsedSeconds: Long,
+    answerStarted: Boolean,
+    onLoadSubagentHistory: (String) -> Unit,
+    onAutomaticCollapse: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val showReasoning = LocalShowReasoning.current
+    val liveCommand = remember(state.liveCommandJson) {
+        state.liveCommandJson.takeIf(String::isNotBlank)?.let { runCatching { JSONObject(it) }.getOrNull() }
+    }
+    val toolDetailCount = state.toolDetails.size
+    val latestToolDetail = state.toolDetails.lastOrNull()
+    val completedCommands = remember(toolDetailCount, latestToolDetail) {
+        state.toolDetails.mapNotNull { raw ->
+            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "commandExecution" }
+        }
+    }
+    val completedFileChanges = remember(toolDetailCount, latestToolDetail) {
+        state.toolDetails.mapNotNull { raw ->
+            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }
+        }
+    }
+    val liveChangedFiles = remember(completedFileChanges.map { it.toString() }) { extractChangedFiles(completedFileChanges) }
+    val commandRunning = liveCommand != null
+    val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
+        (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
+    } else elapsedSeconds
+    val activityRunning = state.phase in setOf(NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING)
+    val fallbackTitle = when {
+        state.phase == NativeTurnPhase.FAILED -> nativeText(language, "\u751f\u6210\u5931\u8d25", "Generation failed")
+        state.phase == NativeTurnPhase.WAITING && elapsedSeconds >= 12L -> nativeText(language, "\u7b49\u5f85\u6a21\u578b ${elapsedSeconds}s", "Waiting for model ${elapsedSeconds}s")
+        state.phase == NativeTurnPhase.REASONING -> nativeText(language, "\u6b63\u5728\u601d\u8003 ${elapsedSeconds}s", "Thinking ${elapsedSeconds}s")
+        state.reasoningComplete || state.phase == NativeTurnPhase.ANSWERING || state.phase == NativeTurnPhase.COMPLETED -> nativeText(language, "\u601d\u8003\u4e86 ${reasoningSeconds}s", "Thought for ${reasoningSeconds}s")
+        else -> nativeText(language, "\u5904\u7406\u4e2d ${elapsedSeconds}s", "Processing ${elapsedSeconds}s")
+    }
+    val (reasoningTitle, reasoningBody) = reasoningTitleAndBody(state.reasoningText, LocalShowReasoningTitles.current)
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        ReasoningCapsule(
+            title = reasoningTitle ?: fallbackTitle,
+            body = if (showReasoning) reasoningBody else "",
+            running = activityRunning && !commandRunning,
+            initiallyExpanded = state.phase.active && reasoningBody.isNotBlank() && showReasoning,
+            reasoningLive = state.phase == NativeTurnPhase.REASONING && !state.reasoningComplete,
+        )
+        completedCommands.forEach { command -> CommandExecutionCard(command, compact = true) }
+        if (liveCommand != null) CommandExecutionCard(liveCommand, running = true, liveOutput = state.commandText, compact = true)
+        liveChangedFiles.forEach { file -> FileOperationCapsule(file) }
+        if (state.liveSubagents.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                state.liveSubagents.forEach { raw ->
+                    runCatching { JSONObject(raw) }.getOrNull()?.let { item ->
+                        CollabAgentCapsule(item = item, state = state, onLoadHistory = onLoadSubagentHistory)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun reasoningTitleAndBody(source: String, titlesEnabled: Boolean): Pair<String?, String> {
+    val text = source.trim()
+    if (text.isEmpty() || !titlesEnabled) return null to text
+    val firstRaw = text.lineSequence().firstOrNull()?.trim().orEmpty()
+    val first = firstRaw.removePrefix("#").trim().removePrefix("**").removeSuffix("**").trim()
+    val title = first.takeIf { it.length in 2..110 && !it.contains("```") }
+    if (title == null) return null to text
+    val body = if (text == firstRaw) "" else text.substringAfter('\n', "").trim()
+    return title to body
+}
+
+@Composable
+private fun ReasoningCapsule(
+    title: String,
+    body: String,
+    running: Boolean,
+    initiallyExpanded: Boolean = false,
+    reasoningLive: Boolean = false,
+) {
+    val language = LocalNativeLanguage.current
+    var expanded by remember { mutableStateOf(initiallyExpanded) }
+    LaunchedEffect(initiallyExpanded) { if (initiallyExpanded) expanded = true }
+    val hasBody = body.isNotBlank()
+    val scrollState = rememberScrollState()
+    val arrowRotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        spring(dampingRatio = 0.88f, stiffness = 320f),
+        label = "reasoningCapsuleArrow",
+    )
+    LaunchedEffect(reasoningLive, body.length) {
+        if (reasoningLive && expanded) {
+            withFrameNanos { }
+            scrollState.scrollTo(scrollState.maxValue)
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Surface(
+            modifier = Modifier.widthIn(max = 680.dp).then(
+                if (hasBody) Modifier.clickable { expanded = !expanded } else Modifier
+            ),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.86f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f)),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (running) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.7.dp)
+                else Icon(HugeIcons.Zap, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    title,
+                    modifier = Modifier.weight(1f, fill = false),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (hasBody) {
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        HugeIcons.ArrowDown01,
+                        if (expanded) nativeText(language, "\u6536\u8d77\u601d\u8003", "Collapse reasoning") else nativeText(language, "\u5c55\u5f00\u601d\u8003", "Expand reasoning"),
+                        Modifier.size(14.dp).graphicsLayer { rotationZ = arrowRotation },
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        ReasoningCapsuleExpand(expanded && hasBody) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.62f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.24f)),
+            ) {
+                Box(
+                    Modifier.fillMaxWidth().heightIn(max = if (reasoningLive) 190.dp else 460.dp)
+                        .verticalScroll(scrollState).padding(horizontal = 13.dp, vertical = 11.dp),
+                ) {
+                    if (reasoningLive) LiveReasoningText(body) else DeferredHistoricalRichText(body)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningCapsuleExpand(visible: Boolean, content: @Composable () -> Unit) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = expandVertically(
+            expandFrom = Alignment.Top,
+            animationSpec = spring(dampingRatio = 0.86f, stiffness = 285f),
+            clip = true,
+        ) + fadeIn(tween(150, easing = LinearOutSlowInEasing)) +
+            androidx.compose.animation.slideInVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 18 },
+        exit = shrinkVertically(
+            shrinkTowards = Alignment.Top,
+            animationSpec = spring(dampingRatio = 0.9f, stiffness = 330f),
+            clip = true,
+        ) + fadeOut(tween(110, easing = LinearEasing)),
+    ) { content() }
+}
+
+@Composable
+private fun LegacyProcessingPanel(
     state: NativeChatState,
     elapsedSeconds: Long,
     answerStarted: Boolean,
@@ -3155,6 +3468,10 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
     val payload = if (text.startsWith("PROCESS2|")) runCatching {
         JSONObject(String(Base64.decode(text.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
     }.getOrNull() else null
+    if (payload != null) {
+        HistoricalProcessCapsules(payload, state, onLoadSubagentHistory)
+        return
+    }
     val duration = payload?.optLong("duration")?.toString() ?: text.substringAfter("PROCESS|", "0").substringBefore('|')
     val reasoning = payload?.optString("reasoning").orEmpty()
     val command = payload?.optString("command").orEmpty()
@@ -3242,6 +3559,63 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
             else ToolTextCard(title, detail, type == "fileChange", payloadRef)
         }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoricalProcessCapsules(
+    payload: JSONObject,
+    state: NativeChatState,
+    onLoadSubagentHistory: (String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val duration = payload.optLong("duration", 0L)
+    val reasoning = payload.optString("reasoning")
+    val (reasoningTitle, reasoningBody) = reasoningTitleAndBody(reasoning, LocalShowReasoningTitles.current)
+    val tools = payload.optJSONArray("tools")
+    val items = remember(payload.toString()) {
+        buildList {
+            if (tools != null) for (index in 0 until tools.length()) {
+                val item = tools.optJSONObject(index)
+                    ?: runCatching { JSONObject(tools.optString(index)) }.getOrNull()
+                    ?: continue
+                add(item)
+            }
+        }
+    }
+    Column(
+        modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (reasoning.isNotBlank() || duration > 0L) ReasoningCapsule(
+            title = reasoningTitle ?: if (duration > 0) nativeText(language, "\u601d\u8003\u4e86 ${duration}s", "Thought for ${duration}s") else nativeText(language, "\u601d\u8003", "Reasoning"),
+            body = if (LocalShowReasoning.current) reasoningBody else "",
+            running = false,
+            initiallyExpanded = false,
+        )
+        items.filter { it.optString("type") == "commandExecution" }.forEach { item ->
+            CommandExecutionCard(item, compact = true)
+        }
+        extractChangedFiles(items.filter { it.optString("type") == "fileChange" }).forEach { file ->
+            FileOperationCapsule(file)
+        }
+        items.filter { it.optString("type") !in setOf("commandExecution", "fileChange") }.forEach { item ->
+            when (item.optString("type")) {
+                "collabAgentToolCall", "subAgentActivity" -> CollabAgentCapsule(item, state, onLoadSubagentHistory)
+                "mcpToolCall" -> ToolTextCard(
+                    item.optString("tool", item.optString("name", "MCP")),
+                    item.optString("output", item.optString("detail", "")),
+                    false,
+                    item.optString(NativeLargePayloadStore.PAYLOAD_REF),
+                )
+                "webSearch" -> ToolTextCard(
+                    item.optString("query", nativeText(language, "\u7f51\u9875\u641c\u7d22", "Web search")),
+                    item.optString("output", ""),
+                    false,
+                    item.optString(NativeLargePayloadStore.PAYLOAD_REF),
+                )
             }
         }
     }
@@ -4185,14 +4559,15 @@ private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liv
         isRunning -> nativeText(language, "\u6b63\u5728\u8fd0\u884c\u547d\u4ee4", "Running command")
         else -> nativeText(language, "\u5df2\u6267\u884c\u547d\u4ee4", "Command completed")
     }
+    val capsuleLabel = command.lineSequence().firstOrNull()?.trim().orEmpty().ifBlank { actionLabel }
 
-    val topPadding = if (compact) 3.dp else 8.dp
-    val rowVerticalPadding = if (compact) 5.dp else 10.dp
-    val iconBoxSize = if (compact) 22.dp else 30.dp
-    val iconSize = if (compact) 13.dp else 16.dp
+    val topPadding = if (compact) 2.dp else 6.dp
+    val rowVerticalPadding = if (compact) 4.dp else 8.dp
+    val iconBoxSize = if (compact) 20.dp else 27.dp
+    val iconSize = if (compact) 12.dp else 15.dp
     Surface(
         modifier = Modifier.fillMaxWidth().padding(top = topPadding),
-        shape = RoundedCornerShape(if (compact) 9.dp else 14.dp),
+        shape = RoundedCornerShape(if (compact) 14.dp else 16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
         border = BorderStroke(1.dp, accent.copy(alpha = if (isRunning) 0.26f else 0.14f)),
     ) {
@@ -4207,17 +4582,17 @@ private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liv
                         else Icon(icon, null, Modifier.size(iconSize), tint = accent)
                     }
                 }
-                Spacer(Modifier.width(if (compact) 6.dp else 9.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(actionLabel, style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        subject.ifBlank { statusLabel },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Spacer(Modifier.width(if (compact) 6.dp else 8.dp))
+                Text(
+                    capsuleLabel,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodySmall,
+                    fontFamily = if (command.isNotBlank()) FontFamily.Monospace else FontFamily.Default,
+                    fontWeight = FontWeight.Medium,
+                    color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                )
                 val meta = buildList {
                     if (durationMs > 0 && !isRunning) add("%.1fs".format(durationMs / 1000.0))
                     if (exitCode.isNotBlank() && failed) add("exit $exitCode")
@@ -5400,6 +5775,331 @@ private fun LiquidEffortSlider(
 private fun InputTool(icon: ImageVector, description: String, onClick: () -> Unit = {}) {
     IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
         Icon(icon, description, modifier = Modifier.size(21.dp))
+    }
+}
+
+@Composable
+private fun RikkaDrawerV2(
+    currentThreadId: String,
+    modelLabel: String,
+    conversations: List<NativeConversation>,
+    onSearch: () -> Unit,
+    onRenameConversation: (NativeConversation) -> Unit,
+    onDeleteConversation: (NativeConversation) -> Unit,
+    onToggleFavorite: (NativeConversation) -> Unit,
+    onResumeConversation: (String) -> Unit,
+    onClose: () -> Unit,
+    onNewConversation: () -> Unit,
+    onBackHome: () -> Unit,
+    onOpenLegacyWebUi: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val context = LocalContext.current
+    var mode by remember { mutableStateOf("tasks") }
+    var projectRevision by remember { mutableIntStateOf(0) }
+    var newMenuExpanded by remember { mutableStateOf(false) }
+    var showNewProjectDialog by remember { mutableStateOf(false) }
+    var renameProject by remember { mutableStateOf<NativeDrawerProject?>(null) }
+    var deleteProject by remember { mutableStateOf<NativeDrawerProject?>(null) }
+    var expandedProjects by remember { mutableStateOf(emptySet<String>()) }
+    val conversationRevision = conversations.fold(1) { value, conversation ->
+        var result = 31 * value + conversation.threadId.hashCode()
+        result = 31 * result + conversation.title.hashCode()
+        result = 31 * result + conversation.projectPath.hashCode()
+        result = 31 * result + conversation.favorite.hashCode()
+        result
+    }
+    val conversationSnapshot = remember(conversationRevision) { conversations.toList() }
+    val registeredProjects = remember(projectRevision) { NativeDrawerProjectStore.registered(context) }
+    val hiddenProjects = remember(projectRevision) { NativeDrawerProjectStore.hiddenPaths(context) }
+    val projects = remember(conversationRevision, registeredProjects, hiddenProjects, projectRevision) {
+        val paths = linkedSetOf<String>()
+        registeredProjects.forEach { paths.add(it.path) }
+        conversationSnapshot.mapTo(paths) { it.projectPath }.remove("")
+        paths.filterNot(hiddenProjects::contains).map { path ->
+            registeredProjects.firstOrNull { it.path == path }
+                ?: NativeDrawerProject(path, NativeDrawerProjectStore.displayName(context, path))
+        }
+    }
+    val tasksByProject = remember(conversationRevision) { conversationSnapshot.groupBy { it.projectPath } }
+    val openTask: (NativeConversation) -> Unit = remember(context, onResumeConversation) {
+        { conversation ->
+            if (conversation.projectPath.isNotBlank()) {
+                context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE).edit()
+                    .putBoolean("custom_project_root_enabled", true)
+                    .putString("custom_project_root", conversation.projectPath)
+                    .commit()
+            }
+            onResumeConversation(conversation.threadId)
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        shape = androidx.compose.ui.graphics.RectangleShape,
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxHeight().padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DrawerQuickAction(HugeIcons.Search01, nativeText(language, "\u641c\u7d22", "Search"), Modifier.weight(1f), onSearch)
+                Box(Modifier.weight(1f)) {
+                    DrawerQuickAction(
+                        HugeIcons.MessageAdd01,
+                        nativeText(language, "\u65b0\u5efa", "New"),
+                        Modifier.fillMaxWidth(),
+                    ) { newMenuExpanded = true }
+                    DropdownMenu(expanded = newMenuExpanded, onDismissRequest = { newMenuExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text(nativeText(language, "\u65b0\u5efa\u4efb\u52a1", "New task")) },
+                            leadingIcon = { Icon(HugeIcons.MessageAdd01, null) },
+                            onClick = { newMenuExpanded = false; onNewConversation() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(nativeText(language, "\u65b0\u5efa\u9879\u76ee\u6587\u4ef6\u5939", "New project folder")) },
+                            leadingIcon = { Icon(HugeIcons.Folder01, null) },
+                            onClick = { newMenuExpanded = false; showNewProjectDialog = true },
+                        )
+                    }
+                }
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("tasks" to nativeText(language, "\u4efb\u52a1", "Tasks"), "projects" to nativeText(language, "\u9879\u76ee", "Projects")).forEach { (value, label) ->
+                    Surface(
+                        onClick = { mode = value },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(13.dp),
+                        color = if (mode == value) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                    ) {
+                        Text(
+                            label,
+                            modifier = Modifier.padding(vertical = 8.dp),
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (mode == value) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                if (mode == "tasks") {
+                    if (conversationSnapshot.isEmpty()) {
+                        item { DrawerEmptyState(nativeText(language, "\u8fd8\u6ca1\u6709\u4efb\u52a1", "No tasks yet")) }
+                    } else {
+                        items(conversationSnapshot, key = { "task:${it.threadId}" }) { conversation ->
+                            DrawerConversationTaskRow(
+                                conversation = conversation,
+                                selected = conversation.threadId == currentThreadId,
+                                indented = false,
+                                onOpen = { openTask(conversation) },
+                                onFavorite = { onToggleFavorite(conversation) },
+                                onRename = { onRenameConversation(conversation) },
+                                onDelete = { onDeleteConversation(conversation) },
+                            )
+                        }
+                    }
+                } else {
+                    if (projects.isEmpty()) {
+                        item { DrawerEmptyState(nativeText(language, "\u65b0\u5efa\u9879\u76ee\u540e\uff0cAI \u5c06\u9ed8\u8ba4\u8bfb\u53d6\u8be5\u6587\u4ef6\u5939", "Create a project to give AI a default readable folder")) }
+                    }
+                    projects.forEach { project ->
+                        val projectTasks = tasksByProject[project.path].orEmpty()
+                        item(key = "project:${project.path}") {
+                            DrawerProjectRow(
+                                project = project,
+                                taskCount = projectTasks.size,
+                                expanded = project.path in expandedProjects,
+                                onToggle = {
+                                    expandedProjects = if (project.path in expandedProjects) expandedProjects - project.path else expandedProjects + project.path
+                                },
+                                onRename = { renameProject = project },
+                                onDelete = { deleteProject = project },
+                            )
+                        }
+                        if (project.path in expandedProjects) {
+                            if (projectTasks.isEmpty()) {
+                                item(key = "empty:${project.path}") {
+                                    Text(
+                                        nativeText(language, "\u8be5\u9879\u76ee\u8fd8\u6ca1\u6709\u4efb\u52a1", "No tasks in this project"),
+                                        modifier = Modifier.padding(start = 46.dp, top = 6.dp, bottom = 8.dp),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    )
+                                }
+                            } else {
+                                items(projectTasks, key = { "project-task:${it.threadId}" }) { conversation ->
+                                    DrawerConversationTaskRow(
+                                        conversation = conversation,
+                                        selected = conversation.threadId == currentThreadId,
+                                        indented = true,
+                                        onOpen = { openTask(conversation) },
+                                        onFavorite = { onToggleFavorite(conversation) },
+                                        onRename = { onRenameConversation(conversation) },
+                                        onDelete = { onDeleteConversation(conversation) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            DrawerQuickAction(
+                HugeIcons.Settings03,
+                nativeText(language, "\u8bbe\u7f6e", "Settings"),
+                Modifier.fillMaxWidth(),
+                onBackHome,
+            )
+        }
+    }
+
+    if (showNewProjectDialog) {
+        var name by remember { mutableStateOf("") }
+        var error by remember { mutableStateOf("") }
+        FlClashAnimatedDialog(
+            onDismissRequest = { showNewProjectDialog = false },
+            title = { Text(nativeText(language, "\u65b0\u5efa\u9879\u76ee", "New project")) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(nativeText(language, "\u9879\u76ee\u4f1a\u7ec4\u7ec7\u4efb\u52a1\uff0c\u5e76\u5c06\u8be5\u6587\u4ef6\u5939\u8bbe\u4e3a AI \u7684\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\u3002", "Projects organize tasks and set a default folder the AI can work in."))
+                    OutlinedTextField(name, { name = it; error = "" }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text(nativeText(language, "\u9879\u76ee\u540d\u79f0", "Project name")) })
+                    if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching { NativeDrawerProjectStore.create(context, name) }
+                        .onSuccess { project ->
+                            context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE).edit()
+                                .putBoolean("custom_project_root_enabled", true)
+                                .putString("custom_project_root", project.path)
+                                .commit()
+                            projectRevision++
+                            expandedProjects = expandedProjects + project.path
+                            showNewProjectDialog = false
+                            onNewConversation()
+                        }
+                        .onFailure { error = it.message.orEmpty() }
+                }) { Text(nativeText(language, "\u521b\u5efa", "Create")) }
+            },
+            dismissButton = { TextButton(onClick = { showNewProjectDialog = false }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        )
+    }
+
+    renameProject?.let { project ->
+        var name by remember(project.path) { mutableStateOf(project.name) }
+        FlClashAnimatedDialog(
+            onDismissRequest = { renameProject = null },
+            title = { Text(nativeText(language, "\u91cd\u547d\u540d\u9879\u76ee", "Rename project")) },
+            text = { OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), singleLine = true) },
+            confirmButton = { TextButton(onClick = { NativeDrawerProjectStore.rename(context, project.path, name); projectRevision++; renameProject = null }) { Text(nativeText(language, "\u4fdd\u5b58", "Save")) } },
+            dismissButton = { TextButton(onClick = { renameProject = null }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        )
+    }
+
+    deleteProject?.let { project ->
+        FlClashAnimatedDialog(
+            onDismissRequest = { deleteProject = null },
+            title = { Text(nativeText(language, "\u5220\u9664\u9879\u76ee\uff1f", "Delete project?")) },
+            text = { Text(nativeText(language, "\u5c06\u4ece\u9879\u76ee\u5217\u8868\u79fb\u9664“${project.name}”\u3002\u6e90\u6587\u4ef6\u5939\u548c\u4efb\u52a1\u4e0d\u4f1a\u88ab\u5220\u9664\u3002", "Remove \u201c${project.name}\u201d from Projects. Its source folder and tasks will not be deleted.")) },
+            confirmButton = { TextButton(onClick = { NativeDrawerProjectStore.remove(context, project.path); expandedProjects = expandedProjects - project.path; projectRevision++; deleteProject = null }) { Text(nativeText(language, "\u5220\u9664", "Delete"), color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { deleteProject = null }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        )
+    }
+}
+
+@Composable
+private fun DrawerEmptyState(text: String) {
+    Text(
+        text,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 28.dp),
+        textAlign = TextAlign.Center,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun DrawerProjectRow(
+    project: NativeDrawerProject,
+    taskCount: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var menuExpanded by remember(project.path) { mutableStateOf(false) }
+    Box {
+        Surface(
+            modifier = Modifier.fillMaxWidth().combinedClickable(
+                onClick = onToggle,
+                onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menuExpanded = true },
+            ),
+            shape = RoundedCornerShape(15.dp),
+            color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent,
+        ) {
+            Row(Modifier.padding(horizontal = 13.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.ArrowRight01, null, Modifier.size(15.dp).graphicsLayer { rotationZ = if (expanded) 90f else 0f })
+                Spacer(Modifier.width(9.dp))
+                Icon(HugeIcons.Folder01, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(10.dp))
+                Text(project.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                Text(taskCount.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.68f))
+            }
+        }
+        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            DropdownMenuItem(text = { Text(nativeText(language, "\u91cd\u547d\u540d", "Rename")) }, leadingIcon = { Icon(HugeIcons.PencilEdit01, null) }, onClick = { menuExpanded = false; onRename() })
+            DropdownMenuItem(text = { Text(nativeText(language, "\u5220\u9664", "Delete")) }, leadingIcon = { Icon(HugeIcons.Delete01, null) }, onClick = { menuExpanded = false; onDelete() })
+        }
+    }
+}
+
+@Composable
+private fun DrawerConversationTaskRow(
+    conversation: NativeConversation,
+    selected: Boolean,
+    indented: Boolean,
+    onOpen: () -> Unit,
+    onFavorite: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var menuExpanded by remember(conversation.threadId) { mutableStateOf(false) }
+    Box(Modifier.padding(start = if (indented) 28.dp else 0.dp)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().combinedClickable(
+                onClick = onOpen,
+                onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menuExpanded = true },
+            ),
+            shape = RoundedCornerShape(15.dp),
+            color = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent,
+        ) {
+            Row(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (conversation.state == CodexTaskStore.RUNNING) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                else Icon(HugeIcons.Sparkles, null, Modifier.size(18.dp), tint = if (conversation.state == CodexTaskStore.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(10.dp))
+                Text(conversation.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                if (conversation.favorite) Icon(HugeIcons.InLove, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.76f))
+            }
+        }
+        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            DropdownMenuItem(text = { Text(if (conversation.favorite) nativeText(language, "\u53d6\u6d88\u6536\u85cf", "Unfavorite") else nativeText(language, "\u6536\u85cf", "Favorite")) }, leadingIcon = { Icon(HugeIcons.InLove, null) }, onClick = { menuExpanded = false; onFavorite() })
+            DropdownMenuItem(text = { Text(nativeText(language, "\u91cd\u547d\u540d", "Rename")) }, leadingIcon = { Icon(HugeIcons.PencilEdit01, null) }, onClick = { menuExpanded = false; onRename() })
+            DropdownMenuItem(text = { Text(nativeText(language, "\u5220\u9664", "Delete")) }, leadingIcon = { Icon(HugeIcons.Delete01, null) }, onClick = { menuExpanded = false; onDelete() })
+        }
     }
 }
 
