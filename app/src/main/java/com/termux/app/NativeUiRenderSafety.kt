@@ -1,5 +1,14 @@
 package com.termux.app
 
+/** Pure draw policy for the single active stream tail. Kept Android-free for unit coverage. */
+object NativeStreamRevealPolicy {
+    const val DURATION_MS = 240
+    const val STREAM_DAMPING_RATIO = 1f
+    const val STREAM_STIFFNESS = 138f
+    const val STREAM_VISIBILITY_THRESHOLD = 0.12f
+    const val STREAM_FEATHER_DP = 34f
+}
+
 /** Pure safeguards shared by the native Compose renderer and unit tests. */
 object NativeUiRenderSafety {
     const val MAX_ANIMATED_DOCUMENT_CHARS = 4_000
@@ -20,7 +29,7 @@ object NativeUiRenderSafety {
 
     @JvmStatic
     fun containsMarkdownTable(source: String): Boolean {
-        val delimiter = Regex("""^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$""")
+        val delimiter = Regex("""^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$""")
         return source.lineSequence().zipWithNext().any { (header, separator) ->
             header.contains('|') && delimiter.matches(separator)
         }
@@ -34,13 +43,19 @@ object NativeUiRenderSafety {
     @JvmStatic
     fun requiresRichMarkdown(source: String): Boolean {
         if (source.any { it == '*' || it == '_' || it == '`' || it == '[' || it == ']' ||
-                it == '#' || it == '>' || it == '|' || it == '~' }) return true
-        return source.lineSequence().any { line ->
+                it == '#' || it == '>' || it == '|' || it == '~' || it == '$' || it == '<' || it == '\\'
+            }) return true
+        val lines = source.lineSequence().toList()
+        return lines.any { line ->
             val trimmed = line.trimStart()
-            trimmed.startsWith("- ") || trimmed.startsWith("+ ") ||
+            trimmed.startsWith("- ") || trimmed.startsWith("+ ") || trimmed.startsWith("    ") ||
                 trimmed.takeWhile { it.isDigit() }.let { digits ->
-                    digits.isNotEmpty() && trimmed.drop(digits.length).startsWith(". ")
+                    digits.isNotEmpty() && trimmed.drop(digits.length).let { suffix ->
+                        suffix.startsWith(". ") || suffix.startsWith(") ")
+                    }
                 }
+        } || lines.zipWithNext().any { (title, underline) ->
+            title.isNotBlank() && underline.trim().matches(Regex("""(?:={2,}|-{2,})"""))
         }
     }
 
@@ -49,6 +64,12 @@ object NativeUiRenderSafety {
     @JvmStatic
     fun shouldDeferStreamFlush(pendingLength: Int, boundary: Boolean, ageMs: Long, force: Boolean): Boolean =
         !force && pendingLength < 12 && !boundary && ageMs < 110L
+
+    /** Navigation and direct manipulation take priority over decorative live document updates.
+     * Terminal protocol events pass force=true so phase completion can never be stranded. */
+    @JvmStatic
+    fun shouldDeferStreamFlushForUiMotion(uiMotionActive: Boolean, force: Boolean): Boolean =
+        uiMotionActive && !force
 
     /**
      * Publishing a stream snapshot copies the complete growing String and remeasures its active

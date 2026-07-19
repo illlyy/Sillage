@@ -14,6 +14,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -39,17 +41,23 @@ internal enum class NativeTurnPhase(val active: Boolean) {
 }
 
 internal const val NATIVE_PROPOSED_PLAN_PREFIX = "PROPOSED_PLAN|"
+private const val NATIVE_SHOW_RESPONSE_STATS_PREFERENCE = "native_show_response_stats_v1"
 internal fun encodeNativeProposedPlan(text: String): String = NATIVE_PROPOSED_PLAN_PREFIX + text
 internal fun decodeNativeProposedPlan(content: String): String = content.substringAfter('|')
 
+@Immutable
 data class NativeAttachment(val name: String, val path: String, val image: Boolean)
 
+@Immutable
 data class NativeSkill(val name: String, val description: String, val path: String)
 
+@Immutable
 internal data class NativeModelOption(val id: String, val name: String, val efforts: List<String>, val defaultEffort: String)
 
+@Immutable
 internal data class NativeConversation(val threadId: String, val title: String, val state: String, val projectPath: String, val favorite: Boolean) { val projectName: String get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
 
+@Immutable
 data class NativeChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val role: NativeChatRole,
@@ -57,10 +65,12 @@ data class NativeChatMessage(
     val streaming: Boolean = false,
     val revealStartedAt: Long = 0L,
     val finalOnlyReveal: Boolean = false,
+    val usage: NativeTurnUsage? = null,
     val skills: List<NativeSkill> = emptyList(),
     val attachments: List<NativeAttachment> = emptyList(),
 )
 
+@Stable
 internal class NativeChatState {
     val messages = mutableStateListOf<NativeChatMessage>()
     val conversations = mutableStateListOf<NativeConversation>()
@@ -102,9 +112,21 @@ internal class NativeChatState {
     // from being reconsidered whenever the growing answer changes.
     var liveAssistantMessageId by mutableStateOf("")
         private set
-    var liveAssistantText by mutableStateOf("")
+    private val liveAssistantMarkdown = NativeStreamingMarkdownAccumulator()
+    /** Full text is materialized only for completion/actions/tests, never by the live Composable. */
+    val liveAssistantText: String
+        get() {
+            liveAssistantSnapshot
+            return liveAssistantMarkdown.materialize()
+        }
+    var liveAssistantSnapshot by mutableStateOf(
+        NativeStreamingMarkdownSnapshot(emptyList(), "", stableChars = 0, sourceChars = 0),
+    )
         private set
-    private val liveAssistantBuffer = StringBuilder()
+    // Draw acknowledgement, not Compose state. It distinguishes a genuinely streamed answer from
+    // deltas and completion barriers that were coalesced before the UI got a frame.
+    private var liveAssistantPresentedChars = 0
+    private var pendingTurnUsage: NativeTurnUsage? = null
     var processingLabel by mutableStateOf("")
     var reasoningText by mutableStateOf("")
     var reasoningComplete by mutableStateOf(false)
@@ -139,6 +161,7 @@ internal class NativeChatState {
         commandText = ""
         liveCommandJson = ""
         commandOutputBuffer.setLength(0)
+        pendingTurnUsage = null
         clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
@@ -165,6 +188,7 @@ internal class NativeChatState {
         commandText = ""
         liveCommandJson = ""
         commandOutputBuffer.setLength(0)
+        pendingTurnUsage = null
         clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
@@ -299,13 +323,20 @@ internal class NativeChatState {
         .replace(Regex("""</?final\s*>""", RegexOption.IGNORE_CASE), "")
 
     private fun clearLiveAssistantBuffer() {
-        liveAssistantBuffer.setLength(0)
+        liveAssistantMarkdown.reset()
         liveAssistantMessageId = ""
-        liveAssistantText = ""
+        liveAssistantSnapshot = NativeStreamingMarkdownSnapshot(emptyList(), "", stableChars = 0, sourceChars = 0)
+        liveAssistantPresentedChars = 0
+    }
+
+    fun markLiveAssistantPresented(messageId: String, sourceChars: Int) {
+        if (messageId == liveAssistantMessageId && sourceChars > liveAssistantPresentedChars) {
+            liveAssistantPresentedChars = sourceChars
+        }
     }
 
     private fun sealLiveAssistant(index: Int, authoritativeText: String = ""): String {
-        val buffered = liveAssistantBuffer.toString()
+        val buffered = liveAssistantMarkdown.materialize()
         val cleanedAuthoritative = cleanProtocolMarkup(authoritativeText)
         val full = when {
             cleanedAuthoritative.isBlank() -> buffered
@@ -316,7 +347,16 @@ internal class NativeChatState {
         }
         if (index in messages.indices) {
             val existing = messages[index]
-            messages[index] = existing.copy(content = full, streaming = false, finalOnlyReveal = false)
+            // Native stream events and their completion barrier can land in one main-loop task.
+            // If Compose never presented a live snapshot, use the whole-answer reveal rather than
+            // replacing the empty streaming shell with fully opaque Markdown in a single frame.
+            val completionNeedsReveal = full.isNotBlank() && liveAssistantPresentedChars <= 0
+            messages[index] = existing.copy(
+                content = full,
+                streaming = false,
+                finalOnlyReveal = completionNeedsReveal,
+                usage = pendingTurnUsage,
+            )
         }
         clearLiveAssistantBuffer()
         return full
@@ -343,9 +383,9 @@ internal class NativeChatState {
             messages.add(message)
             liveAssistantMessageId = message.id
         }
-        liveAssistantBuffer.append(cleanedDelta)
-        // Only this scalar state invalidates the live answer subtree. messages itself is untouched.
-        liveAssistantText = liveAssistantBuffer.toString()
+        // Compose receives immutable blocks plus a bounded tail. The complete growing String stays
+        // private, avoiding an O(total answer length) copy for every published token batch.
+        liveAssistantSnapshot = liveAssistantMarkdown.append(cleanedDelta)
     }
 
     fun completeAssistantItem(text: String) {
@@ -361,6 +401,8 @@ internal class NativeChatState {
                     content = cleanedText,
                     streaming = false,
                     revealStartedAt = System.currentTimeMillis(),
+                    finalOnlyReveal = true,
+                    usage = pendingTurnUsage,
                 ),
             )
         }
@@ -383,7 +425,7 @@ internal class NativeChatState {
                     existing.content.startsWith(cleanedText) -> existing.content
                     else -> cleanedText
                 }
-                messages[existingIndex] = existing.copy(content = merged, streaming = false, finalOnlyReveal = false)
+                messages[existingIndex] = existing.copy(content = merged, streaming = false, finalOnlyReveal = false, usage = pendingTurnUsage ?: existing.usage)
             } else {
                 messages.add(
                     NativeChatMessage(
@@ -392,6 +434,7 @@ internal class NativeChatState {
                         streaming = false,
                         revealStartedAt = System.currentTimeMillis(),
                         finalOnlyReveal = true,
+                        usage = pendingTurnUsage,
                     ),
                 )
             }
@@ -405,6 +448,7 @@ internal class NativeChatState {
 
     fun applyHistorySnapshot(snapshot: NativeHistorySnapshot) {
         clearLiveAssistantBuffer()
+        pendingTurnUsage = null
         val cachedPlanJson = planJson
         val cachedPlanExplanation = planExplanation
         planJson = snapshot.planJson
@@ -560,10 +604,39 @@ internal class NativeChatState {
         for (index in turnMessageStartIndex.coerceAtLeast(0) until messages.size) {
             if (messages[index].streaming) messages[index] = messages[index].copy(streaming = false)
         }
+        finalizeTurnUsage()
         phase = NativeTurnPhase.COMPLETED
         connectionLabel = "已连接"
         revision++
     }
+
+    fun updateTokenUsage(raw: String) {
+        val duration = currentTurnDurationMs()
+        val usage = NativeTokenUsageParser.parse(raw, duration) ?: return
+        pendingTurnUsage = usage
+        applyUsageToCurrentAssistant(usage)
+        revision++
+    }
+
+    private fun finalizeTurnUsage() {
+        val index = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT } ?: return
+        val message = messages[index]
+        val duration = currentTurnDurationMs().coerceAtLeast(1L)
+        val usage = pendingTurnUsage?.copy(durationMs = duration)
+            ?: NativeTokenUsageParser.estimate(message.content.ifBlank { liveAssistantMarkdown.materialize() }, duration)
+        pendingTurnUsage = usage
+        messages[index] = message.copy(usage = usage)
+    }
+
+    private fun applyUsageToCurrentAssistant(usage: NativeTurnUsage) {
+        val index = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT } ?: return
+        messages[index] = messages[index].copy(usage = usage)
+    }
+
+    private fun currentTurnDurationMs(): Long =
+        if (turnStartedAt <= 0L) 0L else (System.currentTimeMillis() - turnStartedAt).coerceAtLeast(1L)
 
     fun addError(message: String) {
         messages.add(
@@ -581,6 +654,8 @@ internal class NativeChatState {
 class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
     companion object {
         private val subagentRouteCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        private const val STREAM_CATCH_UP_CHUNK_CHARS = 1_200
+        private const val STREAM_CATCH_UP_DELAY_MS = 24L
     }
 
     private val chatState = NativeChatState()
@@ -590,7 +665,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var appliedProviderDefaultModel: String = ""
     private var backendConfigurationLoaded = false
     private var pendingBackendConfigurationReload = false
-    private var pendingConversationAnimationKey: String? = null
+    private var pendingCachedHistoryThreadId: String? = null
+    private var pendingCachedHistorySnapshot: NativeHistorySnapshot? = null
     private var conversationRefreshGeneration = 0
     private var subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
     private val subagentHistoryAttempts = HashMap<String, Int>()
@@ -614,6 +690,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var commandFlushScheduled = false
     private var reasoningPendingSince = 0L
     private var answerPendingSince = 0L
+    /**
+     * Direct-manipulation and navigation motion owns the UI thread. Stream deltas keep buffering
+     * while those animations run, but no growing text snapshot is published into Compose until
+     * the motion settles. This prevents answer measurement from stealing drawer frames.
+     */
+    private var uiMotionActive = false
+    private var uiMotionCatchUpGeneration = 0
     private val flushReasoningRunnable = Runnable {
         reasoningFlushScheduled = false
         flushReasoningDeltas()
@@ -684,8 +767,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var nativeChatBackgroundDim by mutableStateOf(0.32f)
     private var nativeLanguage by mutableStateOf("zh")
     private var streamAnimationsEnabled by mutableStateOf(true)
+    private var fixedStreamingViewportEnabled by mutableStateOf(true)
     private var showReasoning by mutableStateOf(true)
     private var autoFollowOutput by mutableStateOf(true)
+    private var showResponseStats by mutableStateOf(true)
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -708,8 +793,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         nativeChatBackgroundDim = nativePrefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
         nativeLanguage = nativePrefs.getString("native_language_v1", "system").orEmpty().let { if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh" }
         streamAnimationsEnabled = nativePrefs.getBoolean("native_stream_animations_v1", true)
+        fixedStreamingViewportEnabled = nativePrefs.getBoolean("native_stream_fixed_viewport_v1", true)
         showReasoning = nativePrefs.getBoolean("native_show_reasoning_v1", true)
         autoFollowOutput = nativePrefs.getBoolean("native_auto_follow_v1", true)
+        showResponseStats = nativePrefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
@@ -726,6 +813,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatBackground = nativeChatBackground,
                 chatBackgroundImage = nativeChatBackgroundImage,
                 chatBackgroundDim = nativeChatBackgroundDim,
+                fixedStreamingViewport = fixedStreamingViewportEnabled,
+                showResponseStats = showResponseStats,
             ) {
                 NativeChatScreen(
                     state = chatState,
@@ -738,6 +827,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onStop = ::stopCurrentTurn,
                     onNewConversation = ::newConversation,
                     onResumeConversation = ::resumeConversation,
+                    onUiMotionChanged = ::setUiMotionActive,
                     onLoadSubagentHistory = ::loadSubagentHistory,
                     onModelSelected = ::selectNativeModel,
                     onEffortSelected = ::selectNativeEffort,
@@ -792,7 +882,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val profile = CodexProviderStore(prefs).active()
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false) ||
             (profile?.let { it.proxyEnabled && it.proxyWebUi } == true)
-        val providerFingerprint = NativeProviderSync.configurationFingerprint(profile, routeThroughMihomo)
+        val providerFingerprint = NativeProviderSync.configurationFingerprint(profile, routeThroughMihomo) +
+            "|mcp=${prefs.getLong(NativeMcpConfigStore.REVISION_KEY, 0L)}:${NativeMcpConfigStore.fileFingerprint()}"
 
         backendConfigurationLoaded = true
         pendingBackendConfigurationReload = false
@@ -875,7 +966,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val profile = CodexProviderStore(prefs).active()
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false) ||
             (profile?.let { it.proxyEnabled && it.proxyWebUi } == true)
-        val nextFingerprint = NativeProviderSync.configurationFingerprint(profile, routeThroughMihomo)
+        val nextFingerprint = NativeProviderSync.configurationFingerprint(profile, routeThroughMihomo) +
+            "|mcp=${prefs.getLong(NativeMcpConfigStore.REVISION_KEY, 0L)}:${NativeMcpConfigStore.fileFingerprint()}"
         if (nextFingerprint == appliedProviderFingerprint) {
             pendingBackendConfigurationReload = false
             return
@@ -1334,6 +1426,28 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }, delayMs)
     }
 
+    private fun setUiMotionActive(active: Boolean) {
+        if (uiMotionActive == active) return
+        uiMotionActive = active
+        val generation = ++uiMotionCatchUpGeneration
+        NativeChatDiagnostics.record(this, "ui_motion_priority", JSONObject()
+            .put("active", active)
+            .put("pendingReasoning", pendingReasoning.length)
+            .put("pendingAnswer", pendingAnswer.length))
+        if (active) return
+
+        // Wait until the first frame after the gesture/navigation animation. Publishing in the
+        // same frame as drawer settlement can still turn the final animation frame into a hitch.
+        Choreographer.getInstance().postFrameCallback {
+            if (uiMotionActive || generation != uiMotionCatchUpGeneration) return@postFrameCallback
+            streamHandler.post {
+                if (uiMotionActive || generation != uiMotionCatchUpGeneration) return@post
+                flushReasoningDeltas()
+                flushAnswerDeltas()
+            }
+        }
+    }
+
     private fun discardPendingStreamEvents(reason: String) {
         streamHandler.removeCallbacks(flushReasoningRunnable)
         streamHandler.removeCallbacks(flushAnswerRunnable)
@@ -1352,6 +1466,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         pendingPlan.setLength(0)
         pendingCommand.setLength(0)
         pendingPlanItemId = ""
+        // Invalidate a catch-up callback posted by the route we just left.
+        uiMotionCatchUpGeneration++
         stopFrameDiagnostics()
         NativeChatDiagnostics.record(this, "stream_route_reset", JSONObject()
             .put("reason", reason).put("droppedReasoning", droppedReasoning).put("droppedAnswer", droppedAnswer)
@@ -1363,20 +1479,22 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         discardPendingStreamEvents("resume")
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
-        pendingConversationAnimationKey = threadId
         currentThreadId = threadId
         val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
+        val cachedHistory = NativeHistorySnapshotCache.get(threadId)
+        pendingCachedHistoryThreadId = threadId.takeIf { cachedHistory != null }
+        pendingCachedHistorySnapshot = cachedHistory
         displayedHistorySnapshot = null
         chatState.resetConversation()
         chatState.currentThreadId = threadId
         chatState.historyLoading = true
-        NativeHistorySnapshotCache.get(threadId)?.let { cached ->
-            applyPreparedHistory(threadId, cached, fresh = false)
-        }
-        chatState.conversationTitle = selectedConversation?.title ?: "对话"
+        // Commit the lightweight route before any cached messages. The screen can render its
+        // loading shell in one frame instead of attaching history and changing route together.
+        chatState.conversationAnimationKey = threadId
+        chatState.conversationTitle = selectedConversation?.title ?: "\u5bf9\u8bdd"
         if (selectedConversation?.state == CodexTaskStore.RUNNING) {
             chatState.phase = NativeTurnPhase.WAITING
-            chatState.processingLabel = "正在重新连接任务"
+            chatState.processingLabel = "\u6b63\u5728\u91cd\u65b0\u8fde\u63a5\u4efb\u52a1"
             chatState.turnStartedAt = System.currentTimeMillis()
             chatState.phaseStartedAt = chatState.turnStartedAt
             startFrameDiagnostics()
@@ -1388,6 +1506,20 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         } else {
             bridge?.resumeConversation(threadId) ?: -1
         }
+        if (cachedHistory != null) {
+            val routeGeneration = expectedHistoryGeneration
+            // Two frame boundaries guarantee that the lightweight loading route is visible before
+            // cached Text/AndroidView nodes are attached and measured.
+            Choreographer.getInstance().postFrameCallback {
+                Choreographer.getInstance().postFrameCallback {
+                    if (currentThreadId != threadId || expectedHistoryGeneration != routeGeneration || displayedHistorySnapshot != null) {
+                        return@postFrameCallback
+                    }
+                    val pendingCache = consumePendingCachedHistory(threadId) ?: return@postFrameCallback
+                    applyPreparedHistory(threadId, pendingCache, fresh = false)
+                }
+            }
+        }
     }
 
     private fun newConversation() {
@@ -1396,7 +1528,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
-        pendingConversationAnimationKey = null
+        pendingCachedHistoryThreadId = null
+        pendingCachedHistorySnapshot = null
         currentThreadId = null
         expectedHistoryGeneration = -1
         displayedHistorySnapshot = null
@@ -1423,10 +1556,24 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         finish()
     }
 
+    /**
+     * A drawer can stay open long enough to accumulate thousands of characters. Once direct
+     * manipulation ends, replay that backlog in bounded pieces instead of attaching one very
+     * large document update to the first free frame. Terminal/phase-boundary flushes remain exact.
+     */
+    private fun consumeStreamChunk(buffer: StringBuilder, force: Boolean): String {
+        var end = if (force) buffer.length else minOf(buffer.length, STREAM_CATCH_UP_CHUNK_CHARS)
+        if (end in 1 until buffer.length && Character.isHighSurrogate(buffer[end - 1])) end--
+        val chunk = buffer.substring(0, end)
+        buffer.delete(0, end)
+        return chunk
+    }
+
     private fun flushReasoningDeltas(force: Boolean = false) {
         streamHandler.removeCallbacks(flushReasoningRunnable)
         reasoningFlushScheduled = false
         if (pendingReasoning.isEmpty()) { reasoningPendingSince = 0L; return }
+        if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) return
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingReasoning.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
         if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingReasoning.length, boundary, now - reasoningPendingSince, force)) {
@@ -1434,9 +1581,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             streamHandler.postDelayed(flushReasoningRunnable, 32L)
             return
         }
-        val value = pendingReasoning.toString()
-        pendingReasoning.setLength(0)
-        reasoningPendingSince = 0L
+        val value = consumeStreamChunk(pendingReasoning, force)
+        if (pendingReasoning.isEmpty()) {
+            reasoningPendingSince = 0L
+        } else {
+            reasoningFlushScheduled = true
+            streamHandler.postDelayed(flushReasoningRunnable, STREAM_CATCH_UP_DELAY_MS)
+        }
         val continuedAfterAnswer = chatState.reasoningComplete
         chatState.beginReasoningAfterAnswerIfNeeded()
         if (continuedAfterAnswer) NativeChatDiagnostics.record(this, "reasoning_segment_started", JSONObject()
@@ -1446,7 +1597,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun answerFlushDelayMs(): Long {
-        val liveChars = chatState.liveAssistantText.length
+        val liveChars = chatState.liveAssistantSnapshot.sourceChars
         return NativeUiRenderSafety.streamFlushDelayMs(liveChars, pendingAnswer.length, 88L)
     }
 
@@ -1457,6 +1608,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         streamHandler.removeCallbacks(flushAnswerRunnable)
         answerFlushScheduled = false
         if (pendingAnswer.isEmpty()) { answerPendingSince = 0L; return }
+        if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) return
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingAnswer.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
         if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingAnswer.length, boundary, now - answerPendingSince, force)) {
@@ -1464,9 +1616,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             streamHandler.postDelayed(flushAnswerRunnable, 32L)
             return
         }
-        val value = pendingAnswer.toString()
-        pendingAnswer.setLength(0)
-        answerPendingSince = 0L
+        val value = consumeStreamChunk(pendingAnswer, force)
+        if (pendingAnswer.isEmpty()) {
+            answerPendingSince = 0L
+        } else {
+            answerFlushScheduled = true
+            streamHandler.postDelayed(flushAnswerRunnable, STREAM_CATCH_UP_DELAY_MS)
+        }
         chatState.finishReasoning()
         chatState.appendAssistant(value)
     }
@@ -1492,8 +1648,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.appendProposedPlanDelta(JSONObject().put("itemId", pendingPlanItemId).put("delta", delta).toString())
     }
 
+    private fun consumePendingCachedHistory(threadId: String): NativeHistorySnapshot? {
+        if (pendingCachedHistoryThreadId != threadId) return null
+        val snapshot = pendingCachedHistorySnapshot
+        pendingCachedHistoryThreadId = null
+        pendingCachedHistorySnapshot = null
+        return snapshot
+    }
+
     private fun applyPreparedHistory(threadId: String, snapshot: NativeHistorySnapshot, fresh: Boolean) {
         if (currentThreadId != threadId) return
+        // A very fast empty disk result may beat the two-frame cached-history commit. Preserve the
+        // known cached conversation rather than flashing/settling on an empty thread.
+        if (fresh) {
+            val pendingCache = consumePendingCachedHistory(threadId)
+            if (snapshot.messages.isEmpty() && pendingCache?.messages?.isNotEmpty() == true && chatState.messages.isEmpty()) {
+                chatState.applyHistorySnapshot(pendingCache)
+                displayedHistorySnapshot = pendingCache
+            }
+        }
         val preserveCachedSnapshot = fresh && snapshot.messages.isEmpty() && chatState.messages.isNotEmpty()
         val unchangedFreshSnapshot = fresh && displayedHistorySnapshot?.hasSameContent(snapshot) == true
         if (!preserveCachedSnapshot && !unchangedFreshSnapshot) {
@@ -1510,8 +1683,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             chatState.phaseMessageStartIndex = chatState.messages.size
             if (chatState.phaseStartedAt <= 0L) chatState.phaseStartedAt = System.currentTimeMillis()
         }
-        pendingConversationAnimationKey?.let { key -> chatState.conversationAnimationKey = key }
-        pendingConversationAnimationKey = null
         NativeChatDiagnostics.record(this, "history_snapshot_applied", JSONObject()
             .put("thread", threadId.take(8)).put("fresh", fresh)
             .put("messages", chatState.messages.size).put("estimatedChars", snapshot.estimatedChars)
@@ -1619,6 +1790,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.skills.clear()
                 chatState.skills.addAll(parsed)
             }
+            "onTokenUsage" -> chatState.updateTokenUsage(value)
             "onPlanStarted" -> {
                 flushAnswerDeltas(force = true); flushPlanDeltas(); chatState.finishReasoning(); chatState.startProposedPlan(value)
             }
@@ -1736,9 +1908,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh"
         }
         streamAnimationsEnabled = prefs.getBoolean("native_stream_animations_v1", true)
+        fixedStreamingViewportEnabled = prefs.getBoolean("native_stream_fixed_viewport_v1", true)
         showReasoning = prefs.getBoolean("native_show_reasoning_v1", true)
         autoFollowOutput = prefs.getBoolean("native_auto_follow_v1", true)
+        showResponseStats = prefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
+        bridge?.loadSkills()
         reloadProviderConfigurationIfChanged()
         if (chatState.busy) startFrameDiagnostics()
     }

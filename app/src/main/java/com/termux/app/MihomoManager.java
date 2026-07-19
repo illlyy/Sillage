@@ -530,10 +530,140 @@ final class MihomoManager {
     }
 
     private void extractDashboard(File archive, File destination) throws Exception {
-        File tar = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "tar");
-        if (!tar.canExecute()) throw new IOException("Termux tar 不可用，请先完成运行环境安装");
-        CommandResult result = runCommand(tar.getAbsolutePath(), "-xzf", archive.getAbsolutePath(), "-C", destination.getAbsolutePath());
-        if (result.exitCode != 0) throw new IOException("面板解压失败：" + compact(result.output));
+        // The dashboard is an APK-bundled, checksum-pinned asset. Extract it directly so the
+        // offline proxy extension does not depend on a separately installed Termux `tar` binary.
+        String root = destination.getCanonicalPath() + File.separator;
+        String pendingPath = null;
+        try (GZIPInputStream input = new GZIPInputStream(
+            new BufferedInputStream(new FileInputStream(archive)), 64 * 1024)) {
+            byte[] header = new byte[512];
+            while (readTarHeader(input, header)) {
+                if (isZeroTarBlock(header)) break;
+                String name = tarString(header, 0, 100);
+                String prefix = tarString(header, 345, 155);
+                if (!prefix.isEmpty()) name = prefix + "/" + name;
+                long size = tarOctal(header, 124, 12);
+                byte type = header[156];
+
+                if (type == 'x' || type == 'L') {
+                    if (size > 1024 * 1024) throw new IOException("Dashboard archive metadata is too large");
+                    byte[] metadata = new byte[(int) size];
+                    readTarExactly(input, metadata, 0, metadata.length);
+                    pendingPath = type == 'L'
+                        ? new String(metadata, java.nio.charset.StandardCharsets.UTF_8).replace("\u0000", "").trim()
+                        : paxPath(metadata);
+                    skipTarExactly(input, tarPadding(size));
+                    continue;
+                }
+
+                if (pendingPath != null && !pendingPath.isEmpty()) name = pendingPath;
+                pendingPath = null;
+                while (name.startsWith("./")) name = name.substring(2);
+                if (name.isEmpty()) {
+                    skipTarExactly(input, size + tarPadding(size));
+                    continue;
+                }
+
+                File output = new File(destination, name);
+                String outputPath = output.getCanonicalPath();
+                if (!outputPath.startsWith(root)) throw new SecurityException("Dashboard archive escapes its install directory");
+                if (type == '5') {
+                    if (!output.isDirectory() && !output.mkdirs()) throw new IOException("Cannot create " + output);
+                    skipTarExactly(input, size);
+                } else if (type == 0 || type == '0') {
+                    File parent = output.getParentFile();
+                    if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new IOException("Cannot create " + parent);
+                    try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(output))) {
+                        copyTarExactly(input, out, size);
+                    }
+                } else {
+                    // The web bundle needs only regular files/directories; ignore links/devices.
+                    skipTarExactly(input, size);
+                }
+                skipTarExactly(input, tarPadding(size));
+            }
+        }
+    }
+
+    private static boolean readTarHeader(InputStream input, byte[] header) throws IOException {
+        int offset = 0;
+        while (offset < header.length) {
+            int count = input.read(header, offset, header.length - offset);
+            if (count < 0) return offset == 0 ? false : throwUnexpectedTarEnd();
+            offset += count;
+        }
+        return true;
+    }
+
+    private static boolean throwUnexpectedTarEnd() throws IOException {
+        throw new IOException("Dashboard archive ended unexpectedly");
+    }
+
+    private static boolean isZeroTarBlock(byte[] data) {
+        for (byte value : data) if (value != 0) return false;
+        return true;
+    }
+
+    private static String tarString(byte[] data, int offset, int length) {
+        int end = offset;
+        while (end < offset + length && data[end] != 0) end++;
+        return new String(data, offset, end - offset, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static long tarOctal(byte[] data, int offset, int length) throws IOException {
+        long value = 0;
+        boolean found = false;
+        for (int i = offset; i < offset + length; i++) {
+            int digit = data[i] & 0xff;
+            if (digit == 0 || digit == ' ') continue;
+            if (digit < '0' || digit > '7') throw new IOException("Invalid dashboard archive size");
+            value = (value << 3) + digit - '0';
+            found = true;
+        }
+        return found ? value : 0;
+    }
+
+    private static long tarPadding(long size) { return (512 - size % 512) % 512; }
+
+    private static void readTarExactly(InputStream input, byte[] output, int offset, int count) throws IOException {
+        int remaining = count;
+        while (remaining > 0) {
+            int read = input.read(output, offset, remaining);
+            if (read < 0) throw new IOException("Dashboard archive ended unexpectedly");
+            offset += read;
+            remaining -= read;
+        }
+    }
+
+    private static void copyTarExactly(InputStream input, java.io.OutputStream output, long count) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        long remaining = count;
+        while (remaining > 0) {
+            int read = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            if (read < 0) throw new IOException("Dashboard archive ended unexpectedly");
+            output.write(buffer, 0, read);
+            remaining -= read;
+        }
+    }
+
+    private static void skipTarExactly(InputStream input, long count) throws IOException {
+        byte[] buffer = new byte[8192];
+        long remaining = count;
+        while (remaining > 0) {
+            int read = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            if (read < 0) throw new IOException("Dashboard archive ended unexpectedly");
+            remaining -= read;
+        }
+    }
+
+    private static String paxPath(byte[] metadata) {
+        String text = new String(metadata, java.nio.charset.StandardCharsets.UTF_8);
+        for (String record : text.split("\n")) {
+            int separator = record.indexOf(' ');
+            String value = separator >= 0 ? record.substring(separator + 1) : record;
+            if (value.startsWith("path=")) return value.substring(5);
+        }
+        return null;
     }
 
     private void writeDashboardEndpoint(File dashboardDir) throws IOException {

@@ -35,7 +35,7 @@ public class NativeUiRenderSafetyTest {
         String table = "| Name | Status | Note |\n|---|:---:|---:|\n| A | done | first |";
         assertTrue(NativeUiRenderSafety.containsMarkdownTable(table));
         assertFalse(NativeUiRenderSafety.containsMarkdownTable("Use A | B in prose\nwithout a delimiter row"));
-        assertFalse(NativeUiRenderSafety.containsMarkdownTable("a | b\n--|--"));
+        assertTrue(NativeUiRenderSafety.containsMarkdownTable("a | b\n--|--"));
     }
 
     @Test
@@ -79,9 +79,24 @@ public class NativeUiRenderSafetyTest {
     }
 
     @Test
+    public void liveTextUsesACriticallyDampedBoundedReveal() {
+        assertEquals(1f, NativeStreamRevealPolicy.STREAM_DAMPING_RATIO, 0.0001f);
+        assertTrue(NativeStreamRevealPolicy.STREAM_STIFFNESS > 0f);
+        assertTrue(NativeStreamRevealPolicy.STREAM_FEATHER_DP >= 20f);
+        assertTrue(NativeStreamRevealPolicy.DURATION_MS < 300);
+    }
+
+    @Test
     public void terminalEventsNeverLeaveATinyDeltaScheduled() {
         org.junit.Assert.assertTrue(NativeUiRenderSafety.shouldDeferStreamFlush(4, false, 20L, false));
         org.junit.Assert.assertFalse(NativeUiRenderSafety.shouldDeferStreamFlush(4, false, 20L, true));
+    }
+
+    @Test
+    public void uiMotionDefersLiveUpdatesButNeverTerminalFlushes() {
+        assertTrue(NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(true, false));
+        assertFalse(NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(true, true));
+        assertFalse(NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(false, false));
     }
 
     @org.junit.Test
@@ -91,6 +106,10 @@ public class NativeUiRenderSafetyTest {
         org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("- item"));
         org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("**bold**"));
         org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("[link](https://example.com)"));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("1) ordered"));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("Title\n===="));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("inline $x$"));
+        org.junit.Assert.assertTrue(NativeUiRenderSafety.requiresRichMarkdown("<br>"));
     }
 
 }

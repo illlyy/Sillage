@@ -229,12 +229,9 @@ internal fun fcodeMarkdownColors(
     dark: Boolean,
     scheme: ColorScheme,
 ): FcodeMarkdownColors {
-    val codeBackground = when (palette) {
-        FcodeColorPalette.ROSE -> if (dark) Color(0xFF100D0F) else Color(0xFF292125)
-        FcodeColorPalette.OCEAN -> if (dark) Color(0xFF091018) else Color(0xFF152331)
-        FcodeColorPalette.FOREST -> if (dark) Color(0xFF09110D) else Color(0xFF15241D)
-        FcodeColorPalette.GRAPHITE -> if (dark) Color(0xFF0C0C10) else Color(0xFF202027)
-    }
+    // Code blocks should inherit the active theme surface. The previous light-mode
+    // palette used near-black colors, so both inline code and recycled TextViews could flash black.
+    val codeBackground = scheme.surfaceContainerHigh
     return FcodeMarkdownColors(
         cacheKey = "${palette.value}-${if (dark) "dark" else "light"}",
         text = scheme.onSurface,
@@ -245,7 +242,7 @@ internal fun fcodeMarkdownColors(
         inlineCodeBackground = scheme.primaryContainer.copy(alpha = if (dark) 0.72f else 0.76f),
         inlineCodeText = scheme.onPrimaryContainer,
         codeBlockBackground = codeBackground,
-        codeBlockText = if (dark) Color(0xFFECE8ED) else Color(0xFFF7F3F6),
+        codeBlockText = scheme.onSurface,
         tableHeader = scheme.secondaryContainer,
         tableBorder = scheme.outlineVariant,
         diffAddedBackground = if (dark) Color(0xFF173C2A) else Color(0xFFD8F3DC),
@@ -286,7 +283,6 @@ internal fun FcodeChatBackdrop(
             )
         } else {
             Canvas(modifier = Modifier.fillMaxSize()) {
-                val longest = maxOf(size.width, size.height)
                 when (style) {
                     FcodeChatBackgroundStyle.THEME, FcodeChatBackgroundStyle.CUSTOM -> {
                         drawRect(
@@ -296,18 +292,16 @@ internal fun FcodeChatBackdrop(
                         )
                     }
                     FcodeChatBackgroundStyle.AURORA -> {
+                        // One full-screen shader instead of two overlapping radial passes.
                         drawRect(
-                            Brush.radialGradient(
-                                colors = listOf(colors.primary.copy(alpha = 0.18f), Color.Transparent),
-                                center = Offset(size.width * 0.12f, size.height * 0.16f),
-                                radius = longest * 0.72f,
-                            ),
-                        )
-                        drawRect(
-                            Brush.radialGradient(
-                                colors = listOf(colors.tertiary.copy(alpha = 0.14f), Color.Transparent),
-                                center = Offset(size.width * 0.92f, size.height * 0.70f),
-                                radius = longest * 0.66f,
+                            Brush.linearGradient(
+                                colors = listOf(
+                                    colors.primary.copy(alpha = 0.16f),
+                                    Color.Transparent,
+                                    colors.tertiary.copy(alpha = 0.12f),
+                                ),
+                                start = Offset.Zero,
+                                end = Offset(size.width, size.height),
                             ),
                         )
                     }
@@ -323,11 +317,6 @@ internal fun FcodeChatBackdrop(
                                 end = Offset(size.width, size.height),
                             ),
                         )
-                        drawRect(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, colors.tertiaryContainer.copy(alpha = 0.13f)),
-                            ),
-                        )
                     }
                     FcodeChatBackgroundStyle.GRID -> {
                         drawRect(
@@ -335,7 +324,8 @@ internal fun FcodeChatBackdrop(
                                 listOf(colors.primaryContainer.copy(alpha = 0.12f), Color.Transparent),
                             ),
                         )
-                        val step = 28.dp.toPx()
+                        // Halve the number of line draw calls on high-density displays.
+                        val step = 52.dp.toPx()
                         val line = colors.outlineVariant.copy(alpha = 0.20f)
                         var x = 0f
                         while (x <= size.width) {

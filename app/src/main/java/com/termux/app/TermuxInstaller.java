@@ -26,9 +26,13 @@ import com.termux.shared.termux.TermuxUtils;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -61,6 +65,9 @@ import static com.termux.shared.termux.TermuxConstants.TERMUX_STAGING_PREFIX_DIR
 final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
+    private static final String LEGACY_TERMUX_PREFIX = "/data/data/com.termux/files/usr";
+    private static final String LEGACY_TERMUX_HOME = "/data/data/com.termux/files/home";
+    private static final String[] APP_MANAGED_BINARIES = {"codex", "mihomo"};
 
     /** Performs bootstrap setup if necessary. */
     static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
@@ -95,16 +102,13 @@ final class TermuxInstaller {
             return;
         }
 
-        // If prefix directory exists, even if its a symlink to a valid directory and symlink is not broken/dangling
-        if (FileUtils.directoryFileExists(TERMUX_PREFIX_DIR_PATH, true)) {
-            File[] PREFIX_FILE_LIST =  TERMUX_PREFIX_DIR.listFiles();
-            // If prefix directory is empty or only contains the tmp directory
-            if(PREFIX_FILE_LIST == null || PREFIX_FILE_LIST.length == 0 || (PREFIX_FILE_LIST.length == 1 && TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH.equals(PREFIX_FILE_LIST[0].getAbsolutePath()))) {
-                Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" exists but is empty or only contains the tmp directory.");
-            } else {
-                whenDone.run();
-                return;
-            }
+        // Codex and Mihomo can create $PREFIX/bin before the Termux bootstrap exists. A non-empty
+        // prefix therefore does not prove that apt is usable; check the actual bootstrap tools.
+        if (isBootstrapReady()) {
+            whenDone.run();
+            return;
+        } else if (FileUtils.directoryFileExists(TERMUX_PREFIX_DIR_PATH, true)) {
+            Logger.logInfo(LOG_TAG, "The prefix exists but bash/apt-get are missing; repairing the bootstrap.");
         } else if (FileUtils.fileExists(TERMUX_PREFIX_DIR_PATH, false)) {
             Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" does not exist but another file exists at its destination.");
         }
@@ -117,6 +121,7 @@ final class TermuxInstaller {
                     Logger.logInfo(LOG_TAG, "Installing " + TermuxConstants.TERMUX_APP_NAME + " bootstrap packages.");
 
                     Error error;
+                    final List<File> preservedBinaries = preserveAppManagedBinaries(activity);
 
                     // Delete prefix staging directory or any file at its destination
                     error = FileUtils.deleteFile("termux prefix staging directory", TERMUX_STAGING_PREFIX_DIR_PATH, true);
@@ -184,10 +189,15 @@ final class TermuxInstaller {
                                 }
 
                                 if (!isDirectory) {
+                                    ByteArrayOutputStream entryBytes = new ByteArrayOutputStream(
+                                        zipEntry.getSize() > 0 && zipEntry.getSize() < Integer.MAX_VALUE
+                                            ? (int) zipEntry.getSize() : 8192);
+                                    int readBytes;
+                                    while ((readBytes = zipInput.read(buffer)) != -1)
+                                        entryBytes.write(buffer, 0, readBytes);
+                                    byte[] patched = patchBootstrapPaths(entryBytes.toByteArray());
                                     try (FileOutputStream outStream = new FileOutputStream(targetFile)) {
-                                        int readBytes;
-                                        while ((readBytes = zipInput.read(buffer)) != -1)
-                                            outStream.write(buffer, 0, readBytes);
+                                        outStream.write(patched);
                                     }
                                     if (zipEntryName.startsWith("bin/") || zipEntryName.startsWith("libexec") ||
                                         zipEntryName.startsWith("lib/apt/apt-helper") || zipEntryName.startsWith("lib/apt/methods") ||
@@ -200,10 +210,12 @@ final class TermuxInstaller {
                         }
                     }
 
+                    restoreAppManagedBinaries(preservedBinaries, TERMUX_STAGING_PREFIX_DIR);
+
                     if (symlinks.isEmpty())
                         throw new RuntimeException("No SYMLINKS.txt encountered");
                     for (Pair<String, String> symlink : symlinks) {
-                        Os.symlink(symlink.first, symlink.second);
+                        Os.symlink(patchBootstrapPath(symlink.first), symlink.second);
                     }
 
                     Logger.logInfo(LOG_TAG, "Moving termux prefix staging to prefix directory.");
@@ -241,6 +253,7 @@ final class TermuxInstaller {
                     }
 
                     Logger.logInfo(LOG_TAG, "Bootstrap packages installed successfully.");
+                    deletePreservedBinaries(preservedBinaries);
                     activity.runOnUiThread(whenDone);
 
                 } catch (final Exception e) {
@@ -274,7 +287,6 @@ final class TermuxInstaller {
                     })
                     .setPositiveButton(R.string.bootstrap_error_try_again, (dialog, which) -> {
                         dialog.dismiss();
-                        FileUtils.deleteFile("termux prefix directory", TERMUX_PREFIX_DIR_PATH, true);
                         TermuxInstaller.setupBootstrapIfNeeded(activity, whenDone);
                     }).show();
             } catch (WindowManager.BadTokenException e1) {
@@ -352,6 +364,82 @@ final class TermuxInstaller {
 
     private static Error ensureDirectoryExists(File directory) {
         return FileUtils.createDirectoryFile(directory.getAbsolutePath());
+    }
+
+    static boolean isBootstrapReady() {
+        return new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "bash").canExecute() &&
+            new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "apt-get").canExecute();
+    }
+
+    static String patchBootstrapPath(String value) {
+        if (value == null || value.isEmpty()) return value;
+        return value.replace(LEGACY_TERMUX_PREFIX, TERMUX_PREFIX_DIR_PATH)
+            .replace(LEGACY_TERMUX_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
+    }
+
+    static byte[] patchBootstrapPaths(byte[] source) {
+        byte[] patched = replaceEqualLength(source,
+            LEGACY_TERMUX_PREFIX.getBytes(StandardCharsets.US_ASCII),
+            TERMUX_PREFIX_DIR_PATH.getBytes(StandardCharsets.US_ASCII));
+        return replaceEqualLength(patched,
+            LEGACY_TERMUX_HOME.getBytes(StandardCharsets.US_ASCII),
+            TermuxConstants.TERMUX_HOME_DIR_PATH.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static byte[] replaceEqualLength(byte[] source, byte[] oldValue, byte[] newValue) {
+        if (oldValue.length != newValue.length)
+            throw new IllegalStateException("Bootstrap path replacements must have equal lengths");
+        byte[] result = source.clone();
+        for (int i = 0; i <= result.length - oldValue.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < oldValue.length; j++) {
+                if (result[i + j] != oldValue[j]) { match = false; break; }
+            }
+            if (match) {
+                System.arraycopy(newValue, 0, result, i, newValue.length);
+                i += newValue.length - 1;
+            }
+        }
+        return result;
+    }
+
+    private static List<File> preserveAppManagedBinaries(Activity activity) throws IOException {
+        List<File> preserved = new ArrayList<>();
+        for (String name : APP_MANAGED_BINARIES) {
+            File source = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, name);
+            File backup = new File(activity.getCacheDir(), "fcode-bootstrap-preserve-" + name);
+            if (source.isFile()) copyFile(source, backup);
+            if (backup.isFile()) preserved.add(backup);
+        }
+        return preserved;
+    }
+
+    private static void restoreAppManagedBinaries(List<File> preserved, File stagingPrefix) throws IOException {
+        File bin = new File(stagingPrefix, "bin");
+        if (!bin.isDirectory() && !bin.mkdirs()) throw new IOException("Cannot create bootstrap bin directory");
+        for (File backup : preserved) {
+            String name = backup.getName().substring("fcode-bootstrap-preserve-".length());
+            File destination = new File(bin, name);
+            copyFile(backup, destination);
+            if (!destination.setExecutable(true, false) && !destination.canExecute())
+                throw new IOException("Cannot restore " + name);
+        }
+    }
+
+    private static void deletePreservedBinaries(List<File> preserved) {
+        for (File backup : preserved) if (!backup.delete()) backup.deleteOnExit();
+    }
+
+    private static void copyFile(File source, File destination) throws IOException {
+        File parent = destination.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs())
+            throw new IOException("Cannot create " + parent);
+        try (FileInputStream input = new FileInputStream(source);
+             FileOutputStream output = new FileOutputStream(destination)) {
+            byte[] data = new byte[128 * 1024];
+            int count;
+            while ((count = input.read(data)) != -1) if (count > 0) output.write(data, 0, count);
+        }
     }
 
     public static byte[] loadZipBytes() {

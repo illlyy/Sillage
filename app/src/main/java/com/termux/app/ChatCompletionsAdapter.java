@@ -36,6 +36,24 @@ final class ChatCompletionsAdapter {
     private static final class ToolCall {
         String id="", name="", arguments="";
     }
+    static final class NamespacedTool {
+        final String namespace;
+        final String name;
+        final String flatName;
+        final boolean custom;
+        NamespacedTool(String namespace,String name,String flatName,boolean custom) {
+            this.namespace=namespace; this.name=name; this.flatName=flatName; this.custom=custom;
+        }
+    }
+    static final class NamespacedTools {
+        final LinkedHashMap<String,NamespacedTool> byFlat=new LinkedHashMap<>();
+        final LinkedHashMap<String,String> flatByQualified=new LinkedHashMap<>();
+        String flatName(String namespace,String name) {
+            if(namespace==null||namespace.isEmpty())return name;
+            String flat=flatByQualified.get(namespace+"\n"+name);
+            return flat==null?name:flat;
+        }
+    }
     private static final class CachedResponse {
         String id="", model="", reasoning="";
         final LinkedHashMap<String,JSONObject> calls=new LinkedHashMap<>();
@@ -53,6 +71,8 @@ final class ChatCompletionsAdapter {
     static byte[] responsesRequestToChat(byte[] source) throws Exception {
         JSONObject in=new JSONObject(new String(source,StandardCharsets.UTF_8));
         JSONObject out=new JSONObject();
+        JSONArray tools=in.optJSONArray("tools");
+        NamespacedTools namespacedTools=collectNamespacedTools(tools);
         copy(in,out,"model"); copy(in,out,"temperature"); copy(in,out,"top_p"); copy(in,out,"parallel_tool_calls"); copy(in,out,"service_tier"); copy(in,out,"prompt_cache_key");
         String model=in.optString("model");
         if(in.has("max_output_tokens")) out.put(usesMaxCompletionTokens(model)?"max_completion_tokens":"max_tokens",in.get("max_output_tokens"));
@@ -62,11 +82,11 @@ final class ChatCompletionsAdapter {
         String instructions=in.optString("instructions"); if(!instructions.isEmpty()) messages.put(new JSONObject().put("role","system").put("content",instructions));
         Object input=in.opt("input");
         if(input instanceof String) messages.put(new JSONObject().put("role","user").put("content",input));
-        else if(input instanceof JSONObject) convertInput(enrichInputWithHistory(in,new JSONArray().put(input)),messages);
-        else if(input instanceof JSONArray) convertInput(enrichInputWithHistory(in,(JSONArray)input),messages);
+        else if(input instanceof JSONObject) convertInput(enrichInputWithHistory(in,new JSONArray().put(input)),messages,namespacedTools);
+        else if(input instanceof JSONArray) convertInput(enrichInputWithHistory(in,(JSONArray)input),messages,namespacedTools);
         out.put("messages",messages);
-        JSONArray tools=in.optJSONArray("tools"); if(tools!=null) out.put("tools",convertTools(tools));
-        Object choice=in.opt("tool_choice"); if(choice!=null) out.put("tool_choice",convertToolChoice(choice));
+        if(tools!=null) out.put("tools",convertTools(tools,namespacedTools,""));
+        Object choice=in.opt("tool_choice"); if(choice!=null) out.put("tool_choice",convertToolChoice(choice,namespacedTools));
         out.put("stream",true); out.put("stream_options",new JSONObject().put("include_usage",true));
         return out.toString().getBytes(StandardCharsets.UTF_8);
     }
@@ -87,7 +107,7 @@ final class ChatCompletionsAdapter {
         return normalized.startsWith("gpt-5")||normalized.startsWith("o1")||normalized.startsWith("o3")||normalized.startsWith("o4");
     }
 
-    private static void convertInput(JSONArray input, JSONArray messages) throws Exception {
+    private static void convertInput(JSONArray input, JSONArray messages, NamespacedTools namespacedTools) throws Exception {
         ConversionState state=new ConversionState();
         for(int i=0;i<input.length();i++) {
             JSONObject item=input.optJSONObject(i); if(item==null) continue; String type=item.optString("type");
@@ -97,7 +117,8 @@ final class ChatCompletionsAdapter {
                 else if(!attachReasoning(state.lastAssistant,value)) appendReasoning(state.pendingReasoning,value);
             } else if("function_call".equals(type)||"custom_tool_call".equals(type)) {
                 appendReasoning(state.pendingReasoning,extractReasoningText(item));
-                JSONObject fn=new JSONObject().put("name",item.optString("name")).put("arguments","custom_tool_call".equals(type)?new JSONObject().put("input",item.optString("input")).toString():item.optString("arguments","{}"));
+                String callName=namespacedTools.flatName(item.optString("namespace"),item.optString("name"));
+                JSONObject fn=new JSONObject().put("name",callName).put("arguments","custom_tool_call".equals(type)?new JSONObject().put("input",item.optString("input")).toString():item.optString("arguments","{}"));
                 JSONObject tc=new JSONObject().put("id",item.optString("call_id",item.optString("id","call_"+shortId()))).put("type","function").put("function",fn);
                 state.pendingToolCalls.put(tc);
             } else if("function_call_output".equals(type)||"custom_tool_call_output".equals(type)) {
@@ -227,17 +248,64 @@ final class ChatCompletionsAdapter {
         }
         return rich?parts:textOnly.toString();
     }
-    private static JSONArray convertTools(JSONArray tools) throws Exception {
+    private static JSONArray convertTools(JSONArray tools,NamespacedTools namespacedTools,String parentNamespace) throws Exception {
         JSONArray result=new JSONArray();
         for(int i=0;i<tools.length();i++) { JSONObject t=tools.optJSONObject(i); if(t==null) continue; String type=t.optString("type");
-            if("function".equals(type)) { JSONObject fn=new JSONObject().put("name",t.optString("name")).put("description",t.optString("description")); fn.put("parameters",t.optJSONObject("parameters")!=null?t.optJSONObject("parameters"):new JSONObject().put("type","object").put("properties",new JSONObject())); result.put(new JSONObject().put("type","function").put("function",fn)); }
-            else if("custom".equals(type)) { String name=t.optString("name","custom_tool"); JSONObject params=new JSONObject().put("type","object").put("properties",new JSONObject().put("input",new JSONObject().put("type","string"))).put("required",new JSONArray().put("input")); result.put(new JSONObject().put("type","function").put("function",new JSONObject().put("name",name).put("description",t.optString("description")).put("parameters",params))); }
+            if("namespace".equals(type)) {
+                String own=t.optString("name"); String namespace=parentNamespace.isEmpty()?own:parentNamespace+"."+own;
+                JSONArray children=t.optJSONArray("tools"); if(children!=null){JSONArray converted=convertTools(children,namespacedTools,namespace);for(int j=0;j<converted.length();j++)result.put(converted.get(j));}
+            }
+            else if("function".equals(type)) { String name=namespacedTools.flatName(parentNamespace,t.optString("name")); JSONObject fn=new JSONObject().put("name",name).put("description",t.optString("description")); fn.put("parameters",t.optJSONObject("parameters")!=null?t.optJSONObject("parameters"):new JSONObject().put("type","object").put("properties",new JSONObject())); result.put(new JSONObject().put("type","function").put("function",fn)); }
+            else if("custom".equals(type)) { String name=namespacedTools.flatName(parentNamespace,t.optString("name","custom_tool")); JSONObject params=new JSONObject().put("type","object").put("properties",new JSONObject().put("input",new JSONObject().put("type","string"))).put("required",new JSONArray().put("input")); result.put(new JSONObject().put("type","function").put("function",new JSONObject().put("name",name).put("description",t.optString("description")).put("parameters",params))); }
         }
         return result;
     }
-    private static Object convertToolChoice(Object value) throws Exception {
+
+    static NamespacedTools namespacedTools(byte[] responsesRequest) {
+        try { return collectNamespacedTools(new JSONObject(new String(responsesRequest,StandardCharsets.UTF_8)).optJSONArray("tools")); }
+        catch(Exception ignored) { return new NamespacedTools(); }
+    }
+
+    private static NamespacedTools collectNamespacedTools(JSONArray tools) throws Exception {
+        NamespacedTools result=new NamespacedTools();
+        collectNamespacedTools(tools,"",result);
+        return result;
+    }
+
+    private static void collectNamespacedTools(JSONArray tools,String parentNamespace,NamespacedTools output) throws Exception {
+        if(tools==null)return;
+        for(int i=0;i<tools.length();i++) {
+            JSONObject tool=tools.optJSONObject(i); if(tool==null)continue;
+            String type=tool.optString("type"),name=tool.optString("name");
+            if("namespace".equals(type)) {
+                String namespace=parentNamespace.isEmpty()?name:parentNamespace+"."+name;
+                collectNamespacedTools(tool.optJSONArray("tools"),namespace,output);
+            } else if(!parentNamespace.isEmpty()&&("function".equals(type)||"custom".equals(type))) {
+                String qualified=parentNamespace+"\n"+name;
+                String flat=flatToolName(parentNamespace,name);
+                NamespacedTool collision=output.byFlat.get(flat);
+                if(collision!=null&&(!collision.namespace.equals(parentNamespace)||!collision.name.equals(name))) {
+                    flat=trimToolName(flat+"_"+Integer.toHexString(qualified.hashCode()));
+                }
+                NamespacedTool mapped=new NamespacedTool(parentNamespace,name,flat,"custom".equals(type));
+                output.byFlat.put(flat,mapped);
+                output.flatByQualified.put(qualified,flat);
+            }
+        }
+    }
+
+    private static String flatToolName(String namespace,String name) {
+        return trimToolName((namespace+"__"+name).replaceAll("[^A-Za-z0-9_-]","_"));
+    }
+
+    private static String trimToolName(String value) {
+        if(value.length()<=64)return value;
+        String hash=Integer.toHexString(value.hashCode());
+        return value.substring(0,Math.max(1,63-hash.length()))+"_"+hash;
+    }
+    private static Object convertToolChoice(Object value,NamespacedTools namespacedTools) throws Exception {
         if(!(value instanceof JSONObject)) return value;
-        JSONObject v=(JSONObject)value; if("function".equals(v.optString("type"))) return new JSONObject().put("type","function").put("function",new JSONObject().put("name",v.optString("name")));
+        JSONObject v=(JSONObject)value; if("function".equals(v.optString("type"))) return new JSONObject().put("type","function").put("function",new JSONObject().put("name",namespacedTools.flatName(v.optString("namespace"),v.optString("name"))));
         return value;
     }
 
@@ -253,10 +321,16 @@ final class ChatCompletionsAdapter {
     }
 
     static Set<String> customToolNames(byte[] responsesRequest) {
-        Set<String> names=new HashSet<>(); try { JSONArray tools=new JSONObject(new String(responsesRequest,StandardCharsets.UTF_8)).optJSONArray("tools"); if(tools!=null)for(int i=0;i<tools.length();i++){JSONObject t=tools.optJSONObject(i);if(t!=null&&"custom".equals(t.optString("type")))names.add(t.optString("name"));} } catch(Exception ignored) {} return names;
+        Set<String> names=new HashSet<>(); try { JSONArray tools=new JSONObject(new String(responsesRequest,StandardCharsets.UTF_8)).optJSONArray("tools"); if(tools!=null)for(int i=0;i<tools.length();i++){JSONObject t=tools.optJSONObject(i);if(t!=null&&"custom".equals(t.optString("type")))names.add(t.optString("name"));} NamespacedTools mapped=collectNamespacedTools(tools);for(NamespacedTool tool:mapped.byFlat.values())if(tool.custom)names.add(tool.flatName); } catch(Exception ignored) {} return names;
     }
     static StreamStats streamChatResponseToResponses(InputStream source, String contentType,
                                                            String fallbackModel, Set<String> customTools,
+                                                           StreamEventSink sink) throws Exception {
+        return streamChatResponseToResponses(source,contentType,fallbackModel,customTools,new NamespacedTools(),sink);
+    }
+    static StreamStats streamChatResponseToResponses(InputStream source, String contentType,
+                                                           String fallbackModel, Set<String> customTools,
+                                                           NamespacedTools namespacedTools,
                                                            StreamEventSink sink) throws Exception {
         BufferedReader reader = new BufferedReader(new InputStreamReader(source, StandardCharsets.UTF_8));
         StreamStats stats = new StreamStats();
@@ -282,13 +356,13 @@ final class ChatCompletionsAdapter {
                 body.append(line);
             }
             ChatResult converted = chatResponseToResponses(
-                body.toString().getBytes(StandardCharsets.UTF_8), contentType, fallbackModel, customTools);
+                body.toString().getBytes(StandardCharsets.UTF_8), contentType, fallbackModel, customTools,namespacedTools);
             sink.emit(converted.body);
             stats.outputChunks = 1;
             return stats;
         }
 
-        ChatStreamState state = new ChatStreamState(fallbackModel, customTools, sink, stats);
+        ChatStreamState state = new ChatStreamState(fallbackModel, customTools, namespacedTools, sink, stats);
         for (String prefixLine : prefixLines) state.acceptLine(prefixLine);
         String line;
         while ((line = reader.readLine()) != null) state.acceptLine(line);
@@ -305,6 +379,7 @@ final class ChatCompletionsAdapter {
     private static final class ChatStreamState {
         private final String responseId = "resp_" + shortId();
         private final Set<String> customTools;
+        private final NamespacedTools namespacedTools;
         private final StreamEventSink sink;
         private final StreamStats stats;
         private final StringBuilder text = new StringBuilder();
@@ -327,10 +402,11 @@ final class ChatCompletionsAdapter {
         private boolean toolsEmitted;
         private boolean completed;
 
-        ChatStreamState(String fallbackModel, Set<String> customTools, StreamEventSink sink,
+        ChatStreamState(String fallbackModel, Set<String> customTools, NamespacedTools namespacedTools, StreamEventSink sink,
                         StreamStats stats) {
             this.model = fallbackModel == null ? "" : fallbackModel;
             this.customTools = customTools == null ? Collections.emptySet() : new HashSet<>(customTools);
+            this.namespacedTools = namespacedTools == null ? new NamespacedTools() : namespacedTools;
             this.sink = sink;
             this.stats = stats;
         }
@@ -382,7 +458,7 @@ final class ChatCompletionsAdapter {
             if (started) return;
             started = true;
             JSONObject initial = buildResponse(responseId, model, "", "",
-                new LinkedHashMap<>(), null, customTools);
+                new LinkedHashMap<>(), null, customTools,namespacedTools);
             initial.put("status", "in_progress");
             initial.put("output", new JSONArray());
             emitEvent(new JSONObject().put("type", "response.created").put("response", initial));
@@ -500,6 +576,8 @@ final class ChatCompletionsAdapter {
             int outputIndex = nextOutputIndex++;
             String callId = tool.id.isEmpty() ? "call_" + shortId() : tool.id;
             boolean custom = customTools.contains(tool.name);
+            NamespacedTool namespaced = namespacedTools.byFlat.get(tool.name);
+            String responseName = namespaced == null ? tool.name : namespaced.name;
             String itemId = (custom ? "ctc_" : "fc_") + shortId();
             String input = tool.arguments;
             if (custom) {
@@ -508,8 +586,9 @@ final class ChatCompletionsAdapter {
             }
             JSONObject added = new JSONObject().put("id", itemId)
                 .put("type", custom ? "custom_tool_call" : "function_call")
-                .put("status", "in_progress").put("call_id", callId).put("name", tool.name)
+                .put("status", "in_progress").put("call_id", callId).put("name", responseName)
                 .put(custom ? "input" : "arguments", "");
+            if (namespaced != null) added.put("namespace", namespaced.namespace);
             emitEvent(new JSONObject().put("type", "response.output_item.added")
                 .put("output_index", outputIndex).put("item", added));
             if (!input.isEmpty()) {
@@ -538,7 +617,7 @@ final class ChatCompletionsAdapter {
             closeContentItems();
             emitTools();
             JSONObject response = buildResponse(responseId, model, text.toString(), reasoning.toString(),
-                tools, usage, customTools);
+                tools, usage, customTools,namespacedTools);
             response.put("output", completedOutput);
             recordResponse(response);
             emitEvent(new JSONObject().put("type", "response.completed").put("response", response));
@@ -565,8 +644,11 @@ final class ChatCompletionsAdapter {
         return result.toString();
     }
 
-    static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel) throws Exception { return chatResponseToResponses(source,contentType,fallbackModel,new HashSet<>()); }
+    static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel) throws Exception { return chatResponseToResponses(source,contentType,fallbackModel,new HashSet<>(),new NamespacedTools()); }
     static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel, Set<String> customTools) throws Exception {
+        return chatResponseToResponses(source,contentType,fallbackModel,customTools,new NamespacedTools());
+    }
+    static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel, Set<String> customTools,NamespacedTools namespacedTools) throws Exception {
         String raw=new String(source,StandardCharsets.UTF_8); String model=fallbackModel; String responseId="resp_"+shortId(); StringBuilder text=new StringBuilder(); StringBuilder reasoning=new StringBuilder(); Map<Integer,ToolCall> tools=new LinkedHashMap<>(); JSONObject usage=null;
         if(contentType!=null&&contentType.toLowerCase().contains("text/event-stream")||raw.contains("data:")) {
             String[] lines=raw.split("\\r?\\n");
@@ -579,7 +661,7 @@ final class ChatCompletionsAdapter {
             JSONObject root=new JSONObject(raw); if(!root.optString("model").isEmpty())model=root.optString("model"); usage=root.optJSONObject("usage"); JSONArray choices=root.optJSONArray("choices");
             if(choices!=null&&choices.length()>0){JSONObject message=choices.optJSONObject(0).optJSONObject("message"); if(message!=null){appendValue(text,message.opt("content"));appendValue(reasoning,message.opt("reasoning_content"));mergeToolCalls(tools,message.optJSONArray("tool_calls"));}}
         }
-        JSONObject response=buildResponse(responseId,model,text.toString(),reasoning.toString(),tools,usage,customTools);
+        JSONObject response=buildResponse(responseId,model,text.toString(),reasoning.toString(),tools,usage,customTools,namespacedTools);
         recordResponse(response);
         return new ChatResult(buildEventStream(response).getBytes(StandardCharsets.UTF_8),"text/event-stream; charset=utf-8");
     }
@@ -602,14 +684,19 @@ final class ChatCompletionsAdapter {
 
     static void clearHistoryForTests() { synchronized(HISTORY_LOCK){RESPONSE_HISTORY.clear();CALL_RESPONSE_INDEX.clear();} }
 
-    private static JSONObject buildResponse(String id,String model,String text,String reasoning,Map<Integer,ToolCall> tools,JSONObject chatUsage,Set<String> customTools) throws Exception {
+    private static JSONObject buildResponse(String id,String model,String text,String reasoning,Map<Integer,ToolCall> tools,JSONObject chatUsage,Set<String> customTools,NamespacedTools namespacedTools) throws Exception {
         JSONArray output=new JSONArray();
         if(!reasoning.isEmpty()) output.put(new JSONObject().put("id","rs_"+shortId()).put("type","reasoning").put("summary",new JSONArray().put(new JSONObject().put("type","summary_text").put("text",reasoning))));
         if(!text.isEmpty()) output.put(messageItem(text,true));
         for(ToolCall t:tools.values()) {
             String callId=t.id.isEmpty()?"call_"+shortId():t.id;
-            if(customTools.contains(t.name)) { String input=t.arguments; try{input=new JSONObject(t.arguments).optString("input",t.arguments);}catch(Exception ignored){} output.put(new JSONObject().put("id","ctc_"+shortId()).put("type","custom_tool_call").put("status","completed").put("call_id",callId).put("name",t.name).put("input",input)); }
-            else output.put(new JSONObject().put("id","fc_"+shortId()).put("type","function_call").put("status","completed").put("call_id",callId).put("name",t.name).put("arguments",t.arguments));
+            NamespacedTool namespaced=namespacedTools==null?null:namespacedTools.byFlat.get(t.name);
+            String responseName=namespaced==null?t.name:namespaced.name;
+            JSONObject item;
+            if(customTools.contains(t.name)) { String input=t.arguments; try{input=new JSONObject(t.arguments).optString("input",t.arguments);}catch(Exception ignored){} item=new JSONObject().put("id","ctc_"+shortId()).put("type","custom_tool_call").put("status","completed").put("call_id",callId).put("name",responseName).put("input",input); }
+            else item=new JSONObject().put("id","fc_"+shortId()).put("type","function_call").put("status","completed").put("call_id",callId).put("name",responseName).put("arguments",t.arguments);
+            if(namespaced!=null)item.put("namespace",namespaced.namespace);
+            output.put(item);
         }
         JSONObject usage=new JSONObject(); int input=chatUsage==null?0:chatUsage.optInt("prompt_tokens"); int out=chatUsage==null?0:chatUsage.optInt("completion_tokens"); usage.put("input_tokens",input).put("output_tokens",out).put("total_tokens",chatUsage==null?input+out:chatUsage.optInt("total_tokens",input+out)); usage.put("input_tokens_details",new JSONObject().put("cached_tokens",0)); usage.put("output_tokens_details",new JSONObject().put("reasoning_tokens",0));
         return new JSONObject().put("id",id).put("object","response").put("created_at",System.currentTimeMillis()/1000).put("status","completed").put("error",JSONObject.NULL).put("incomplete_details",JSONObject.NULL).put("instructions",JSONObject.NULL).put("model",model).put("output",output).put("parallel_tool_calls",true).put("temperature",1).put("tool_choice","auto").put("tools",new JSONArray()).put("top_p",1).put("usage",usage);

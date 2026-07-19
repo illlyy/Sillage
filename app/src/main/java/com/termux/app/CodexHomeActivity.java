@@ -4699,8 +4699,9 @@ public final class CodexHomeActivity extends Activity {
                 toml.append("base_url = ").append(tomlQuote(url)).append("\n");
                 toml.append("wire_api = ").append(tomlQuote(LocalApiProxy.CODEX_WIRE_API)).append("\n");
                 toml.append("experimental_bearer_token = ").append(tomlQuote(key)).append("\n");
+                String mergedConfig = NativeMcpConfigStore.mergePreservingMcp(config, toml.toString());
                 try (FileOutputStream output = new FileOutputStream(config)) {
-                    output.write(toml.toString().getBytes(StandardCharsets.UTF_8));
+                    output.write(mergedConfig.getBytes(StandardCharsets.UTF_8));
                 }
             } catch (Exception error) {
                 runOnUiThread(() -> lambda$persistCodexConfiguration$22$CodexHomeActivity(error));
@@ -4744,9 +4745,11 @@ public final class CodexHomeActivity extends Activity {
         toml.append("requires_openai_auth = true\n");
         toml.append("base_url = \"http://127.0.0.1:").append(port).append("\"\n");
         toml.append("experimental_bearer_token = ").append(tomlQuote(key)).append("\n");
-        FileOutputStream output = new FileOutputStream(new File(codexHome, "config.toml"));
+        File configFile = new File(codexHome, "config.toml");
+        String mergedConfig = NativeMcpConfigStore.mergePreservingMcp(configFile, toml.toString());
+        FileOutputStream output = new FileOutputStream(configFile);
         try {
-            output.write(toml.toString().getBytes(StandardCharsets.UTF_8));
+            output.write(mergedConfig.getBytes(StandardCharsets.UTF_8));
             output.close();
         } catch (Throwable th) {
             try {

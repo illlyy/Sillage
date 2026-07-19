@@ -2,6 +2,7 @@ package com.termux.app
 
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -9,8 +10,9 @@ import android.webkit.WebView
 import android.widget.Toast
 import com.termux.BuildConfig
 import com.termux.shared.termux.TermuxConstants
+import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,7 +21,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -33,6 +37,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -43,8 +50,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.rerere.hugeicons.HugeIcons
@@ -62,7 +72,24 @@ import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tick02
 
-private enum class SettingsPage { ROOT, THEME, CHAT_BACKGROUND, OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY }
+private enum class SettingsPage {
+    ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND,
+    MCP, MCP_EDITOR, SKILLS,
+    OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY,
+}
+
+private data class SettingsEnvironmentSnapshot(
+    val loaded: Boolean = false,
+    val installedToolCount: Int = 0,
+    val bootstrapInstalled: Boolean = false,
+    val mihomoSupported: Boolean = true,
+    val mihomoInstalled: Boolean = false,
+    val mihomoRunning: Boolean = false,
+    val mihomoMixedPort: Int = MihomoManager.DEFAULT_MIXED_PORT,
+)
+
+private data class McpSettingsSnapshot(val loaded: Boolean = false, val servers: List<NativeMcpServerConfig> = emptyList(), val error: String = "")
+private data class SkillSettingsSnapshot(val loaded: Boolean = false, val official: List<NativeOfficialSkill> = emptyList(), val installed: List<NativeInstalledSkill> = emptyList(), val error: String = "")
 
 private enum class CodexDependentFeature {
     WEB_UI,
@@ -79,6 +106,7 @@ class NativeSettingsActivity : ComponentActivity() {
         setContent {
             var page by remember { mutableStateOf(SettingsPage.ROOT) }
             var editingProfileId by remember { mutableStateOf<String?>(null) }
+            var editingMcpKey by remember { mutableStateOf<String?>(null) }
             var providerRevision by remember { mutableIntStateOf(0) }
             var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
             var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
@@ -87,8 +115,10 @@ class NativeSettingsActivity : ComponentActivity() {
             var chatBackgroundDim by remember { mutableFloatStateOf(prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)) }
             var language by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "system").orEmpty()) }
             var animations by remember { mutableStateOf(prefs.getBoolean(KEY_STREAM_ANIMATIONS, true)) }
+            var fixedStreamingViewport by remember { mutableStateOf(prefs.getBoolean(KEY_STREAM_FIXED_VIEWPORT, true)) }
             var reasoning by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING, true)) }
             var follow by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOLLOW, true)) }
+            var showResponseStats by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_RESPONSE_STATS, true)) }
             var dialog by remember { mutableStateOf<String?>(null) }
             var missingCliFeature by remember { mutableStateOf<CodexDependentFeature?>(null) }
             var codexCliInstalled by remember { mutableStateOf(isCodexCliInstalled()) }
@@ -108,8 +138,12 @@ class NativeSettingsActivity : ComponentActivity() {
             val navigateBack = {
                 page = when (page) {
                     SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
+                    SettingsPage.MCP_EDITOR -> SettingsPage.MCP
                     SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
-                    SettingsPage.THEME, SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS, SettingsPage.WEB_UI, SettingsPage.PROXY -> SettingsPage.ROOT
+                    SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
+                    SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
+                    SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
+                    SettingsPage.WEB_UI, SettingsPage.PROXY -> SettingsPage.ROOT
                     SettingsPage.ROOT -> { finish(); SettingsPage.ROOT }
                 }
             }
@@ -119,16 +153,61 @@ class NativeSettingsActivity : ComponentActivity() {
                 chatBackground = chatBackground,
                 chatBackgroundImage = chatBackgroundImage,
                 chatBackgroundDim = chatBackgroundDim,
+                showResponseStats = showResponseStats,
             ) {
-                BackHandler(onBack = navigateBack)
-                AnimatedContent(
-                    targetState = page,
-                    transitionSpec = { fadeIn() togetherWith fadeOut() },
-                    label = "settingsPage",
-                ) { target ->
+                val settingsBackplate = MaterialTheme.colorScheme.surfaceContainer
+                val settingsPageShape = remember { RoundedCornerShape(28.dp) }
+                SideEffect {
+                    // The Activity previously inherited Theme.Termux's black window. Predictive
+                    // back exposes that window behind the scaled page, producing black corners.
+                    window.setBackgroundDrawable(ColorDrawable(settingsBackplate.toArgb()))
+                }
+                val predictiveBackProgress = remember { androidx.compose.animation.core.Animatable(0f) }
+                var predictiveBackFromLeft by remember { mutableStateOf(true) }
+                val latestNavigateBack by rememberUpdatedState(navigateBack)
+                PredictiveBackHandler(enabled = page != SettingsPage.ROOT) { progress ->
+                    try {
+                        progress.collect { event ->
+                            predictiveBackFromLeft = event.swipeEdge == BackEventCompat.EDGE_LEFT
+                            predictiveBackProgress.snapTo(event.progress)
+                        }
+                        latestNavigateBack()
+                        predictiveBackProgress.snapTo(0f)
+                    } catch (_: CancellationException) {
+                        // A cancelled gesture settles from its current presentation value.
+                        withContext(NonCancellable) {
+                            predictiveBackProgress.animateTo(
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.86f, stiffness = 520f),
+                            )
+                        }
+                    }
+                }
+                Box(Modifier.fillMaxSize().background(settingsBackplate)) {
+                    AnimatedContent(
+                        targetState = page,
+                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                            val progress = predictiveBackProgress.value
+                            val direction = if (predictiveBackFromLeft) 1f else -1f
+                            translationX = size.width * 0.10f * progress * direction
+                            scaleX = 1f - 0.018f * progress
+                            scaleY = 1f - 0.018f * progress
+                            alpha = 1f - 0.045f * progress
+                            transformOrigin = TransformOrigin(if (predictiveBackFromLeft) 0f else 1f, 0.5f)
+                            // Clip only while the page separates from the screen edges. At rest the
+                            // page remains pixel-identical and edge-to-edge.
+                            shape = settingsPageShape
+                            clip = progress > 0.001f
+                            shadowElevation = 12.dp.toPx() * progress
+                            ambientShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.18f)
+                            spotShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.22f)
+                        },
+                        transitionSpec = { fadeIn() togetherWith fadeOut() },
+                        label = "settingsPage",
+                    ) { target ->
                     when (target) {
                         SettingsPage.ROOT -> SettingsRootPage(
-                            lang, providerStore.active(), theme, colorPalette, animations, reasoning, follow,
+                            lang, providerStore.active(),
                             onBack = { finish() },
                             onModels = { page = SettingsPage.MODEL_CONFIGS },
                             onWebUi = { page = SettingsPage.WEB_UI },
@@ -138,14 +217,21 @@ class NativeSettingsActivity : ComponentActivity() {
                             onProxy = { page = SettingsPage.PROXY },
                             onOverlay = { page = SettingsPage.OVERLAY },
                             onDevelopmentTools = { page = SettingsPage.DEVELOPMENT_TOOLS },
-                            onTheme = { page = SettingsPage.THEME },
+                            onAppearance = { page = SettingsPage.APPEARANCE },
+                            onMcp = { page = SettingsPage.MCP },
+                            onSkills = { page = SettingsPage.SKILLS },
                             onLanguage = { dialog = "language" },
                             onTypography = { dialog = "typography" },
-                            onAnimations = { animations = it; prefs.edit().putBoolean(KEY_STREAM_ANIMATIONS, it).apply() },
-                            onReasoning = { reasoning = it; prefs.edit().putBoolean(KEY_SHOW_REASONING, it).apply() },
-                            onFollow = { follow = it; prefs.edit().putBoolean(KEY_AUTO_FOLLOW, it).apply() },
                             prefs = prefs,
                             onAbout = { dialog = "about" },
+                        )
+                        SettingsPage.APPEARANCE -> AppearanceSettingsPage(
+                            lang = lang,
+                            theme = theme,
+                            colorPalette = colorPalette,
+                            onBack = navigateBack,
+                            onTheme = { page = SettingsPage.THEME },
+                            onChat = { page = SettingsPage.CHAT_APPEARANCE },
                         )
                         SettingsPage.THEME -> ThemeSettingsPage(
                             lang = lang,
@@ -162,6 +248,20 @@ class NativeSettingsActivity : ComponentActivity() {
                                 prefs.edit().putString(FcodeAppearancePreferences.COLOR_PALETTE, colorPalette).apply()
                             },
                             onOpenChatBackground = { page = SettingsPage.CHAT_BACKGROUND },
+                        )
+                        SettingsPage.CHAT_APPEARANCE -> ChatAppearanceSettingsPage(
+                            lang = lang,
+                            animations = animations,
+                            fixedStreamingViewport = fixedStreamingViewport,
+                            reasoning = reasoning,
+                            follow = follow,
+                            showResponseStats = showResponseStats,
+                            onBack = navigateBack,
+                            onAnimations = { animations = it; prefs.edit().putBoolean(KEY_STREAM_ANIMATIONS, it).apply() },
+                            onFixedStreamingViewport = { fixedStreamingViewport = it; prefs.edit().putBoolean(KEY_STREAM_FIXED_VIEWPORT, it).apply() },
+                            onReasoning = { reasoning = it; prefs.edit().putBoolean(KEY_SHOW_REASONING, it).apply() },
+                            onFollow = { follow = it; prefs.edit().putBoolean(KEY_AUTO_FOLLOW, it).apply() },
+                            onShowResponseStats = { showResponseStats = it; prefs.edit().putBoolean(KEY_SHOW_RESPONSE_STATS, it).apply() },
                         )
                         SettingsPage.CHAT_BACKGROUND -> ChatBackgroundSettingsPage(
                             lang = lang,
@@ -207,6 +307,22 @@ class NativeSettingsActivity : ComponentActivity() {
                                 onDeleted = { providerRevision++; page = SettingsPage.MODEL_CONFIGS },
                             )
                         }
+                        SettingsPage.MCP -> McpSettingsPage(
+                            lang = lang,
+                            prefs = prefs,
+                            onBack = navigateBack,
+                            onAdd = { editingMcpKey = null; page = SettingsPage.MCP_EDITOR },
+                            onEdit = { editingMcpKey = it; page = SettingsPage.MCP_EDITOR },
+                        )
+                        SettingsPage.MCP_EDITOR -> McpServerEditorPage(
+                            lang = lang,
+                            existingKey = editingMcpKey,
+                            prefs = prefs,
+                            onBack = navigateBack,
+                            onSaved = { page = SettingsPage.MCP },
+                            onDeleted = { page = SettingsPage.MCP },
+                        )
+                        SettingsPage.SKILLS -> SkillsSettingsPage(lang, prefs, navigateBack)
                         SettingsPage.PROXY -> ProxySettingsPage(
                             lang = lang,
                             prefs = prefs,
@@ -220,6 +336,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onClearCache = { resetWebUiPreferences(lang) },
                         )
                     }
+                }
                 }
                 when (dialog) {
                     "language" -> ChoiceDialog(
@@ -293,8 +410,10 @@ class NativeSettingsActivity : ComponentActivity() {
         const val KEY_THEME = "native_theme_mode_v1"
         const val KEY_LANGUAGE = "native_language_v1"
         const val KEY_STREAM_ANIMATIONS = "native_stream_animations_v1"
+        const val KEY_STREAM_FIXED_VIEWPORT = "native_stream_fixed_viewport_v1"
         const val KEY_SHOW_REASONING = "native_show_reasoning_v1"
         const val KEY_AUTO_FOLLOW = "native_auto_follow_v1"
+        const val KEY_SHOW_RESPONSE_STATS = "native_show_response_stats_v1"
     }
 }
 
@@ -314,14 +433,34 @@ private fun DevelopmentToolsSettingsPage(
             DevelopmentToolCatalog.recommendedIds
         }
     }
+    val scope = rememberCoroutineScope()
     var selectedIds by remember { mutableStateOf(initialSelection) }
-    var installedIds by remember { mutableStateOf(DevelopmentToolInstaller.installedIds()) }
+    var installedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var bootstrapInstalled by remember { mutableStateOf(false) }
+    var installLogAvailable by remember { mutableStateOf(false) }
     var installing by remember { mutableStateOf(false) }
     var installStage by remember { mutableStateOf("") }
     var installDetail by remember { mutableStateOf("") }
     var installError by remember { mutableStateOf<String?>(null) }
     var confirmInstall by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
+
+    fun refreshDevelopmentEnvironment() {
+        scope.launch {
+            val snapshot = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                Triple(
+                    DevelopmentToolInstaller.installedIds(),
+                    DevelopmentToolInstaller.isBootstrapInstalled(),
+                    DevelopmentToolInstaller.logFile().isFile,
+                )
+            }
+            installedIds = snapshot.first
+            bootstrapInstalled = snapshot.second
+            installLogAvailable = snapshot.third
+        }
+    }
+
+    LaunchedEffect(Unit) { refreshDevelopmentEnvironment() }
 
     fun updateSelection(value: Set<String>) {
         selectedIds = value.intersect(DevelopmentToolCatalog.allIds)
@@ -330,17 +469,24 @@ private fun DevelopmentToolsSettingsPage(
 
     fun installCodexIfSelected(selectedTools: List<DevelopmentTool>) {
         val codex = selectedTools.firstOrNull { it.codexCli } ?: return
-        if (DevelopmentToolInstaller.isInstalled(codex)) {
-            installedIds = DevelopmentToolInstaller.installedIds()
-            return
-        }
         val host = activity ?: run {
             installError = tr(lang, "当前页面无法启动安装器", "The installer cannot be started from this context")
             return
         }
-        CodexInstaller.setupBootstrapIfNeeded(host) {
-            installedIds = DevelopmentToolInstaller.installedIds()
-            Toast.makeText(context, tr(lang, "Codex CLI 已安装", "Codex CLI installed"), Toast.LENGTH_SHORT).show()
+        scope.launch {
+            val alreadyInstalled = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                DevelopmentToolInstaller.isInstalled(codex)
+            }
+            if (alreadyInstalled) {
+                refreshDevelopmentEnvironment()
+                return@launch
+            }
+            CodexInstaller.setupBootstrapIfNeeded(host) {
+                scope.launch {
+                    refreshDevelopmentEnvironment()
+                    Toast.makeText(context, tr(lang, "Codex CLI 已安装", "Codex CLI installed"), Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -389,7 +535,7 @@ private fun DevelopmentToolsSettingsPage(
                         "安装未完成：$message\n\n日志：${log.absolutePath}",
                         "Installation did not finish: $message\n\nLog: ${log.absolutePath}",
                     )
-                    installedIds = DevelopmentToolInstaller.installedIds()
+                    refreshDevelopmentEnvironment()
                 },
             )
         }
@@ -404,7 +550,7 @@ private fun DevelopmentToolsSettingsPage(
             item {
                 DevelopmentEnvironmentStatusCard(
                     lang = lang,
-                    bootstrapInstalled = DevelopmentToolInstaller.isBootstrapInstalled(),
+                    bootstrapInstalled = bootstrapInstalled,
                     installedCount = installedIds.size,
                     selectedCount = selectedIds.size,
                 )
@@ -466,8 +612,7 @@ private fun DevelopmentToolsSettingsPage(
                         Spacer(Modifier.width(8.dp))
                         Text(tr(lang, "安装所选工具（${selectedIds.size}）", "Install selected tools (${selectedIds.size})"))
                     }
-                    val log = DevelopmentToolInstaller.logFile()
-                    if (log.exists()) {
+                    if (installLogAvailable) {
                         TextButton(
                             onClick = { showLog = true },
                             modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -572,18 +717,22 @@ private fun DevelopmentToolsSettingsPage(
         )
     }
 
-    if (showLog) {
-        val log = DevelopmentToolInstaller.logFile()
-        val logText = remember(log.lastModified(), log.length()) {
-            runCatching { log.readText(Charsets.UTF_8).takeLast(12_000) }
-                .getOrElse { it.message.orEmpty() }
+    val installLogText by produceState(initialValue = "", key1 = showLog) {
+        if (showLog) {
+            value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { DevelopmentToolInstaller.logFile().readText(Charsets.UTF_8).takeLast(12_000) }
+                    .getOrElse { it.message.orEmpty() }
+            }
         }
+    }
+
+    if (showLog) {
         AlertDialog(
             onDismissRequest = { showLog = false },
             title = { Text(tr(lang, "安装日志", "Installation log")) },
             text = {
                 Text(
-                    logText.ifBlank { tr(lang, "暂无日志", "No log yet") },
+                    installLogText.ifBlank { tr(lang, "暂无日志", "No log yet") },
                     modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
@@ -1042,6 +1191,62 @@ private fun isBatteryUnrestricted(context: android.content.Context): Boolean {
 }
 
 @Composable
+private fun AppearanceSettingsPage(
+    lang: String,
+    theme: String,
+    colorPalette: String,
+    onBack: () -> Unit,
+    onTheme: () -> Unit,
+    onChat: () -> Unit,
+) {
+    SettingsScaffold(
+        tr(lang, "\u5916\u89c2", "Appearance"),
+        tr(lang, "\u5206\u5f00\u7ba1\u7406\u4e3b\u9898\u4e0e\u804a\u5929\u754c\u9762", "Manage theme and chat presentation separately"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item { SettingsSection(tr(lang, "\u5206\u7c7b", "Categories")) }
+            item { NavigationSettingsRow(HugeIcons.Moon02, tr(lang, "\u4e3b\u9898", "Theme"), appearanceLabel(lang, colorPalette, theme), onTheme) }
+            item { NavigationSettingsRow(HugeIcons.Sparkles, tr(lang, "\u804a\u5929", "Chat"), tr(lang, "\u6d41\u5f0f\u52a8\u753b\u3001\u81ea\u52a8\u8ddf\u968f\u3001\u601d\u8003\u4e0e\u5c3e\u90e8\u4fe1\u606f", "Streaming, following, reasoning and response footer"), onChat) }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ChatAppearanceSettingsPage(
+    lang: String,
+    animations: Boolean,
+    fixedStreamingViewport: Boolean,
+    reasoning: Boolean,
+    follow: Boolean,
+    showResponseStats: Boolean,
+    onBack: () -> Unit,
+    onAnimations: (Boolean) -> Unit,
+    onFixedStreamingViewport: (Boolean) -> Unit,
+    onReasoning: (Boolean) -> Unit,
+    onFollow: (Boolean) -> Unit,
+    onShowResponseStats: (Boolean) -> Unit,
+) {
+    SettingsScaffold(
+        tr(lang, "\u804a\u5929", "Chat"),
+        tr(lang, "\u63a7\u5236\u751f\u6210\u52a8\u753b\u3001\u5e03\u5c40\u4e0e\u56de\u7b54\u8be6\u60c5", "Control generation motion, layout and response details"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item { SettingsSection(tr(lang, "\u751f\u6210", "Generation")) }
+            item { ToggleSettingsRow(HugeIcons.Sparkles, tr(lang, "\u6d41\u5f0f\u52a8\u753b", "Streaming animation"), tr(lang, "\u7528\u6e10\u53d8\u906e\u7f69\u663e\u793a\u65b0\u751f\u6210\u6587\u5b57", "Reveal newly generated text with a gradient mask"), animations, onAnimations) }
+            item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u751f\u6210\u65f6\u56fa\u5b9a\u6b63\u6587\u9ad8\u5ea6", "Fixed streaming viewport"), tr(lang, "\u964d\u4f4e\u957f\u56de\u7b54\u6301\u7eed\u589e\u957f\u65f6\u7684\u5e03\u5c40\u5f00\u9500", "Reduce layout work while long responses grow"), fixedStreamingViewport, onFixedStreamingViewport) }
+            item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "\u81ea\u52a8\u8ddf\u968f\u56de\u7b54", "Auto-follow output"), tr(lang, "\u751f\u6210\u65f6\u4fdd\u6301\u6700\u65b0\u5185\u5bb9\u53ef\u89c1", "Keep the newest output visible while generating"), follow, onFollow) }
+            item { SettingsSection(tr(lang, "\u5185\u5bb9", "Content")) }
+            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u601d\u8003\u8fc7\u7a0b", "Reasoning"), tr(lang, "\u5728\u56de\u7b54\u4e2d\u663e\u793a\u6a21\u578b\u7684\u63a8\u7406\u6458\u8981", "Show model reasoning summaries"), reasoning, onReasoning) }
+            item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u663e\u793a\u56de\u7b54\u5c3e\u90e8\u4fe1\u606f", "Show response footer"), tr(lang, "\u663e\u793a Token\u3001\u8f93\u51fa\u901f\u5ea6\u3001\u8017\u65f6\u4e0e\u7f13\u5b58\u7528\u91cf", "Show tokens, output speed, duration and cached usage"), showResponseStats, onShowResponseStats) }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
 private fun ThemeSettingsPage(
     lang: String,
     colorMode: String,
@@ -1056,8 +1261,8 @@ private fun ThemeSettingsPage(
     val selectedBackground = FcodeChatBackgroundStyle.from(backgroundValue)
     val dark = currentFcodeDarkMode(colorMode)
     SettingsScaffold(
-        tr(lang, "主题与外观", "Theme & appearance"),
-        tr(lang, "配色、Markdown 与聊天背景", "Color, Markdown and chat background"),
+        tr(lang, "主题", "Theme"),
+        tr(lang, "配色、Markdown 表面与聊天背景", "Colors, Markdown surfaces and chat background"),
         onBack,
     ) { pad ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
@@ -1637,14 +1842,301 @@ private fun MissingCodexCliDialog(
 }
 
 @Composable
+private fun McpSettingsPage(
+    lang: String,
+    prefs: SharedPreferences,
+    onBack: () -> Unit,
+    onAdd: () -> Unit,
+    onEdit: (String) -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var revision by remember { mutableIntStateOf(0) }
+    val snapshot by produceState(McpSettingsSnapshot(), revision) {
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { McpSettingsSnapshot(true, NativeMcpConfigStore.load()) }
+                .getOrElse { McpSettingsSnapshot(true, error = it.message.orEmpty()) }
+        }
+    }
+    fun markChanged() {
+        prefs.edit().putLong(NativeMcpConfigStore.REVISION_KEY, System.currentTimeMillis()).apply()
+        revision++
+    }
+    SettingsScaffold(
+        "MCP",
+        tr(lang, "\u4e0e WebUI \u5171\u7528 Codex config.toml \u4e2d\u7684\u5916\u90e8\u5de5\u5177", "Share external tools from Codex config.toml with WebUI"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item {
+                Text(
+                    tr(lang, "\u4fdd\u5b58\u540e\u8fd4\u56de\u804a\u5929\u9875\u4f1a\u81ea\u52a8\u91cd\u8f7d\u540e\u7aef\uff0c\u65b0\u5bf9\u8bdd\u5373\u53ef\u4f7f\u7528 MCP \u5de5\u5177\u3002", "After saving, returning to chat reloads the backend so new conversations can use the MCP tools."),
+                    Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            when {
+                !snapshot.loaded -> item { EmptySettingsState(HugeIcons.Code, tr(lang, "\u6b63\u5728\u8bfb\u53d6 MCP", "Loading MCP"), tr(lang, "\u6b63\u5728\u89e3\u6790 config.toml", "Parsing config.toml")) }
+                snapshot.error.isNotBlank() -> item { Text(snapshot.error, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error) }
+                snapshot.servers.isEmpty() -> item { EmptySettingsState(HugeIcons.Code, tr(lang, "\u8fd8\u6ca1\u6709 MCP \u670d\u52a1", "No MCP servers"), tr(lang, "\u6dfb\u52a0 STDIO \u6216 Streamable HTTP \u670d\u52a1", "Add a STDIO or Streamable HTTP server")) }
+                else -> {
+                    item { SettingsSection(tr(lang, "\u670d\u52a1\u5668", "Servers")) }
+                    items(snapshot.servers, key = { it.key }) { server ->
+                        Card(
+                            onClick = { onEdit(server.key) },
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+                            shape = RoundedCornerShape(20.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                        ) {
+                            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                SettingsIcon(HugeIcons.Code); Spacer(Modifier.width(14.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(server.key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                        Spacer(Modifier.width(8.dp))
+                                        Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                                            Text(if (server.isHttp) "HTTP" else "STDIO", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                    Text(
+                                        if (server.isHttp) server.url else listOf(server.command, server.args.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" "),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Switch(server.enabled, onCheckedChange = { enabled ->
+                                    scope.launch {
+                                        runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpConfigStore.setEnabled(server.key, enabled) } }
+                                            .onSuccess { markChanged() }
+                                            .onFailure { Toast.makeText(context, it.message, Toast.LENGTH_LONG).show() }
+                                    }
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                Button(onAdd, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 18.dp).height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                    Icon(HugeIcons.Add01, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "\u6dfb\u52a0 MCP \u670d\u52a1", "Add MCP server"))
+                }
+            }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun McpServerEditorPage(
+    lang: String,
+    existingKey: String?,
+    prefs: SharedPreferences,
+    onBack: () -> Unit,
+    onSaved: () -> Unit,
+    onDeleted: () -> Unit,
+) {
+    val loaded by produceState<Pair<Boolean, NativeMcpServerConfig?>>(false to null, existingKey) {
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) { true to NativeMcpConfigStore.load().firstOrNull { it.key == existingKey } }
+    }
+    if (!loaded.first) {
+        SettingsScaffold("MCP", tr(lang, "\u6b63\u5728\u8bfb\u53d6\u914d\u7f6e", "Loading configuration"), onBack) { pad -> Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
+        return
+    }
+    key(existingKey, loaded.second) {
+        McpServerEditorContent(lang, loaded.second, prefs, onBack, onSaved, onDeleted)
+    }
+}
+
+@Composable
+private fun McpServerEditorContent(
+    lang: String,
+    existing: NativeMcpServerConfig?,
+    prefs: SharedPreferences,
+    onBack: () -> Unit,
+    onSaved: () -> Unit,
+    onDeleted: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var name by remember { mutableStateOf(existing?.key.orEmpty()) }
+    var http by remember { mutableStateOf(existing?.isHttp ?: false) }
+    var enabled by remember { mutableStateOf(existing?.enabled ?: true) }
+    var required by remember { mutableStateOf(existing?.required ?: false) }
+    var commandOrUrl by remember { mutableStateOf(if (existing?.isHttp == true) existing.url else existing?.command.orEmpty()) }
+    var args by remember { mutableStateOf(existing?.args.orEmpty().joinToString("\n")) }
+    var env by remember { mutableStateOf(existing?.env.orEmpty().entries.joinToString("\n") { "${it.key}=${it.value}" }) }
+    var envVars by remember { mutableStateOf(existing?.envVars.orEmpty().joinToString("\n")) }
+    var cwd by remember { mutableStateOf(existing?.cwd.orEmpty()) }
+    var bearer by remember { mutableStateOf(existing?.bearerTokenEnvVar.orEmpty()) }
+    var headers by remember { mutableStateOf(existing?.httpHeaders.orEmpty().entries.joinToString("\n") { "${it.key}=${it.value}" }) }
+    var envHeaders by remember { mutableStateOf(existing?.envHttpHeaders.orEmpty().entries.joinToString("\n") { "${it.key}=${it.value}" }) }
+    var startupTimeout by remember { mutableStateOf(existing?.startupTimeoutSec.orEmpty()) }
+    var toolTimeout by remember { mutableStateOf(existing?.toolTimeoutSec.orEmpty()) }
+    var enabledTools by remember { mutableStateOf(existing?.enabledTools.orEmpty().joinToString("\n")) }
+    var disabledTools by remember { mutableStateOf(existing?.disabledTools.orEmpty().joinToString("\n")) }
+    var approvalMode by remember { mutableStateOf(existing?.approvalMode.orEmpty()) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    fun lines(value: String) = value.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+    fun pairs(value: String): Map<String, String> = buildMap {
+        value.lineSequence().forEach { raw ->
+            val line = raw.trim(); if (line.isEmpty()) return@forEach
+            val split = line.indexOf('='); if (split <= 0) throw IllegalArgumentException("Invalid KEY=VALUE: $line")
+            put(line.substring(0, split).trim(), line.substring(split + 1).trim())
+        }
+    }
+    fun markChanged() = prefs.edit().putLong(NativeMcpConfigStore.REVISION_KEY, System.currentTimeMillis()).apply()
+    fun save() {
+        val cleanName = name.trim()
+        if (!cleanName.matches(Regex("[A-Za-z0-9_-][A-Za-z0-9_. -]{0,80}"))) { error = tr(lang, "\u540d\u79f0\u683c\u5f0f\u4e0d\u6b63\u786e", "Invalid server name"); return }
+        if (commandOrUrl.isBlank()) { error = if (http) "URL is required" else "Command is required"; return }
+        if (http && !commandOrUrl.trim().matches(Regex("https?://.+", RegexOption.IGNORE_CASE))) {
+            error = tr(lang, "URL \u5fc5\u987b\u4ee5 http:// \u6216 https:// \u5f00\u5934", "URL must start with http:// or https://")
+            return
+        }
+        fun validTimeout(value: String): Boolean = value.isBlank() || (value.toDoubleOrNull()?.let { it > 0.0 } == true)
+        if (!validTimeout(startupTimeout) || !validTimeout(toolTimeout)) {
+            error = tr(lang, "\u8d85\u65f6\u5fc5\u987b\u662f\u5927\u4e8e 0 \u7684\u6570\u5b57", "Timeouts must be numbers greater than 0")
+            return
+        }
+        val server = runCatching {
+            val allow = lines(enabledTools)
+            val deny = lines(disabledTools)
+            require(allow.intersect(deny.toSet()).isEmpty()) { tr(lang, "\u540c\u4e00\u5de5\u5177\u4e0d\u80fd\u540c\u65f6\u5141\u8bb8\u548c\u7981\u7528", "A tool cannot be both enabled and disabled") }
+            NativeMcpServerConfig(
+                key = cleanName, enabled = enabled, required = required,
+                command = if (http) "" else commandOrUrl.trim(), args = lines(args), env = pairs(env), envVars = lines(envVars), cwd = cwd.trim(),
+                url = if (http) commandOrUrl.trim() else "", bearerTokenEnvVar = bearer.trim(), httpHeaders = pairs(headers), envHttpHeaders = pairs(envHeaders),
+                startupTimeoutSec = startupTimeout.trim(), toolTimeoutSec = toolTimeout.trim(), enabledTools = allow, disabledTools = deny, approvalMode = approvalMode.trim(),
+            )
+        }.getOrElse { error = it.message.orEmpty(); return }
+        busy = true; error = ""
+        scope.launch {
+            runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpConfigStore.save(server, existing?.key) } }
+                .onSuccess { markChanged(); onSaved() }
+                .onFailure { error = it.message.orEmpty() }
+            busy = false
+        }
+    }
+
+    SettingsScaffold(
+        if (existing == null) tr(lang, "\u6dfb\u52a0 MCP", "Add MCP") else tr(lang, "\u7f16\u8f91 MCP", "Edit MCP"),
+        tr(lang, "\u914d\u7f6e STDIO \u6216 Streamable HTTP \u670d\u52a1", "Configure a STDIO or Streamable HTTP server"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item { SettingsSection(tr(lang, "\u57fa\u672c\u4fe1\u606f", "Details")) }
+            item { SettingsTextField(name, { name = it; error = "" }, tr(lang, "\u670d\u52a1\u540d\u79f0", "Server name"), "context7") }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FilterChip(!http, { http = false; error = "" }, { Text("STDIO") }, modifier = Modifier.weight(1f))
+                    FilterChip(http, { http = true; error = "" }, { Text("Streamable HTTP") }, modifier = Modifier.weight(1f))
+                }
+            }
+            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u542f\u7528", "Enabled"), tr(lang, "\u5141\u8bb8 Codex \u542f\u52a8\u5e76\u4f7f\u7528\u6b64\u670d\u52a1", "Allow Codex to start and use this server"), enabled) { enabled = it } }
+            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u5fc5\u9700\u670d\u52a1", "Required"), tr(lang, "\u521d\u59cb\u5316\u5931\u8d25\u65f6\u8ba9 Codex \u542f\u52a8\u5931\u8d25", "Fail Codex startup if this server cannot initialize"), required) { required = it } }
+            item { SettingsSection(tr(lang, "\u8fde\u63a5", "Connection")) }
+            item { SettingsTextField(commandOrUrl, { commandOrUrl = it; error = "" }, if (http) "URL" else tr(lang, "\u547d\u4ee4", "Command"), if (http) "https://example.com/mcp" else "npx") }
+            if (!http) {
+                item { SettingsMultilineField(args, { args = it }, tr(lang, "\u53c2\u6570\uff08\u6bcf\u884c\u4e00\u4e2a\uff09", "Arguments (one per line)"), "-y\n@upstash/context7-mcp") }
+                item { SettingsMultilineField(env, { env = it }, tr(lang, "\u73af\u5883\u53d8\u91cf", "Environment variables"), "API_KEY=value") }
+                item { SettingsMultilineField(envVars, { envVars = it }, tr(lang, "\u8f6c\u53d1\u73af\u5883\u53d8\u91cf", "Forward environment variables"), "LOCAL_TOKEN") }
+                item { SettingsTextField(cwd, { cwd = it }, tr(lang, "\u5de5\u4f5c\u76ee\u5f55\uff08\u53ef\u9009\uff09", "Working directory (optional)"), "/data/data/com.termux/files/home") }
+            } else {
+                item { SettingsTextField(bearer, { bearer = it }, "Bearer token env var", "GITHUB_TOKEN") }
+                item { SettingsMultilineField(headers, { headers = it }, tr(lang, "\u9759\u6001 HTTP Headers", "Static HTTP headers"), "X-Region=cn") }
+                item { SettingsMultilineField(envHeaders, { envHeaders = it }, tr(lang, "\u73af\u5883 HTTP Headers", "Environment HTTP headers"), "Authorization=AUTH_ENV") }
+            }
+            item { SettingsSection(tr(lang, "\u9ad8\u7ea7", "Advanced")) }
+            item { SettingsTextField(startupTimeout, { startupTimeout = it }, tr(lang, "\u542f\u52a8\u8d85\u65f6\uff08\u79d2\uff09", "Startup timeout (seconds)"), "10", keyboardType = KeyboardType.Decimal) }
+            item { SettingsTextField(toolTimeout, { toolTimeout = it }, tr(lang, "\u5de5\u5177\u8d85\u65f6\uff08\u79d2\uff09", "Tool timeout (seconds)"), "60", keyboardType = KeyboardType.Decimal) }
+            item { SettingsMultilineField(enabledTools, { enabledTools = it }, tr(lang, "\u5141\u8bb8\u7684\u5de5\u5177", "Enabled tools"), "search\nfetch") }
+            item { SettingsMultilineField(disabledTools, { disabledTools = it }, tr(lang, "\u7981\u7528\u7684\u5de5\u5177", "Disabled tools"), "delete") }
+            item { SettingsTextField(approvalMode, { approvalMode = it }, tr(lang, "\u9ed8\u8ba4\u5ba1\u6279\u6a21\u5f0f", "Default approval mode"), "auto / prompt / writes / approve") }
+            if (error.isNotBlank()) item { Text(error, Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.error) }
+            item { Button(::save, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).height(52.dp), enabled = !busy, shape = RoundedCornerShape(16.dp)) { Text(if (busy) tr(lang, "\u4fdd\u5b58\u4e2d\u2026", "Saving…") else tr(lang, "\u4fdd\u5b58 MCP", "Save MCP")) } }
+            if (existing != null) item { TextButton({ confirmDelete = true }, Modifier.fillMaxWidth().padding(horizontal = 16.dp)) { Icon(HugeIcons.Delete01, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "\u5220\u9664 MCP \u670d\u52a1", "Remove MCP server"), color = MaterialTheme.colorScheme.error) } }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+    if (confirmDelete && existing != null) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text(tr(lang, "\u5220\u9664 ${existing.key}\uff1f", "Remove ${existing.key}?")) },
+        text = { Text(tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece config.toml \u4e2d\u79fb\u9664\u3002", "This server will be removed from config.toml.")) },
+        dismissButton = { TextButton({ confirmDelete = false }) { Text(tr(lang, "\u53d6\u6d88", "Cancel")) } },
+        confirmButton = { TextButton({
+            confirmDelete = false
+            scope.launch {
+                busy = true
+                runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpConfigStore.remove(existing.key) } }
+                    .onSuccess { markChanged(); onDeleted() }
+                    .onFailure { error = it.message.orEmpty() }
+                busy = false
+            }
+        }) { Text(tr(lang, "\u5220\u9664", "Remove"), color = MaterialTheme.colorScheme.error) } },
+    )
+}
+
+@Composable
+private fun SkillsSettingsPage(lang: String, prefs: SharedPreferences, onBack: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var revision by remember { mutableIntStateOf(0) }
+    var query by remember { mutableStateOf("") }
+    var busySkill by remember { mutableStateOf<String?>(null) }
+    val snapshot by produceState(SkillSettingsSnapshot(), revision) {
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { SkillSettingsSnapshot(true, NativeSkillManager.official(context), NativeSkillManager.installed()) }
+                .getOrElse { SkillSettingsSnapshot(true, error = it.message.orEmpty()) }
+        }
+    }
+    val installedIds = remember(snapshot.installed) { snapshot.installed.map { File(it.path).parentFile?.name.orEmpty() }.toSet() }
+    val official = remember(snapshot.official, query) { snapshot.official.filter { query.isBlank() || it.name.contains(query, true) || it.description.contains(query, true) } }
+    fun markChanged() { prefs.edit().putLong("native_skills_revision_v1", System.currentTimeMillis()).apply(); revision++ }
+    SettingsScaffold("Skills", tr(lang, "\u4e0e WebUI \u5171\u7528\u5b98\u65b9\u76ee\u5f55\u548c\u672c\u5730 Skill \u76ee\u5f55", "Share the official catalog and local skill directories with WebUI"), onBack) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            if (!snapshot.loaded) item { EmptySettingsState(HugeIcons.Sparkles, tr(lang, "\u6b63\u5728\u8bfb\u53d6 Skills", "Loading skills"), "") }
+            if (snapshot.error.isNotBlank()) item { Text(snapshot.error, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error) }
+            if (snapshot.installed.isNotEmpty()) {
+                item { SettingsSection(tr(lang, "\u5df2\u5b89\u88c5", "Installed")) }
+                items(snapshot.installed, key = { it.path }) { skill ->
+                    Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            SettingsIcon(HugeIcons.Sparkles); Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) { Text(skill.name, fontWeight = FontWeight.SemiBold); Text(skill.description.ifBlank { skill.path }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                            if (skill.managed) IconButton(onClick = { scope.launch { busySkill = skill.name; runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeSkillManager.uninstall(skill.path) } }.onFailure { Toast.makeText(context, it.message, Toast.LENGTH_LONG).show() }; busySkill = null; markChanged() } }, enabled = busySkill == null) { Icon(HugeIcons.Delete01, tr(lang, "\u5378\u8f7d", "Uninstall"), tint = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                }
+            }
+            item { SettingsSection(tr(lang, "\u5b98\u65b9 Skills", "Official skills")) }
+            item { SettingsTextField(query, { query = it }, tr(lang, "\u641c\u7d22", "Search"), tr(lang, "\u540d\u79f0\u6216\u63cf\u8ff0", "Name or description")) }
+            items(official, key = { it.id }) { skill ->
+                val installed = skill.id in installedIds
+                Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) { Text(skill.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); if (installed) Icon(HugeIcons.Tick02, null, tint = MaterialTheme.colorScheme.primary) }
+                        Text(skill.description, Modifier.padding(top = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                        FilledTonalButton(
+                            onClick = { scope.launch { busySkill = skill.id; runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeSkillManager.installOfficial(context, skill.id) } }.onSuccess { Toast.makeText(context, tr(lang, "\u5df2\u5b89\u88c5 ${skill.name}", "Installed ${skill.name}"), Toast.LENGTH_SHORT).show() }.onFailure { Toast.makeText(context, it.message, Toast.LENGTH_LONG).show() }; busySkill = null; markChanged() } },
+                            modifier = Modifier.align(Alignment.End).padding(top = 10.dp), enabled = !installed && busySkill == null,
+                        ) { Text(when { installed -> tr(lang, "\u5df2\u5b89\u88c5", "Installed"); busySkill == skill.id -> tr(lang, "\u5b89\u88c5\u4e2d\u2026", "Installing…"); else -> tr(lang, "\u5b89\u88c5", "Install") }) }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
 private fun SettingsRootPage(
     lang: String,
     provider: CodexProviderStore.Profile?,
-    theme: String,
-    colorPalette: String,
-    animations: Boolean,
-    reasoning: Boolean,
-    follow: Boolean,
     onBack: () -> Unit,
     onModels: () -> Unit,
     onWebUi: () -> Unit,
@@ -1654,16 +2146,32 @@ private fun SettingsRootPage(
     onProxy: () -> Unit,
     onOverlay: () -> Unit,
     onDevelopmentTools: () -> Unit,
-    onTheme: () -> Unit,
+    onAppearance: () -> Unit,
+    onMcp: () -> Unit,
+    onSkills: () -> Unit,
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
-    onAnimations: (Boolean) -> Unit,
-    onReasoning: (Boolean) -> Unit,
-    onFollow: (Boolean) -> Unit,
     prefs: SharedPreferences,
     onAbout: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val environment by produceState(
+        initialValue = SettingsEnvironmentSnapshot(),
+        key1 = context.applicationContext,
+    ) {
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val manager = MihomoManager.get(context.applicationContext)
+            SettingsEnvironmentSnapshot(
+                loaded = true,
+                installedToolCount = DevelopmentToolInstaller.installedIds().size,
+                bootstrapInstalled = DevelopmentToolInstaller.isBootstrapInstalled(),
+                mihomoSupported = manager.isSupported,
+                mihomoInstalled = manager.isInstalled,
+                mihomoRunning = manager.isRunning,
+                mihomoMixedPort = manager.mixedPort(),
+            )
+        }
+    }
     SettingsScaffold(
         tr(lang, "设置", "Settings"),
         tr(lang, "调整 Fcode 的模型、界面与运行方式", "Configure models, appearance and runtime behavior"),
@@ -1693,33 +2201,41 @@ private fun SettingsRootPage(
             }
             item { NavigationSettingsRow(HugeIcons.Code, "WebUI", tr(lang, "入口、全屏、项目目录与缓存", "Launch, fullscreen, project root and cache"), onWebUi) }
             item { NavigationSettingsRow(HugeIcons.Code, tr(lang, "Termux 终端", "Termux terminal"), tr(lang, "检查工具、运行命令和管理项目文件", "Inspect tools, run commands and manage project files"), onTermux) }
+            item { NavigationSettingsRow(HugeIcons.Code, "MCP", tr(lang, "\u8fde\u63a5\u5916\u90e8\u5de5\u5177\u3001\u6570\u636e\u6e90\u4e0e\u8fdc\u7a0b\u670d\u52a1", "Connect external tools, data sources and remote services"), onMcp) }
+            item { NavigationSettingsRow(HugeIcons.Sparkles, "Skills", tr(lang, "\u6d4f\u89c8\u5b98\u65b9 Skill \u5e76\u7ba1\u7406\u5df2\u5b89\u88c5\u5185\u5bb9", "Browse official skills and manage installed skills"), onSkills) }
             item {
-                val manager = remember { MihomoManager.get(context) }
                 val proxyStatus = when {
-                    !manager.isSupported -> tr(lang, "当前设备不支持内置内核", "Built-in core is unsupported on this device")
-                    !manager.isInstalled -> tr(lang, "未安装 · 可离线安装", "Not installed · offline install available")
-                    manager.isRunning -> tr(lang, "运行中 · 127.0.0.1:${manager.mixedPort()}", "Running · 127.0.0.1:${manager.mixedPort()}")
+                    !environment.loaded -> tr(lang, "正在检查运行状态…", "Checking runtime status…")
+                    !environment.mihomoSupported -> tr(lang, "当前设备不支持内置内核", "Built-in core is unsupported on this device")
+                    !environment.mihomoInstalled -> tr(lang, "未安装 · 可离线安装", "Not installed · offline install available")
+                    environment.mihomoRunning -> tr(
+                        lang,
+                        "运行中 · 127.0.0.1:${environment.mihomoMixedPort}",
+                        "Running · 127.0.0.1:${environment.mihomoMixedPort}",
+                    )
                     else -> tr(lang, "已安装 · 当前已停止", "Installed · currently stopped")
                 }
                 NavigationSettingsRow(HugeIcons.Code, tr(lang, "网络与代理", "Network & proxy"), proxyStatus, onProxy)
             }
             item { SettingsSection(tr(lang, "外观", "Appearance")) }
-            item { NavigationSettingsRow(HugeIcons.Moon02, tr(lang, "主题与外观", "Theme & appearance"), appearanceLabel(lang, colorPalette, theme), onTheme) }
+            item { NavigationSettingsRow(HugeIcons.Moon02, tr(lang, "\u5916\u89c2", "Appearance"), tr(lang, "\u4e3b\u9898\u3001\u804a\u5929\u754c\u9762\u4e0e\u751f\u6210\u663e\u793a", "Theme, chat interface and generation display"), onAppearance) }
             item { NavigationSettingsRow(HugeIcons.LanguageCircle, tr(lang, "语言", "Language"), tr(lang, "简体中文 / 跟随系统", "English / System"), onLanguage) }
             item { NavigationSettingsRow(HugeIcons.Text, tr(lang, "文字与 Markdown", "Typography & Markdown"), tr(lang, "代码、表格、列表与公式", "Code, tables, lists and math"), onTypography) }
-            item { SettingsSection(tr(lang, "对话", "Conversation")) }
-            item { ToggleSettingsRow(HugeIcons.Sparkles, tr(lang, "流式动画", "Streaming animation"), tr(lang, "让新生成的内容平滑出现", "Animate newly generated content"), animations, onAnimations) }
-            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "思考过程", "Reasoning"), tr(lang, "在回答中显示模型的推理摘要", "Show model reasoning summaries"), reasoning, onReasoning) }
-            item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "自动跟随回答", "Auto-follow output"), tr(lang, "生成时保持滚动到最新内容", "Keep the latest output visible"), follow, onFollow) }
             item { SettingsSection(tr(lang, "系统", "System")) }
             item {
-                val installedTools = DevelopmentToolInstaller.installedIds().size
+                val developmentSummary = when {
+                    !environment.loaded -> tr(lang, "正在检查已安装工具…", "Checking installed tools…")
+                    environment.bootstrapInstalled -> tr(
+                        lang,
+                        "已安装 ${environment.installedToolCount} 项 · 可选择语言、构建与终端工具",
+                        "${environment.installedToolCount} installed · choose languages, build and terminal tools",
+                    )
+                    else -> tr(lang, "基础环境未安装 · 可按需或一键安装完整环境", "Base environment missing · install selected tools or the full environment")
+                }
                 NavigationSettingsRow(
                     HugeIcons.Code,
                     tr(lang, "开发工具与环境", "Development tools & environment"),
-                    if (DevelopmentToolInstaller.isBootstrapInstalled())
-                        tr(lang, "已安装 $installedTools 项 · 可选择语言、构建与终端工具", "$installedTools installed · choose languages, build and terminal tools")
-                    else tr(lang, "基础环境未安装 · 可按需或一键安装完整环境", "Base environment missing · install selected tools or the full environment"),
+                    developmentSummary,
                     onDevelopmentTools,
                 )
             }
@@ -3079,6 +3595,26 @@ private fun SettingsTextField(
         label = { Text(label) }, placeholder = { Text(placeholder) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = ImeAction.Next),
         visualTransformation = visualTransformation, trailingIcon = trailing, enabled = enabled, shape = RoundedCornerShape(14.dp),
+    )
+}
+
+@Composable
+private fun SettingsMultilineField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    placeholder: String,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).heightIn(min = 108.dp),
+        label = { Text(label) },
+        placeholder = { Text(placeholder) },
+        minLines = 3,
+        maxLines = 7,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Default),
+        shape = RoundedCornerShape(14.dp),
     )
 }
 

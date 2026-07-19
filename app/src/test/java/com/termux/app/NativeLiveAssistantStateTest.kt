@@ -18,6 +18,8 @@ class NativeLiveAssistantStateTest {
         assertSame(message, state.messages.last())
         assertEquals("", state.messages.last().content)
         assertEquals("hello world", state.liveAssistantText)
+        assertEquals("hello world", state.liveAssistantSnapshot.tail)
+        assertEquals(11, state.liveAssistantSnapshot.sourceChars)
         assertTrue(state.messages.last().streaming)
     }
 
@@ -37,6 +39,30 @@ class NativeLiveAssistantStateTest {
     }
 
     @Test
+    fun coalescedCompletionUsesWholeAnswerRevealWhenNoLiveFrameWasPresented() {
+        val state = NativeChatState()
+        state.addUser("prompt")
+        state.appendAssistant("answer")
+
+        state.completeAssistantItem("answer")
+
+        assertTrue(state.messages.last().finalOnlyReveal)
+    }
+
+    @Test
+    fun presentedStreamDoesNotReplayWholeAnswerRevealAtCompletion() {
+        val state = NativeChatState()
+        state.addUser("prompt")
+        state.appendAssistant("answer")
+        val messageId = state.messages.last().id
+        state.markLiveAssistantPresented(messageId, state.liveAssistantSnapshot.sourceChars)
+
+        state.completeAssistantItem("answer")
+
+        assertEquals(false, state.messages.last().finalOnlyReveal)
+    }
+
+    @Test
     fun turnCompletionPreservesBufferedTextWhenProviderOmitsItemComplete() {
         val state = NativeChatState()
         state.addUser("prompt")
@@ -47,5 +73,34 @@ class NativeLiveAssistantStateTest {
         val assistant = state.messages.last { it.role == NativeChatRole.ASSISTANT }
         assertEquals("partial answer", assistant.content)
         assertEquals(false, assistant.streaming)
+    }
+
+    @Test
+    fun turnCompletionAttachesReportedUsageToFinalAssistantMessage() {
+        val state = NativeChatState()
+        state.addUser("prompt")
+        state.appendAssistant("answer")
+        state.updateTokenUsage("""{"last":{"inputTokens":20,"outputTokens":8,"totalTokens":28}}""")
+
+        state.completeTurn()
+
+        val usage = state.messages.last { it.role == NativeChatRole.ASSISTANT }.usage!!
+        assertEquals(20, usage.inputTokens)
+        assertEquals(8, usage.outputTokens)
+        assertEquals(28, usage.totalTokens)
+        assertEquals(false, usage.estimated)
+    }
+
+    @Test
+    fun turnCompletionEstimatesUsageWhenBackendDoesNotReportIt() {
+        val state = NativeChatState()
+        state.addUser("prompt")
+        state.appendAssistant("a".repeat(40))
+
+        state.completeTurn()
+
+        val usage = state.messages.last { it.role == NativeChatRole.ASSISTANT }.usage!!
+        assertEquals(10, usage.outputTokens)
+        assertTrue(usage.estimated)
     }
 }

@@ -67,6 +67,7 @@ final class CodexAppServerBridge {
     private volatile int editRollbackRequestId = -1;
     private volatile int compactRequestId = -1;
     private volatile int collaborationModesRequestId = -1;
+    private volatile int mcpStatusRequestId = -1;
     private volatile JSONObject planCollaborationMode;
     private volatile String pendingEditedText;
     private volatile String pendingEditedModel;
@@ -429,6 +430,7 @@ final class CodexAppServerBridge {
                     try {
                         if (deferResumeUntilInitialized(requestedThread, generation)) return;
                         JSONObject resumeParams = new JSONObject().put("threadId", requestedThread);
+                        applyNativeMcpConfig(resumeParams);
                         String permissionMode = configuredPermissionMode();
                         NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
                         Log.i(TAG, "RESUME_PERMISSIONS mode=" + permissionMode + " sandbox="
@@ -660,6 +662,7 @@ final class CodexAppServerBridge {
 
     private void sendThreadStart() throws Exception {
         JSONObject params = new JSONObject();
+        applyNativeMcpConfig(params);
         String mode = configuredPermissionMode();
         NativePermissionMode.applyThreadParams(params, mode, configuredCwd());
         Log.i(TAG, "THREAD_PERMISSIONS mode=" + mode + " approval="
@@ -667,6 +670,18 @@ final class CodexAppServerBridge {
         int generation = navigationGeneration.get();
         if (eventListener != null) sendNavigationRequest("thread/start", params, generation);
         else sendRequest("thread/start", params);
+    }
+
+    static void applyNativeMcpConfig(JSONObject params) throws Exception {
+        JSONObject nativeConfig = NativeMcpConfigStore.threadConfig();
+        JSONObject servers = nativeConfig.optJSONObject("mcp_servers");
+        if (servers == null || servers.length() == 0) return;
+        JSONObject config = params.optJSONObject("config");
+        if (config == null) {
+            config = new JSONObject();
+            params.put("config", config);
+        }
+        config.put("mcp_servers", servers);
     }
 
     private int sendNavigationRequest(String method, JSONObject params, int generation) throws Exception {
@@ -797,6 +812,12 @@ final class CodexAppServerBridge {
             sendJson(new JSONObject().put("method", "initialized"));
             try { collaborationModesRequestId = sendRequest("collaborationMode/list", new JSONObject()); }
             catch (Exception error) { android.util.Log.w(TAG, "Unable to list collaboration modes", error); }
+            if (desktopBridge == null) try {
+                mcpStatusRequestId = sendRequest("mcpServerStatus/list", new JSONObject()
+                    .put("cursor", JSONObject.NULL).put("limit", 100).put("detail", "toolsAndAuthOnly"));
+            } catch (Exception error) {
+                android.util.Log.w(TAG, "Unable to inspect MCP server status", error);
+            }
             String deferredThread;
             int deferredGeneration;
             synchronized (this) {
@@ -812,6 +833,7 @@ final class CodexAppServerBridge {
                     && deferredGeneration == navigationGeneration.get()
                     && deferredThread.equals(visibleThreadId)) {
                 JSONObject resumeParams = new JSONObject().put("threadId", deferredThread);
+                applyNativeMcpConfig(resumeParams);
                 String permissionMode = configuredPermissionMode();
                 NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
                 sendNavigationRequest("thread/resume", resumeParams, deferredGeneration);
@@ -820,6 +842,13 @@ final class CodexAppServerBridge {
                 // after observing appServerInitialized, so do not create an orphan new thread.
                 sendThreadStart();
             }
+            return;
+        }
+        if (mcpStatusRequestId >= 0 && message.optInt("id", -1) == mcpStatusRequestId) {
+            mcpStatusRequestId = -1;
+            String summary = mcpStatusSummary(message);
+            Log.i(TAG, "MCP_STATUS " + summary);
+            emit("onMcpStatus", summary);
             return;
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
@@ -1003,6 +1032,9 @@ final class CodexAppServerBridge {
         } else if (primaryEvent && "item/started".equals(method) && params != null) {
             JSONObject item = params.optJSONObject("item");
             if (item != null) emit("onItem", item.optString("type", "item"));
+        } else if (primaryEvent && "thread/tokenUsage/updated".equals(method) && params != null) {
+            JSONObject usage = params.optJSONObject("tokenUsage");
+            emit("onTokenUsage", usage == null ? "{}" : usage.toString());
         } else if ("thread/status/changed".equals(method) && isIdleThreadStatus(params)) {
             completeVisibleTurnFromIdle(params);
         } else if ("turn/completed".equals(method)) {
@@ -1025,6 +1057,29 @@ final class CodexAppServerBridge {
             JSONObject error = params.optJSONObject("error");
             emit("onNativeError", error == null ? params.toString() : error.optString("message", error.toString()));
         }
+    }
+
+    static String mcpStatusSummary(JSONObject message) {
+        JSONObject error = message == null ? null : message.optJSONObject("error");
+        if (error != null) return "error=" + error.optString("message", "unknown");
+        JSONObject result = message == null ? null : message.optJSONObject("result");
+        JSONArray data = result == null ? null : result.optJSONArray("data");
+        if (data == null) return "servers=unknown";
+        java.util.ArrayList<String> names = new java.util.ArrayList<>();
+        int toolCount = 0;
+        for (int i = 0; i < data.length(); i++) {
+            JSONObject server = data.optJSONObject(i);
+            if (server == null) continue;
+            String name = server.optString("name", server.optString("serverName", ""));
+            if (!name.isEmpty()) names.add(name);
+            JSONObject tools = server.optJSONObject("tools");
+            if (tools != null) toolCount += tools.length();
+            else {
+                JSONArray toolArray = server.optJSONArray("tools");
+                if (toolArray != null) toolCount += toolArray.length();
+            }
+        }
+        return "servers=" + data.length() + " tools=" + toolCount + " names=" + String.join(",", names);
     }
 
     private static boolean isToolDetailItem(JSONObject params) {
@@ -1925,6 +1980,7 @@ final class CodexAppServerBridge {
         visibleRouteReady = false;
         activeTurnId = null;
         initializeRequestId = -1;
+        mcpStatusRequestId = -1;
         appServerInitialized = false;
         deferredResumeThreadId = null;
         deferredResumeGeneration = -1;

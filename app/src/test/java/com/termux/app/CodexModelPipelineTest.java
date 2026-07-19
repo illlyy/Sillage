@@ -356,6 +356,41 @@ public class CodexModelPipelineTest {
     }
 
     @Test
+    public void chatAdapterPreservesNamespacedMcpToolsInBothDirections() throws Exception {
+        JSONObject request = new JSONObject().put("model", "chat-model")
+            .put("input", new JSONArray().put(new JSONObject().put("type", "message")
+                .put("role", "user").put("content", "search docs")))
+            .put("tools", new JSONArray().put(new JSONObject()
+                .put("type", "namespace").put("name", "mcp__docs")
+                .put("tools", new JSONArray().put(new JSONObject()
+                    .put("type", "function").put("name", "search")
+                    .put("description", "Search documentation")
+                    .put("parameters", new JSONObject().put("type", "object"))))));
+        byte[] requestBytes = request.toString().getBytes(StandardCharsets.UTF_8);
+        JSONObject chat = new JSONObject(new String(
+            ChatCompletionsAdapter.responsesRequestToChat(requestBytes), StandardCharsets.UTF_8));
+        String flatName = chat.getJSONArray("tools").getJSONObject(0)
+            .getJSONObject("function").getString("name");
+        assertEquals("mcp__docs__search", flatName);
+
+        JSONObject upstream = new JSONObject().put("model", "chat-model")
+            .put("choices", new JSONArray().put(new JSONObject().put("message", new JSONObject()
+                .put("role", "assistant").put("content", JSONObject.NULL)
+                .put("tool_calls", new JSONArray().put(new JSONObject()
+                    .put("index", 0).put("id", "call_mcp").put("type", "function")
+                    .put("function", new JSONObject().put("name", flatName)
+                        .put("arguments", "{\"query\":\"Codex\"}")))))));
+        ChatCompletionsAdapter.ChatResult adapted = ChatCompletionsAdapter.chatResponseToResponses(
+            upstream.toString().getBytes(StandardCharsets.UTF_8), "application/json", "chat-model",
+            java.util.Collections.emptySet(), ChatCompletionsAdapter.namespacedTools(requestBytes));
+        JSONObject completed = completedResponse(adapted);
+        JSONObject call = completed.getJSONArray("output").getJSONObject(0);
+        assertEquals("function_call", call.getString("type"));
+        assertEquals("mcp__docs", call.getString("namespace"));
+        assertEquals("search", call.getString("name"));
+    }
+
+    @Test
     public void codexWireApiIsAlwaysResponsesRegardlessOfUpstreamFormat() {
         assertEquals("responses", LocalApiProxy.CODEX_WIRE_API);
         assertNotEquals("openai_chat", LocalApiProxy.CODEX_WIRE_API);

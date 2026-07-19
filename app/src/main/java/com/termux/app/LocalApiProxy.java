@@ -174,6 +174,8 @@ final class LocalApiProxy {
             boolean adaptChat = "openai_chat".equals(apiFormat) && requestResponses;
             String targetPath = adaptChat ? "/chat/completions" : (path.startsWith("/") ? path : "/" + path);
             java.util.Set<String> customTools = adaptChat ? ChatCompletionsAdapter.customToolNames(responsesBody) : java.util.Collections.emptySet();
+            ChatCompletionsAdapter.NamespacedTools namespacedTools = adaptChat
+                ? ChatCompletionsAdapter.namespacedTools(responsesBody) : new ChatCompletionsAdapter.NamespacedTools();
             body = adaptChat ? ChatCompletionsAdapter.responsesRequestToChat(responsesBody) : responsesBody;
             if (adaptChat) Log.i(TAG, "id=" + requestId + " chatHistory " + ChatCompletionsAdapter.toolReasoningSummary(body)
                 + " agentMessages=" + internalAgentMessages);
@@ -195,6 +197,7 @@ final class LocalApiProxy {
                 connection.disconnect();
                 adaptChat = true;
                 customTools = ChatCompletionsAdapter.customToolNames(responsesBody);
+                namespacedTools = ChatCompletionsAdapter.namespacedTools(responsesBody);
                 body = ChatCompletionsAdapter.responsesRequestToChat(responsesBody);
                 Log.i(TAG, "id=" + requestId + " chatHistory " + ChatCompletionsAdapter.toolReasoningSummary(body)
                     + " agentMessages=" + internalAgentMessages);
@@ -224,7 +227,7 @@ final class LocalApiProxy {
                 ChatCompletionsAdapter.StreamStats streamStats;
                 try {
                     streamStats = ChatCompletionsAdapter.streamChatResponseToResponses(
-                        response, contentType, adaptedModel, customTools, value -> {
+                        response, contentType, adaptedModel, customTools, namespacedTools, value -> {
                             byte[] output = rewriteNamespaces
                                 ? rewriteCollaborationToolCalls(value, "text/event-stream") : value;
                             if (firstOutputNanos[0] == 0L) firstOutputNanos[0] = System.nanoTime();

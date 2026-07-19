@@ -14,17 +14,8 @@ data class NativeStreamingMarkdownSnapshot(
     val sourceChars: Int,
 )
 
-/**
- * Incremental Markdown segmenter for streaming answers.
- *
- * Only the unfinished tail is rescanned. Paragraph/list/table boundaries and closed fenced
- * code blocks are promoted into immutable blocks, so Compose and Markwon can skip them on all
- * later deltas. A small completed prefix remains in the tail to avoid creating one TextView per
- * sentence; normal blocks settle around 1.2k characters.
- */
-
+/** Selects a bounded suffix for the live viewport; completed rendering still uses all blocks. */
 object NativeStreamingMarkdownWindow {
-    /** Selects a bounded suffix for the live viewport; completed rendering still uses all blocks. */
     @JvmStatic
     fun firstVisibleBlock(
         blocks: List<NativeStreamingMarkdownBlock>,
@@ -41,56 +32,96 @@ object NativeStreamingMarkdownWindow {
     }
 }
 
+/**
+ * Incremental Markdown segmenter for streaming answers.
+ *
+ * Production streams use [append], which keeps the full source in a private StringBuilder and
+ * publishes only immutable stable blocks plus a bounded semantic tail. [update] remains available
+ * for authoritative replacement/final payloads and tests, but append-only updates never copy the
+ * complete growing answer.
+ */
 class NativeStreamingMarkdownAccumulator {
     private data class Boundary(val offset: Int, val priority: Boolean)
 
     private val stableBlocks = ArrayList<NativeStreamingMarkdownBlock>()
+    private var publishedBlocks: List<NativeStreamingMarkdownBlock> = emptyList()
     private val boundaries = ArrayList<Boundary>()
-    private var source = ""
+    private val source = StringBuilder()
     private var stableChars = 0
     private var scanCursor = 0
     private var fenceMarker = '\u0000'
     private var fenceLength = 0
 
+    /** Appends one already-sanitized stream batch without materializing the full document. */
+    @Synchronized
+    fun append(delta: String, finished: Boolean = false): NativeStreamingMarkdownSnapshot {
+        if (delta.isNotEmpty()) source.append(delta)
+        advance(finished)
+        return snapshot()
+    }
+
+    /** Materializes the complete document only for completion actions or explicit callers. */
+    @Synchronized
+    fun materialize(): String = source.toString()
+
+    /** Applies an authoritative full document, preserving incremental state when it is append-only. */
     @Synchronized
     fun update(next: String, finished: Boolean): NativeStreamingMarkdownSnapshot {
-        val appendCompatible = if (finished && source.isNotEmpty()) next.startsWith(source) else isLikelyAppend(next)
+        val appendCompatible = if (finished && source.isNotEmpty()) startsWithCurrentSource(next) else isLikelyAppend(next)
         if (!appendCompatible || next.length < stableChars) reset()
-        source = next
-
-        if (finished) {
-            freeze(next.length)
-        } else {
-            scanAppendedLines()
-            promoteStableBlocks()
+        if (next.length > source.length) {
+            source.append(next, source.length, next.length)
+        } else if (next.length < source.length) {
+            reset()
+            source.append(next)
         }
-        return NativeStreamingMarkdownSnapshot(
-            blocks = stableBlocks.toList(),
-            tail = next.substring(stableChars),
-            stableChars = stableChars,
-            sourceChars = next.length,
-        )
+        advance(finished)
+        return snapshot()
     }
 
     @Synchronized
     fun reset() {
         stableBlocks.clear()
+        publishedBlocks = emptyList()
         boundaries.clear()
-        source = ""
+        source.setLength(0)
         stableChars = 0
         scanCursor = 0
         fenceMarker = '\u0000'
         fenceLength = 0
     }
 
-    /** Bounded append check: unlike String.startsWith(previous), this never rescans a
-     * 100k answer for every tiny delta. The authoritative final snapshot performs the
-     * exact prefix check only once when streaming ends. */
+    private fun advance(finished: Boolean) {
+        if (finished) {
+            freeze(source.length)
+        } else {
+            scanAppendedLines()
+            promoteStableBlocks()
+        }
+    }
+
+    private fun snapshot(): NativeStreamingMarkdownSnapshot = NativeStreamingMarkdownSnapshot(
+        blocks = publishedBlocks,
+        tail = source.substring(stableChars),
+        stableChars = stableChars,
+        sourceChars = source.length,
+    )
+
+    private fun startsWithCurrentSource(next: String): Boolean {
+        if (next.length < source.length) return false
+        for (index in 0 until source.length) if (next[index] != source[index]) return false
+        return true
+    }
+
+    /** Bounded append check: the authoritative final snapshot performs the exact check once. */
     private fun isLikelyAppend(next: String): Boolean {
         if (source.isEmpty()) return true
         if (next.length < source.length) return false
-        fun matchesWindow(start: Int, length: Int): Boolean =
-            length <= 0 || next.regionMatches(start, source, start, length, ignoreCase = false)
+        fun matchesWindow(start: Int, length: Int): Boolean {
+            if (length <= 0) return true
+            for (index in start until start + length) if (next[index] != source[index]) return false
+            return true
+        }
         val headLength = minOf(SAMPLE_CHARS, source.length)
         if (!matchesWindow(0, headLength)) return false
         val tailStart = (source.length - SAMPLE_CHARS).coerceAtLeast(0)
@@ -106,7 +137,7 @@ class NativeStreamingMarkdownAccumulator {
     /** Continues from the last incomplete line instead of scanning the complete answer. */
     private fun scanAppendedLines() {
         while (scanCursor < source.length) {
-            val newline = source.indexOf('\n', scanCursor)
+            val newline = findNewline(scanCursor)
             if (newline < 0) return
             val lineEnd = newline + 1
             val line = source.substring(scanCursor, newline).removeSuffix("\r")
@@ -126,16 +157,16 @@ class NativeStreamingMarkdownAccumulator {
                     fenceLength = opening.second
                 } else if (trimmed.isEmpty()) {
                     val candidate = source.substring(stableChars, lineEnd)
-                    boundaries.add(
-                        Boundary(
-                            lineEnd,
-                            priority = NativeUiRenderSafety.containsMarkdownTable(candidate),
-                        ),
-                    )
+                    boundaries.add(Boundary(lineEnd, priority = NativeUiRenderSafety.containsMarkdownTable(candidate)))
                 }
             }
             scanCursor = lineEnd
         }
+    }
+
+    private fun findNewline(start: Int): Int {
+        for (index in start until source.length) if (source[index] == '\n') return index
+        return -1
     }
 
     private fun promoteStableBlocks() {
@@ -150,8 +181,6 @@ class NativeStreamingMarkdownAccumulator {
         if (candidates.isEmpty()) return null
         fun hasContent(end: Int): Boolean = source.substring(stableChars, end).isNotBlank()
 
-        // Closed code fences and complete GFM tables should become rich UI immediately,
-        // even when smaller than the normal grouping target.
         candidates.firstOrNull { it.priority && hasContent(it.offset) }?.let { return it.offset }
         candidates.firstOrNull { it.offset - stableChars >= TARGET_BLOCK_CHARS && hasContent(it.offset) }
             ?.let { return it.offset }
@@ -167,6 +196,7 @@ class NativeStreamingMarkdownAccumulator {
         if (end <= stableChars) return
         val text = source.substring(stableChars, end)
         stableBlocks.add(NativeStreamingMarkdownBlock(stableChars, end, text))
+        publishedBlocks = stableBlocks.toList()
         stableChars = end
         boundaries.removeAll { it.offset <= stableChars }
     }

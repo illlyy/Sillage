@@ -62,7 +62,8 @@
         <activity
             android:name=".app.NativeSettingsActivity"
             android:exported="false"
-            android:screenOrientation="portrait" />
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.CodexMobile" />
         <activity
             android:name=".app.CodexChatActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|uiMode|keyboard|keyboardHidden|navigation"

@@ -42,6 +42,7 @@ public class NativeStreamingMarkdownTest {
         NativeStreamingMarkdownSnapshot second = accumulator.update(stable + "tail grows", false);
 
         assertEquals(1, first.getBlocks().size());
+        assertSame(first.getBlocks(), second.getBlocks());
         assertSame(first.getBlocks().get(0), second.getBlocks().get(0));
         assertEquals("tail grows", second.getTail());
     }
@@ -143,6 +144,23 @@ public class NativeStreamingMarkdownTest {
         assertEquals(5, first);
         assertEquals(9, NativeStreamingMarkdownWindow.firstVisibleBlock(blocks, 9000, 6000));
         assertEquals(0, NativeStreamingMarkdownWindow.firstVisibleBlock(java.util.Collections.emptyList(), 0, 6000));
+    }
+
+    @Test
+    public void appendApiPublishesBoundedTailWithoutFullDocumentCopies() {
+        NativeStreamingMarkdownAccumulator accumulator = new NativeStreamingMarkdownAccumulator();
+        StringBuilder source = new StringBuilder();
+        NativeStreamingMarkdownSnapshot snapshot = null;
+        for (int index = 0; index < 500; index++) {
+            String delta = "delta-" + index + " " + "word ".repeat(12) + "\n\n";
+            source.append(delta);
+            snapshot = accumulator.append(delta, false);
+        }
+        assertTrue(snapshot != null);
+        assertEquals(source.toString(), reconstruct(snapshot));
+        assertTrue(snapshot.getBlocks().size() > 10);
+        assertTrue(snapshot.getTail().length() < 2_400);
+        assertEquals(source.length(), snapshot.getSourceChars());
     }
 
     @Test

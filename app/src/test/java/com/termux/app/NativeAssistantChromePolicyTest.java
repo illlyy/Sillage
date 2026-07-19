@@ -7,7 +7,7 @@ import static org.junit.Assert.*;
 
 public class NativeAssistantChromePolicyTest {
     private static NativeChatMessage message(String id, NativeChatRole role, String text) {
-        return new NativeChatMessage(id, role, text, false, 0L, false,
+        return new NativeChatMessage(id, role, text, false, 0L, false, null,
             java.util.Collections.emptyList(), java.util.Collections.emptyList());
     }
 
