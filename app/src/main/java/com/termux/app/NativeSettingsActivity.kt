@@ -978,7 +978,7 @@ private fun OverlaySettingsPage(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         completionNotification = granted
         prefs.edit().putBoolean("completion_notification", granted).apply()
-        if (!granted) Toast.makeText(context, tr(lang, "需要通知权限才能发送完成提醒", "Notification permission is required for completion alerts"), Toast.LENGTH_SHORT).show()
+        if (!granted) Toast.makeText(context, tr(lang, "需要通知权限才能发送任务提醒", "Notification permission is required for task alerts"), Toast.LENGTH_SHORT).show()
     }
     val batterySettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         batteryUnrestricted = isBatteryUnrestricted(context)
@@ -1065,7 +1065,7 @@ private fun OverlaySettingsPage(
                     overlayActionLabel(lang, gestureValues[setting.key] ?: setting.fallback),
                 ) { selectedGesture = setting }
             }
-            item { SettingsSection(tr(lang, "任务完成提醒", "Task completion alerts")) }
+            item { SettingsSection(tr(lang, "任务提醒", "Task alerts")) }
             item {
                 ToggleSettingsRow(
                     HugeIcons.Sparkles,
@@ -1080,8 +1080,8 @@ private fun OverlaySettingsPage(
             item {
                 ToggleSettingsRow(
                     HugeIcons.Refresh03,
-                    tr(lang, "系统完成通知", "System completion notification"),
-                    tr(lang, "任务完成时发送可点击的系统通知", "Send a tappable system notification when a task completes"),
+                    tr(lang, "系统任务通知", "System task notifications"),
+                    tr(lang, "任务完成、失败、待答、待审批或等待执行计划时发送可点击通知", "Send tappable alerts for completion, failure, questions, approvals, and pending plans"),
                     completionNotification,
                 ) { enabled ->
                     if (enabled && android.os.Build.VERSION.SDK_INT >= 33 &&

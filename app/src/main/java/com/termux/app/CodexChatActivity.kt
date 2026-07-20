@@ -43,11 +43,25 @@ internal enum class NativeTurnPhase(val active: Boolean) {
 }
 
 internal const val NATIVE_PROPOSED_PLAN_PREFIX = "PROPOSED_PLAN|"
+internal const val NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX = "IMPLEMENT_PLAN|"
+private const val NATIVE_USER_INPUT_TIMEOUT_MS = 240_000L
 private const val NATIVE_SHOW_RESPONSE_STATS_PREFERENCE = "native_show_response_stats_v1"
 private const val NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE = "native_show_model_subtitle_v1"
 private const val NATIVE_SHOW_REASONING_TITLES_PREFERENCE = "native_show_reasoning_titles_v1"
 internal fun encodeNativeProposedPlan(text: String): String = NATIVE_PROPOSED_PLAN_PREFIX + text
 internal fun decodeNativeProposedPlan(content: String): String = content.substringAfter('|')
+internal fun encodeNativeImplementPlan(text: String): String = NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX +
+    java.util.Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))
+internal fun decodeNativeImplementPlan(content: String): String = runCatching {
+    String(java.util.Base64.getDecoder().decode(content.substringAfter('|')), Charsets.UTF_8)
+}.getOrDefault("")
+internal fun encodeNativeUserInputAnswers(answers: Map<String, String>): String = JSONObject().also { result ->
+    answers.forEach { (id, answer) ->
+        answer.trim().takeIf { it.isNotBlank() }?.let { value ->
+            result.put(id, JSONObject().put("answers", JSONArray().put(value)))
+        }
+    }
+}.toString()
 
 @Immutable
 data class NativeAttachment(val name: String, val path: String, val image: Boolean)
@@ -59,7 +73,14 @@ data class NativeSkill(val name: String, val description: String, val path: Stri
 internal data class NativeModelOption(val id: String, val name: String, val efforts: List<String>, val defaultEffort: String)
 
 @Immutable
-internal data class NativeConversation(val threadId: String, val title: String, val state: String, val projectPath: String, val favorite: Boolean) { val projectName: String get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
+internal data class NativeConversation(
+    val threadId: String,
+    val title: String,
+    val state: String,
+    val projectPath: String,
+    val favorite: Boolean,
+    val attention: String = "",
+) { val projectName: String get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
 
 @Immutable
 data class NativeChatMessage(
@@ -105,6 +126,26 @@ internal class NativeChatState {
     var activeGoalStatus by mutableStateOf("active")
     var pendingUserInputRequest by mutableStateOf("")
     var pendingApprovalRequest by mutableStateOf("")
+    var pendingPlanImplementation by mutableStateOf("")
+    var projectPath by mutableStateOf("")
+    var gitSnapshot by mutableStateOf("")
+    var gitBusy by mutableStateOf(false)
+    var gitError by mutableStateOf("")
+    var gitNotice by mutableStateOf("")
+    val gitDiffs = mutableStateMapOf<String, String>()
+    val gitDiffLoading = mutableStateListOf<String>()
+    val workspaceSnapshots = mutableStateListOf<NativeWorkspaceSnapshot>()
+    var workspaceSnapshotBusy by mutableStateOf(false)
+    var workspaceSnapshotError by mutableStateOf("")
+    var workspaceSnapshotNotice by mutableStateOf("")
+    var workspaceSnapshotPreview by mutableStateOf("")
+    val workspaceSnapshotDiffs = mutableStateMapOf<String, String>()
+    val workspaceSnapshotDiffLoading = mutableStateListOf<String>()
+    val worktrees = mutableStateListOf<NativeWorktreeEntry>()
+    var worktreeBusy by mutableStateOf(false)
+    var worktreeError by mutableStateOf("")
+    var worktreeNotice by mutableStateOf("")
+    var worktreeMergePreview by mutableStateOf("")
     var permissionMode by mutableStateOf(NativePermissionMode.FULL_ACCESS)
     var planJson by mutableStateOf("[]")
     var planExplanation by mutableStateOf("")
@@ -157,6 +198,25 @@ internal class NativeChatState {
         activeGoalStatus = "active"
         pendingUserInputRequest = ""
         pendingApprovalRequest = ""
+        pendingPlanImplementation = ""
+        gitSnapshot = ""
+        gitBusy = false
+        gitError = ""
+        gitNotice = ""
+        gitDiffs.clear()
+        gitDiffLoading.clear()
+        workspaceSnapshots.clear()
+        workspaceSnapshotBusy = false
+        workspaceSnapshotError = ""
+        workspaceSnapshotNotice = ""
+        workspaceSnapshotPreview = ""
+        workspaceSnapshotDiffs.clear()
+        workspaceSnapshotDiffLoading.clear()
+        worktrees.clear()
+        worktreeBusy = false
+        worktreeError = ""
+        worktreeNotice = ""
+        worktreeMergePreview = ""
         phase = NativeTurnPhase.IDLE
         processingLabel = ""
         reasoningText = ""
@@ -658,6 +718,7 @@ internal class NativeChatState {
 class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
     companion object {
         private val subagentRouteCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        private val stalePendingStateCleaned = java.util.concurrent.atomic.AtomicBoolean(false)
         private const val STREAM_CATCH_UP_CHUNK_CHARS = 1_200
         private const val STREAM_CATCH_UP_DELAY_MS = 24L
     }
@@ -762,6 +823,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         lastFrameNanos = 0L
     }
     private var currentThreadId: String? = null
+    private var notificationTargetThreadId: String = ""
     private var expectedHistoryGeneration = -1
     private var displayedHistorySnapshot: NativeHistorySnapshot? = null
     private var nativeThemeMode by mutableStateOf("system")
@@ -789,6 +851,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         NativeChatDiagnostics.record(this, "activity_create", JSONObject()
             .put("diagnostics", NativeChatDiagnostics.file(this).absolutePath))
         val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        notificationTargetThreadId = intent?.getStringExtra(NativeTaskNotificationManager.EXTRA_THREAD_ID).orEmpty()
+        if (stalePendingStateCleaned.compareAndSet(false, true)) {
+            val staleApprovalKeys = nativePrefs.all.keys.filter { it.startsWith("native_thread_pending_approval_v1_") }
+            if (staleApprovalKeys.isNotEmpty()) nativePrefs.edit().apply {
+                staleApprovalKeys.forEach(::remove)
+            }.apply()
+        }
         chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
         chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
         chatState.permissionMode = NativePermissionMode.normalize(nativePrefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
@@ -848,7 +917,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onToggleGoalPause = ::toggleGoalPause,
                     onCompact = { bridge?.compactThread() },
                     onAnswerUserInput = ::answerUserInput,
+                    onExecutePendingPlan = ::executePendingPlan,
+                    onRevisePendingPlan = ::revisePendingPlan,
+                    onCancelPendingPlan = ::cancelPendingPlan,
                     onAnswerApproval = ::answerApproval,
+                    onGitAction = ::performGitAction,
+                    onSnapshotAction = ::performSnapshotAction,
+                    onWorktreeAction = ::performWorktreeAction,
                     onPickImages = { imagePicker.launch("image/*") },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { chatState.attachments.remove(it) },
@@ -943,7 +1018,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         )
 
         val retainedRuntime = CodexNativeRuntime.exists()
-        val retainedThread = CodexNativeRuntime.currentThreadId()?.takeIf { it.isNotBlank() }
+        val retainedThread = notificationTargetThreadId.takeIf { it.isNotBlank() }
+            ?: CodexNativeRuntime.currentThreadId()?.takeIf { it.isNotBlank() }
             ?: currentThreadId?.takeIf { it.isNotBlank() }
         chatState.ready = false
         bridge = CodexNativeRuntime.attach(
@@ -1138,8 +1214,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun retryMessage(text: String) {
-        val value = text.trim()
-        if (value.isEmpty() || chatState.busy || !chatState.ready) return
+        val displayValue = text.trim()
+        if (displayValue.isEmpty() || chatState.busy || !chatState.ready) return
+        val implementsPlan = displayValue.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
+        val value = if (implementsPlan) {
+            "${CodexAppServerBridge.IMPLEMENT_PLAN_PROMPT_PREFIX}\n${decodeNativeImplementPlan(displayValue)}"
+        } else displayValue
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
         while (chatState.messages.isNotEmpty() && chatState.messages.last().role != NativeChatRole.USER) {
             chatState.messages.removeAt(chatState.messages.lastIndex)
@@ -1158,7 +1238,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.turnMessageStartIndex = chatState.messages.size
         chatState.phaseStartedAt = chatState.turnStartedAt
         chatState.phaseMessageStartIndex = chatState.turnMessageStartIndex
-        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", chatState.selectedMode)
+        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", if (implementsPlan) "default" else chatState.selectedMode)
     }
 
     private fun persistDraft(value: String) {
@@ -1173,6 +1253,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun sendMessage(text: String) {
         val value = text.trim()
         if ((value.isEmpty() && chatState.attachments.isEmpty()) || chatState.busy || !chatState.ready) return
+        currentThreadId?.let { NativeTaskNotificationManager.reset(this, it) }
+        currentThreadId?.takeIf { chatState.pendingPlanImplementation.isNotBlank() }
+            ?.let(::clearPendingPlanImplementation)
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
         updateDraft("")
         if (chatState.conversationTitle == "新对话" && value.isNotBlank()) {
@@ -1216,6 +1299,50 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun goalStatusPreferenceKey(threadId: String): String = "native_thread_goal_status_v1_$threadId"
     private fun planPreferenceKey(threadId: String): String = "native_thread_plan_v1_$threadId"
     private fun planExplanationPreferenceKey(threadId: String): String = "native_thread_plan_explanation_v1_$threadId"
+    private fun pendingUserInputPreferenceKey(threadId: String): String = "native_thread_pending_user_input_v1_$threadId"
+    private fun pendingApprovalPreferenceKey(threadId: String): String = "native_thread_pending_approval_v1_$threadId"
+    private fun pendingPlanImplementationPreferenceKey(threadId: String): String = "native_thread_pending_plan_v1_$threadId"
+
+    private fun threadAttention(threadId: String): String {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val pendingInput = prefs.getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
+        val deadline = runCatching { JSONObject(pendingInput).optLong("_nativeDeadlineMs", 0L) }.getOrDefault(0L)
+        if (pendingInput.isNotBlank() && deadline > 0L && deadline <= System.currentTimeMillis()) {
+            prefs.edit().remove(pendingUserInputPreferenceKey(threadId)).apply()
+        }
+        return when {
+            pendingInput.isNotBlank() && (deadline <= 0L || deadline > System.currentTimeMillis()) -> "answer"
+            prefs.getString(pendingApprovalPreferenceKey(threadId), "").orEmpty().isNotBlank() -> "approval"
+            prefs.getString(pendingPlanImplementationPreferenceKey(threadId), "").orEmpty().isNotBlank() -> "plan"
+            else -> ""
+        }
+    }
+
+    private fun attentionPriority(value: String): Int = when (value) {
+        "answer" -> 3
+        "approval" -> 2
+        "plan", "resume" -> 1
+        else -> 0
+    }
+
+    private fun taskAttention(threadId: String, state: String): String = threadAttention(threadId).ifBlank {
+        if (state == CodexTaskStore.FAILED) "resume" else ""
+    }
+
+    private fun syncPendingNotification(threadId: String) {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val input = prefs.getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
+        val approval = prefs.getString(pendingApprovalPreferenceKey(threadId), "").orEmpty()
+        val plan = prefs.getString(pendingPlanImplementationPreferenceKey(threadId), "").orEmpty()
+        when {
+            input.isNotBlank() -> NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.ANSWER, requestIdentity(input), "")
+            approval.isNotBlank() -> NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.APPROVAL, requestIdentity(approval), "")
+            plan.isNotBlank() -> NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.PLAN, plan.hashCode().toString(), "")
+            CodexTaskStore.current(this).any { it.threadId == threadId && it.state == CodexTaskStore.FAILED } ->
+                NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.RESUME, "failed", "")
+            else -> NativeTaskNotificationManager.markSeen(this, threadId)
+        }
+    }
 
     private fun restoreGoalForThread(threadId: String) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
@@ -1225,6 +1352,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.selectedMode = prefs.getString(modePreferenceKey(threadId), "default").orEmpty().takeIf { it == "plan" } ?: "default"
         chatState.planJson = prefs.getString(planPreferenceKey(threadId), "[]").orEmpty().ifBlank { "[]" }
         chatState.planExplanation = prefs.getString(planExplanationPreferenceKey(threadId), "").orEmpty()
+        chatState.pendingUserInputRequest = prefs.getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
+        chatState.pendingApprovalRequest = prefs.getString(pendingApprovalPreferenceKey(threadId), "").orEmpty()
+        chatState.pendingPlanImplementation = prefs.getString(pendingPlanImplementationPreferenceKey(threadId), "").orEmpty()
+        if (chatState.pendingUserInputRequest.isNotBlank()) scheduleUserInputTimeout(threadId, chatState.pendingUserInputRequest)
+        chatState.workspaceSnapshots.clear()
+        chatState.workspaceSnapshots.addAll(NativeWorkspaceSnapshotStore.load(this, threadId))
     }
 
     private fun clearLocalGoal(threadId: String) {
@@ -1269,16 +1402,138 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         bridge?.setThreadGoal(value)
     }
 
-    private fun answerUserInput(requestId: Int, questionId: String, answer: String) {
-        val answers = JSONObject().put(questionId, JSONObject().put("answers", JSONArray().put(answer)))
-        bridge?.respondUserInput(requestId, answers.toString())
-        chatState.pendingUserInputRequest = ""
+    private fun requestIdentity(raw: String): String = runCatching {
+        JSONObject(raw).opt("requestId")?.toString().orEmpty()
+    }.getOrDefault("")
+
+    private fun storePendingUserInput(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val params = payload.optJSONObject("params")
+        val threadId = params?.optString("threadId").orEmpty().ifBlank { currentThreadId.orEmpty() }
+        if (threadId.isBlank()) return
+        if (payload.optLong("_nativeDeadlineMs", 0L) <= 0L) {
+            payload.put("_nativeDeadlineMs", System.currentTimeMillis() + NATIVE_USER_INPUT_TIMEOUT_MS)
+        }
+        val stored = payload.toString()
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(pendingUserInputPreferenceKey(threadId), stored)
+            .apply()
+        if (currentThreadId == threadId) chatState.pendingUserInputRequest = stored
+        scheduleUserInputTimeout(threadId, stored)
+        refreshConversations()
+    }
+
+    private fun clearPendingUserInput(threadId: String, expectedRequestId: String = "") {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val stored = prefs.getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
+        if (expectedRequestId.isNotBlank() && requestIdentity(stored) != expectedRequestId) return
+        prefs.edit().remove(pendingUserInputPreferenceKey(threadId)).apply()
+        syncPendingNotification(threadId)
+        if (currentThreadId == threadId && (expectedRequestId.isBlank() || requestIdentity(chatState.pendingUserInputRequest) == expectedRequestId)) {
+            chatState.pendingUserInputRequest = ""
+        }
+        refreshConversations()
+    }
+
+    private fun scheduleUserInputTimeout(threadId: String, raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val requestId = requestIdentity(raw)
+        val deadline = payload.optLong("_nativeDeadlineMs", System.currentTimeMillis() + NATIVE_USER_INPUT_TIMEOUT_MS)
+        streamHandler.postDelayed({
+            val stored = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+                .getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
+            if (requestIdentity(stored) != requestId || System.currentTimeMillis() < deadline) return@postDelayed
+            bridge?.respondUserInput(stored, "{}")
+            clearPendingUserInput(threadId, requestId)
+            if (currentThreadId == threadId && chatState.phase == NativeTurnPhase.WAITING) {
+                chatState.phase = NativeTurnPhase.TOOL_RUNNING
+                chatState.processingLabel = nativeText(nativeLanguage, "\u6b63\u5728\u7ee7\u7eed\u6267\u884c", "Continuing")
+            }
+        }, (deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+    }
+
+    private fun answerUserInput(answersJson: String) {
+        val raw = chatState.pendingUserInputRequest
+        val threadId = currentThreadId ?: return
+        if (raw.isBlank()) return
+        bridge?.respondUserInput(raw, answersJson)
+        clearPendingUserInput(threadId, requestIdentity(raw))
+        if (chatState.phase == NativeTurnPhase.WAITING) {
+            chatState.phase = NativeTurnPhase.TOOL_RUNNING
+            chatState.processingLabel = nativeText(nativeLanguage, "\u6b63\u5728\u7ee7\u7eed\u6267\u884c", "Continuing")
+        }
+    }
+
+    private fun handleUserInputResolved(value: String) {
+        val payload = runCatching { JSONObject(value) }.getOrNull() ?: return
+        val threadId = payload.optString("threadId")
+        val requestId = payload.opt("requestId")?.toString().orEmpty()
+        if (threadId.isNotBlank()) {
+            clearPendingUserInput(threadId, requestId)
+            if (currentThreadId == threadId && chatState.phase == NativeTurnPhase.WAITING) {
+                chatState.phase = NativeTurnPhase.TOOL_RUNNING
+                chatState.processingLabel = nativeText(nativeLanguage, "\u6b63\u5728\u7ee7\u7eed\u6267\u884c", "Continuing")
+            }
+        }
+    }
+
+    private fun persistPendingPlanImplementation(threadId: String, plan: String) {
+        val value = plan.trim()
+        if (value.isBlank()) return
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(pendingPlanImplementationPreferenceKey(threadId), value)
+            .apply()
+        if (currentThreadId == threadId) chatState.pendingPlanImplementation = value
+        NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.PLAN, value.hashCode().toString(), "")
+        refreshConversations()
+    }
+
+    private fun clearPendingPlanImplementation(threadId: String) {
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .remove(pendingPlanImplementationPreferenceKey(threadId))
+            .apply()
+        if (currentThreadId == threadId) chatState.pendingPlanImplementation = ""
+        syncPendingNotification(threadId)
+        refreshConversations()
+    }
+
+    private fun executePendingPlan() {
+        val threadId = currentThreadId ?: return
+        val plan = chatState.pendingPlanImplementation.trim()
+        if (plan.isBlank() || chatState.busy || !chatState.ready) return
+        clearPendingPlanImplementation(threadId)
+        setChatMode("default")
+        currentThreadId?.let(NativeHistorySnapshotCache::remove)
+        updateDraft("")
+        chatState.addUser(encodeNativeImplementPlan(plan))
+        startFrameDiagnostics()
+        bridge?.sendMessage(
+            "${CodexAppServerBridge.IMPLEMENT_PLAN_PROMPT_PREFIX}\n$plan",
+            chatState.selectedModel,
+            chatState.selectedEffort,
+            "[]",
+            "default",
+            "[]",
+        )
+    }
+
+    private fun revisePendingPlan(feedback: String) {
+        val threadId = currentThreadId ?: return
+        val value = feedback.trim()
+        if (value.isBlank()) return
+        clearPendingPlanImplementation(threadId)
+        setChatMode("plan")
+        sendMessage(value)
+    }
+
+    private fun cancelPendingPlan() {
+        currentThreadId?.let(::clearPendingPlanImplementation)
     }
 
     private fun answerApproval(rawRequest: String, decision: String) {
         if (rawRequest.isBlank()) return
         bridge?.respondApprovalRequest(rawRequest, decision)
-        if (chatState.pendingApprovalRequest == rawRequest) chatState.pendingApprovalRequest = ""
+        approvalThreadId(rawRequest)?.let { clearPendingApproval(it, rawRequest) }
         if (chatState.phase == NativeTurnPhase.WAITING) {
             chatState.phase = NativeTurnPhase.TOOL_RUNNING
             chatState.processingLabel = nativeText(nativeLanguage, "\u6b63\u5728\u7ee7\u7eed\u6267\u884c", "Continuing")
@@ -1288,7 +1543,463 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun cancelPendingApproval() {
         val raw = chatState.pendingApprovalRequest
         if (raw.isNotBlank()) bridge?.respondApprovalRequest(raw, "cancel")
-        chatState.pendingApprovalRequest = ""
+        approvalThreadId(raw)?.let { clearPendingApproval(it, raw) }
+    }
+
+    private fun approvalThreadId(raw: String): String? = runCatching {
+        JSONObject(raw).optJSONObject("params")?.optString("threadId").orEmpty()
+    }.getOrDefault("").ifBlank { currentThreadId.orEmpty() }.takeIf { it.isNotBlank() }
+
+    private fun storePendingApproval(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val threadId = payload.optJSONObject("params")?.optString("threadId").orEmpty()
+            .ifBlank { currentThreadId.orEmpty() }
+        if (threadId.isBlank()) return
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(pendingApprovalPreferenceKey(threadId), raw)
+            .apply()
+        if (currentThreadId == threadId) chatState.pendingApprovalRequest = raw
+        refreshConversations()
+    }
+
+    private fun clearPendingApproval(threadId: String, expectedRaw: String = "") {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val stored = prefs.getString(pendingApprovalPreferenceKey(threadId), "").orEmpty()
+        if (expectedRaw.isNotBlank() && stored.isNotBlank() && requestIdentity(stored) != requestIdentity(expectedRaw)) return
+        prefs.edit().remove(pendingApprovalPreferenceKey(threadId)).apply()
+        syncPendingNotification(threadId)
+        if (currentThreadId == threadId) chatState.pendingApprovalRequest = ""
+        refreshConversations()
+    }
+
+    private fun configuredProjectPath(): String {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val configured = prefs.getString("custom_project_root", "").orEmpty()
+        return configured.takeIf { prefs.getBoolean("custom_project_root_enabled", true) && File(it).isDirectory } ?: ""
+    }
+
+    private fun performGitAction(action: String, value: String) {
+        val project = chatState.projectPath
+        val routeThreadId = currentThreadId
+        if (project.isBlank()) {
+            chatState.gitError = nativeText(nativeLanguage, "当前对话没有绑定项目目录", "This conversation has no project directory")
+            return
+        }
+        if (action == "diff") {
+            if (value.isBlank() || value in chatState.gitDiffLoading) return
+            chatState.gitDiffLoading.add(value)
+            Thread({
+                val unstaged = runGit(project, listOf("diff", "--no-ext-diff", "--unified=3", "--", value))
+                val staged = runGit(project, listOf("diff", "--cached", "--no-ext-diff", "--unified=3", "--", value))
+                var unstagedText = unstaged.second.takeIf { unstaged.first == 0 }.orEmpty()
+                if (unstagedText.isBlank() && staged.second.isBlank()) {
+                    val untracked = runGit(project, listOf("diff", "--no-index", "--unified=3", "--", "/dev/null", value))
+                    if (untracked.first in setOf(0, 1)) unstagedText = untracked.second
+                }
+                val snapshot = NativeGitWorkflow.diffSnapshot(
+                    unstagedText,
+                    staged.second.takeIf { staged.first == 0 }.orEmpty(),
+                    listOfNotNull(
+                        unstaged.second.takeIf { unstaged.first != 0 },
+                        staged.second.takeIf { staged.first != 0 },
+                    ).joinToString("\n").trim(),
+                )
+                runOnUiThread {
+                    if (currentThreadId != routeThreadId || chatState.projectPath != project) return@runOnUiThread
+                    chatState.gitDiffs[value] = snapshot
+                    chatState.gitDiffLoading.remove(value)
+                }
+            }, "NativeGitDiff").start()
+            return
+        }
+        if (chatState.gitBusy) return
+        chatState.gitBusy = true
+        chatState.gitError = ""
+        chatState.gitNotice = ""
+        Thread({
+            val result = when (action) {
+                "refresh" -> 0 to ""
+                "stage" -> runGit(project, listOf("add", "--", value))
+                "unstage" -> {
+                    val restore = runGit(project, listOf("restore", "--staged", "--", value))
+                    if (restore.first == 0) restore else runGit(project, listOf("reset", "HEAD", "--", value))
+                }
+                "commit" -> if (value.trim().isBlank()) -1 to nativeText(nativeLanguage, "请输入提交说明", "Enter a commit message")
+                    else runGit(project, listOf("commit", "-m", value.trim()))
+                else -> -1 to nativeText(nativeLanguage, "未知 Git 操作", "Unknown Git action")
+            }
+            val status = loadGitSnapshot(project)
+            runOnUiThread {
+                if (currentThreadId != routeThreadId || chatState.projectPath != project) return@runOnUiThread
+                chatState.gitSnapshot = status
+                chatState.gitBusy = false
+                chatState.gitDiffs.clear()
+                chatState.gitDiffLoading.clear()
+                if (result.first == 0) {
+                    chatState.gitError = ""
+                    chatState.gitNotice = when (action) {
+                        "stage" -> nativeText(nativeLanguage, "已暂存 $value", "Staged $value")
+                        "unstage" -> nativeText(nativeLanguage, "已取消暂存 $value", "Unstaged $value")
+                        "commit" -> result.second.lineSequence().firstOrNull().orEmpty().ifBlank { nativeText(nativeLanguage, "提交成功", "Commit created") }
+                        else -> ""
+                    }
+                } else {
+                    chatState.gitError = result.second.trim()
+                    chatState.gitNotice = ""
+                }
+            }
+        }, "NativeGitWorkflow").start()
+    }
+
+    private fun loadGitSnapshot(project: String): String {
+        val git = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "git")
+        if (!git.isFile) return NativeGitWorkflow.unavailable(project, nativeText(nativeLanguage, "尚未安装 Git", "Git is not installed"))
+        val result = runGit(project, listOf("-c", "core.quotepath=false", "status", "--porcelain=v1", "--branch", "--untracked-files=all"))
+        return if (result.first == 0) NativeGitWorkflow.parse(project, result.second)
+        else NativeGitWorkflow.unavailable(project, result.second.trim().ifBlank { nativeText(nativeLanguage, "这里不是 Git 仓库", "This is not a Git repository") })
+    }
+
+    private fun runGit(project: String, arguments: List<String>): Pair<Int, String> = runCatching {
+        runGit(project, arguments, emptyMap())
+    }.getOrElse { -1 to (it.message ?: it.javaClass.simpleName) }
+
+    private fun runGit(project: String, arguments: List<String>, environment: Map<String, String>): Pair<Int, String> = runCatching {
+        val directory = File(project).canonicalFile
+        require(directory.isDirectory) { "Project directory is unavailable" }
+        val command = mutableListOf(File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "git").absolutePath)
+        command.addAll(arguments)
+        val process = ProcessBuilder(command)
+            .directory(directory)
+            .redirectErrorStream(true)
+            .also { builder ->
+                builder.environment()["PATH"] = TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin:/system/xbin"
+                builder.environment().putAll(environment)
+            }
+            .start()
+        val output = process.inputStream.bufferedReader().use { reader ->
+            val collected = StringBuilder()
+            val buffer = CharArray(8_192)
+            while (true) {
+                val count = reader.read(buffer)
+                if (count < 0) break
+                val remaining = 240_000 - collected.length
+                if (remaining > 0) collected.append(buffer, 0, minOf(count, remaining))
+            }
+            collected.toString()
+        }
+        process.waitFor()
+        process.exitValue() to output
+    }.getOrElse { -1 to (it.message ?: it.javaClass.simpleName) }
+
+    private fun captureWorkspaceCommit(project: String): Pair<String, String> {
+        val checkpointDir = File(cacheDir, "native-workspace-checkpoints").apply { mkdirs() }
+        val indexFile = File.createTempFile("index-", ".tmp", checkpointDir).apply { delete() }
+        val environment = mapOf(
+            "GIT_INDEX_FILE" to indexFile.absolutePath,
+            "GIT_AUTHOR_NAME" to "Fcode Checkpoint",
+            "GIT_AUTHOR_EMAIL" to "checkpoint@fcode.local",
+            "GIT_COMMITTER_NAME" to "Fcode Checkpoint",
+            "GIT_COMMITTER_EMAIL" to "checkpoint@fcode.local",
+        )
+        return try {
+            val head = runGit(project, listOf("rev-parse", "--verify", "HEAD"))
+            val headCommit = head.second.trim().takeIf { head.first == 0 && it.matches(Regex("[0-9a-fA-F]{40,64}")) }.orEmpty()
+            val readTree = if (headCommit.isBlank()) runGit(project, listOf("read-tree", "--empty"), environment)
+                else runGit(project, listOf("read-tree", headCommit), environment)
+            if (readTree.first != 0) return "" to readTree.second
+            val add = runGit(project, listOf("-c", "core.quotepath=false", "add", "-A", "--", "."), environment)
+            if (add.first != 0) return "" to add.second
+            val tree = runGit(project, listOf("write-tree"), environment)
+            if (tree.first != 0) return "" to tree.second
+            val commitArgs = mutableListOf("commit-tree", tree.second.trim(), "-m", "Fcode workspace checkpoint")
+            if (headCommit.isNotBlank()) commitArgs.addAll(listOf("-p", headCommit))
+            val commit = runGit(project, commitArgs, environment)
+            if (commit.first != 0) "" to commit.second else commit.second.trim() to ""
+        } finally {
+            indexFile.delete()
+            File(indexFile.absolutePath + ".lock").delete()
+        }
+    }
+
+    private fun createWorkspaceSnapshot(
+        threadId: String,
+        project: String,
+        label: String,
+        automatic: Boolean,
+    ): Pair<NativeWorkspaceSnapshot?, String> {
+        val captured = captureWorkspaceCommit(project)
+        if (captured.first.isBlank()) return null to captured.second.ifBlank { nativeText(nativeLanguage, "\u65e0\u6cd5\u521b\u5efa\u5de5\u4f5c\u533a\u5feb\u7167", "Unable to create workspace snapshot") }
+        val id = UUID.randomUUID().toString()
+        val safeThread = threadId.replace(Regex("[^A-Za-z0-9._-]"), "-")
+        val ref = "refs/fcode/checkpoints/$safeThread/$id"
+        val updateRef = runGit(project, listOf("update-ref", ref, captured.first))
+        if (updateRef.first != 0) return null to updateRef.second
+        val item = NativeWorkspaceSnapshot(id, threadId, project, captured.first, ref, label, System.currentTimeMillis(), automatic)
+        val previous = NativeWorkspaceSnapshotStore.load(this, threadId)
+        val updated = NativeWorkspaceSnapshotStore.add(this, item)
+        previous.filter { old -> updated.none { it.id == old.id } && old.ref.isNotBlank() }
+            .forEach { old -> runGit(project, listOf("update-ref", "-d", old.ref)) }
+        return item to ""
+    }
+
+    private fun performSnapshotAction(action: String, rawValue: String) {
+        val threadId = currentThreadId ?: return
+        val project = chatState.projectPath
+        if (project.isBlank()) {
+            chatState.workspaceSnapshotError = nativeText(nativeLanguage, "\u5f53\u524d\u5bf9\u8bdd\u6ca1\u6709\u7ed1\u5b9a\u9879\u76ee\u76ee\u5f55", "This conversation has no project directory")
+            return
+        }
+        if (action == "refresh") {
+            chatState.workspaceSnapshots.clear()
+            chatState.workspaceSnapshots.addAll(NativeWorkspaceSnapshotStore.load(this, threadId))
+            return
+        }
+        if (action == "clearPreview") {
+            chatState.workspaceSnapshotPreview = ""
+            chatState.workspaceSnapshotDiffs.clear()
+            chatState.workspaceSnapshotDiffLoading.clear()
+            return
+        }
+        if (action == "diff") {
+            val request = runCatching { JSONObject(rawValue) }.getOrNull() ?: return
+            val snapshotId = request.optString("snapshotId")
+            val path = request.optString("path")
+            val preview = runCatching { JSONObject(chatState.workspaceSnapshotPreview) }.getOrNull() ?: return
+            val snapshot = chatState.workspaceSnapshots.firstOrNull { it.id == snapshotId } ?: return
+            val currentCommit = preview.optString("currentCommit")
+            val key = "$snapshotId|$path"
+            if (path.isBlank() || currentCommit.isBlank() || key in chatState.workspaceSnapshotDiffLoading) return
+            chatState.workspaceSnapshotDiffLoading.add(key)
+            Thread({
+                val diff = runGit(project, listOf("diff", "--no-ext-diff", "--unified=3", snapshot.commit, currentCommit, "--", path))
+                runOnUiThread {
+                    if (currentThreadId != threadId || chatState.projectPath != project) return@runOnUiThread
+                    chatState.workspaceSnapshotDiffs[key] = if (diff.first == 0) diff.second else diff.second.ifBlank { "Unable to load diff" }
+                    chatState.workspaceSnapshotDiffLoading.remove(key)
+                }
+            }, "NativeSnapshotDiff").start()
+            return
+        }
+        if (chatState.workspaceSnapshotBusy) return
+        chatState.workspaceSnapshotBusy = true
+        chatState.workspaceSnapshotError = ""
+        chatState.workspaceSnapshotNotice = ""
+        Thread({
+            var error = ""
+            var notice = ""
+            var preview = chatState.workspaceSnapshotPreview
+            val failure = runCatching { when (action) {
+                "create" -> {
+                    val label = rawValue.trim().ifBlank { nativeText(nativeLanguage, "\u624b\u52a8\u5feb\u7167", "Manual snapshot") }
+                    val result = createWorkspaceSnapshot(threadId, project, label, false)
+                    error = result.second
+                    if (result.first != null) notice = nativeText(nativeLanguage, "\u5df2\u521b\u5efa\u975e\u7834\u574f\u6027\u5feb\u7167", "Non-destructive snapshot created")
+                }
+                "preview" -> {
+                    val snapshot = NativeWorkspaceSnapshotStore.load(this, threadId).firstOrNull { it.id == rawValue }
+                    if (snapshot == null) error = nativeText(nativeLanguage, "\u5feb\u7167\u5df2\u4e0d\u5b58\u5728", "Snapshot no longer exists")
+                    else if (!runCatching { File(snapshot.projectPath).canonicalPath == File(project).canonicalPath }.getOrDefault(false)) {
+                        error = nativeText(nativeLanguage, "\u5feb\u7167\u5c5e\u4e8e\u53e6\u4e00\u4e2a\u9879\u76ee\u76ee\u5f55", "This snapshot belongs to another project directory")
+                    }
+                    else {
+                        val current = captureWorkspaceCommit(project)
+                        if (current.first.isBlank()) error = current.second
+                        else {
+                            val names = runGit(project, listOf("diff", "--name-status", "--find-renames", snapshot.commit, current.first, "--"))
+                            val stats = runGit(project, listOf("diff", "--numstat", snapshot.commit, current.first, "--"))
+                            if (names.first != 0) error = names.second
+                            else preview = NativeWorkspaceSnapshotPreview.build(snapshot.id, current.first, names.second, stats.second)
+                        }
+                    }
+                }
+                "delete" -> {
+                    val snapshot = NativeWorkspaceSnapshotStore.load(this, threadId).firstOrNull { it.id == rawValue }
+                    if (snapshot != null && snapshot.ref.isNotBlank()) {
+                        val deleted = runGit(snapshot.projectPath.ifBlank { project }, listOf("update-ref", "-d", snapshot.ref))
+                        if (deleted.first != 0) error = deleted.second
+                    }
+                    if (error.isBlank()) {
+                        NativeWorkspaceSnapshotStore.remove(this, threadId, rawValue)
+                        preview = ""
+                        notice = nativeText(nativeLanguage, "\u5feb\u7167\u5df2\u5220\u9664", "Snapshot deleted")
+                    }
+                }
+                "restore" -> {
+                    val request = runCatching { JSONObject(rawValue) }.getOrNull()
+                    val snapshot = request?.optString("snapshotId")?.let { id -> NativeWorkspaceSnapshotStore.load(this, threadId).firstOrNull { it.id == id } }
+                    val path = request?.optString("path").orEmpty()
+                    if (snapshot == null || path.isBlank()) error = nativeText(nativeLanguage, "\u65e0\u6548\u7684\u6062\u590d\u8bf7\u6c42", "Invalid restore request")
+                    else if (!runCatching { File(snapshot.projectPath).canonicalPath == File(project).canonicalPath }.getOrDefault(false)) {
+                        error = nativeText(nativeLanguage, "\u4e0d\u80fd\u5c06\u5176\u4ed6\u9879\u76ee\u7684\u5feb\u7167\u6062\u590d\u5230\u5f53\u524d\u5de5\u4f5c\u533a", "A snapshot from another project cannot be restored here")
+                    }
+                    else {
+                        val safety = createWorkspaceSnapshot(threadId, project, nativeText(nativeLanguage, "\u6062\u590d $path \u524d\u7684\u81ea\u52a8\u5907\u4efd", "Automatic backup before restoring $path"), true)
+                        if (safety.first == null) error = safety.second
+                        else {
+                            val restored = runGit(project, listOf("restore", "--source=${snapshot.commit}", "--worktree", "--", path))
+                            if (restored.first != 0) error = restored.second
+                            else {
+                                preview = ""
+                                notice = nativeText(nativeLanguage, "\u5df2\u6062\u590d $path\uff0c\u5e76\u521b\u5efa\u4e86\u6062\u590d\u524d\u5907\u4efd", "Restored $path and created a pre-restore backup")
+                            }
+                        }
+                    }
+                }
+                else -> error = nativeText(nativeLanguage, "\u672a\u77e5\u5feb\u7167\u64cd\u4f5c", "Unknown snapshot action")
+            } }.exceptionOrNull()
+            if (failure != null) error = failure.message ?: failure.javaClass.simpleName
+            val snapshots = NativeWorkspaceSnapshotStore.load(this, threadId)
+            runOnUiThread {
+                if (currentThreadId != threadId || chatState.projectPath != project) return@runOnUiThread
+                chatState.workspaceSnapshotBusy = false
+                chatState.workspaceSnapshotError = error.trim()
+                chatState.workspaceSnapshotNotice = notice
+                chatState.workspaceSnapshotPreview = preview
+                chatState.workspaceSnapshotDiffs.clear()
+                chatState.workspaceSnapshotDiffLoading.clear()
+                chatState.workspaceSnapshots.clear()
+                chatState.workspaceSnapshots.addAll(snapshots)
+                if (action == "restore" && error.isBlank()) performGitAction("refresh", "")
+            }
+        }, "NativeWorkspaceSnapshot").start()
+    }
+
+    private fun loadWorktrees(project: String): Pair<List<NativeWorktreeEntry>, String> {
+        val listed = runGit(project, listOf("worktree", "list", "--porcelain"))
+        if (listed.first != 0) return emptyList<NativeWorktreeEntry>() to listed.second
+        val entries = NativeWorktreeProtocol.parse(listed.second).map { entry ->
+            val status = runGit(entry.path, listOf("status", "--porcelain=v1", "--untracked-files=all"))
+            entry.copy(dirty = status.first != 0 || status.second.isNotBlank())
+        }
+        return entries to ""
+    }
+
+    private fun samePath(left: String, right: String): Boolean = runCatching {
+        File(left).canonicalPath == File(right).canonicalPath
+    }.getOrDefault(false)
+
+    private fun performWorktreeAction(action: String, rawValue: String) {
+        val project = chatState.projectPath
+        val routeThread = currentThreadId
+        if (project.isBlank()) {
+            chatState.worktreeError = nativeText(nativeLanguage, "\u5f53\u524d\u5bf9\u8bdd\u6ca1\u6709\u7ed1\u5b9a\u9879\u76ee\u76ee\u5f55", "This conversation has no project directory")
+            return
+        }
+        if (action == "clearPreview") {
+            chatState.worktreeMergePreview = ""
+            return
+        }
+        if (action == "open") {
+            val target = rawValue.trim()
+            if (target.isNotBlank() && File(target).isDirectory) newConversationAtProject(target)
+            return
+        }
+        if (chatState.worktreeBusy) return
+        chatState.worktreeBusy = true
+        chatState.worktreeError = ""
+        chatState.worktreeNotice = ""
+        Thread({
+            var error = ""
+            var notice = ""
+            var preview = chatState.worktreeMergePreview
+            var openProject = ""
+            val failure = runCatching {
+                val initial = loadWorktrees(project)
+                if (initial.second.isNotBlank()) {
+                    error = initial.second
+                    return@runCatching
+                }
+                val entries = initial.first
+                val main = entries.firstOrNull()
+                when (action) {
+                    "refresh" -> Unit
+                    "create" -> {
+                        if (main == null) { error = nativeText(nativeLanguage, "\u65e0\u6cd5\u786e\u5b9a Git \u4e3b\u5de5\u4f5c\u533a", "Unable to resolve the main Git worktree"); return@runCatching }
+                        val branch = NativeWorktreeProtocol.normalizeBranch(rawValue, System.currentTimeMillis())
+                        val repoName = File(main.path).name.ifBlank { "repository" }
+                        val base = File(TermuxConstants.TERMUX_HOME_DIR, ".fcode/worktrees/$repoName").apply { mkdirs() }
+                        var target = File(base, NativeWorktreeProtocol.pathSlug(branch))
+                        if (target.exists()) target = File(base, NativeWorktreeProtocol.pathSlug(branch) + "-" + System.currentTimeMillis())
+                        val exists = runGit(main.path, listOf("show-ref", "--verify", "--quiet", "refs/heads/$branch")).first == 0
+                        val command = if (exists) listOf("worktree", "add", target.absolutePath, branch)
+                            else listOf("worktree", "add", "-b", branch, target.absolutePath, "HEAD")
+                        val created = runGit(main.path, command)
+                        if (created.first != 0) error = created.second
+                        else {
+                            openProject = target.absolutePath
+                            notice = nativeText(nativeLanguage, "\u5df2\u521b\u5efa\u9694\u79bb\u5de5\u4f5c\u533a $branch", "Created isolated worktree $branch")
+                        }
+                    }
+                    "previewMerge" -> {
+                        val source = entries.firstOrNull { samePath(it.path, rawValue) }
+                        if (main == null || source == null || source === main || source.branch.isBlank() || main.branch.isBlank()) {
+                            error = nativeText(nativeLanguage, "\u65e0\u6cd5\u9884\u89c8\u8be5 worktree \u7684\u5408\u5e76", "Unable to preview merge for this worktree")
+                        } else if (main.dirty || source.dirty) {
+                            error = nativeText(nativeLanguage, "\u5408\u5e76\u524d\u4e3b\u5de5\u4f5c\u533a\u548c\u9694\u79bb\u5de5\u4f5c\u533a\u90fd\u5fc5\u987b\u5e72\u51c0", "Both the main and isolated worktrees must be clean before merging")
+                        } else {
+                            val commits = runGit(main.path, listOf("log", "--oneline", "${main.branch}..${source.branch}", "--"))
+                            val stat = runGit(main.path, listOf("diff", "--stat", "${main.branch}...${source.branch}", "--"))
+                            preview = JSONObject()
+                                .put("sourcePath", source.path).put("sourceBranch", source.branch)
+                                .put("targetPath", main.path).put("targetBranch", main.branch)
+                                .put("commits", commits.second).put("stat", stat.second)
+                                .put("canMerge", commits.first == 0 && commits.second.isNotBlank())
+                                .toString()
+                        }
+                    }
+                    "merge" -> {
+                        val request = runCatching { JSONObject(rawValue) }.getOrNull()
+                        val sourcePath = request?.optString("sourcePath").orEmpty()
+                        val targetPath = request?.optString("targetPath").orEmpty()
+                        val source = entries.firstOrNull { samePath(it.path, sourcePath) }
+                        val target = entries.firstOrNull { samePath(it.path, targetPath) }
+                        if (source == null || target == null || source.branch.isBlank() || source.dirty || target.dirty) {
+                            error = nativeText(nativeLanguage, "worktree \u72b6\u6001\u5df2\u53d8\u5316\uff0c\u8bf7\u5237\u65b0\u540e\u91cd\u8bd5", "Worktree state changed; refresh and try again")
+                        } else {
+                            val threadId = routeThread.orEmpty().ifBlank { "worktree-merge" }
+                            val safety = createWorkspaceSnapshot(threadId, target.path, nativeText(nativeLanguage, "\u5408\u5e76 ${source.branch} \u524d\u7684\u81ea\u52a8\u5907\u4efd", "Automatic backup before merging ${source.branch}"), true)
+                            if (safety.first == null) error = safety.second
+                            else {
+                                val merged = runGit(target.path, listOf("merge", "--no-ff", "--no-edit", source.branch))
+                                if (merged.first != 0) {
+                                    runGit(target.path, listOf("merge", "--abort"))
+                                    error = merged.second + "\n" + nativeText(nativeLanguage, "\u5df2\u81ea\u52a8\u53d6\u6d88\u51b2\u7a81\u5408\u5e76\uff0c\u4e3b\u5de5\u4f5c\u533a\u5df2\u6062\u590d\u3002", "The conflicted merge was aborted and the main worktree was restored.")
+                                } else {
+                                    preview = ""
+                                    notice = nativeText(nativeLanguage, "\u5df2\u5c06 ${source.branch} \u5408\u5e76\u5230 ${target.branch}", "Merged ${source.branch} into ${target.branch}")
+                                }
+                            }
+                        }
+                    }
+                    "remove" -> {
+                        val target = entries.firstOrNull { samePath(it.path, rawValue) }
+                        if (main == null || target == null || target === main || samePath(target.path, project)) {
+                            error = nativeText(nativeLanguage, "\u4e0d\u80fd\u79fb\u9664\u4e3b\u5de5\u4f5c\u533a\u6216\u5f53\u524d\u5bf9\u8bdd\u6b63\u5728\u4f7f\u7528\u7684 worktree", "The main or currently active worktree cannot be removed")
+                        } else if (target.dirty || target.locked) {
+                            error = nativeText(nativeLanguage, "\u53ea\u80fd\u79fb\u9664\u5e72\u51c0\u4e14\u672a\u9501\u5b9a\u7684 worktree", "Only clean, unlocked worktrees can be removed")
+                        } else {
+                            val removed = runGit(main.path, listOf("worktree", "remove", target.path))
+                            if (removed.first != 0) error = removed.second
+                            else notice = nativeText(nativeLanguage, "worktree \u5df2\u79fb\u9664\uff0c\u5206\u652f ${target.branch} \u4ecd\u4fdd\u7559", "Worktree removed; branch ${target.branch} was kept")
+                        }
+                    }
+                    else -> error = nativeText(nativeLanguage, "\u672a\u77e5 worktree \u64cd\u4f5c", "Unknown worktree action")
+                }
+            }.exceptionOrNull()
+            if (failure != null) error = failure.message ?: failure.javaClass.simpleName
+            val refreshed = loadWorktrees(project)
+            runOnUiThread {
+                if (currentThreadId != routeThread || chatState.projectPath != project) return@runOnUiThread
+                chatState.worktreeBusy = false
+                chatState.worktreeError = error.trim()
+                chatState.worktreeNotice = notice
+                chatState.worktreeMergePreview = preview
+                chatState.worktrees.clear()
+                chatState.worktrees.addAll(refreshed.first)
+                if (openProject.isNotBlank() && error.isBlank()) newConversationAtProject(openProject)
+                if (action == "merge" && error.isBlank()) performGitAction("refresh", "")
+            }
+        }, "NativeWorktreeWorkflow").start()
     }
 
     private fun toggleGoalPause() {
@@ -1343,8 +2054,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 task.state,
                 conversationProjectCache[task.threadId].orEmpty(),
                 task.threadId in favorites,
+                taskAttention(task.threadId, task.state),
             )
-        }.sortedByDescending { it.state == CodexTaskStore.RUNNING }
+        }.sortedWith(compareByDescending<NativeConversation> { it.state == CodexTaskStore.RUNNING }
+            .thenByDescending { attentionPriority(it.attention) })
         applyConversationSnapshot(generation, immediate)
 
         Thread {
@@ -1366,8 +2079,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }
                 val project = conversationProjectCache[task.threadId].orEmpty()
                 if (fallbackTitle && title.startsWith("Codex 任务")) null
-                else NativeConversation(task.threadId, title, task.state, project, task.threadId in favorites)
-            }.sortedByDescending { it.state == CodexTaskStore.RUNNING }
+                else NativeConversation(task.threadId, title, task.state, project, task.threadId in favorites, taskAttention(task.threadId, task.state))
+            }.sortedWith(compareByDescending<NativeConversation> { it.state == CodexTaskStore.RUNNING }
+                .thenByDescending { attentionPriority(it.attention) })
             applyConversationSnapshot(generation, enriched)
         }.apply { name = "CodexConversationMetadata" }.start()
     }
@@ -1378,6 +2092,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             android.util.Log.d("IlyopCodexTasks", "apply generation=$generation count=${conversations.size} first=${conversations.firstOrNull()?.title}")
             chatState.conversations.clear()
             chatState.conversations.addAll(conversations)
+            conversations.firstOrNull { it.threadId == currentThreadId }?.projectPath?.takeIf { it.isNotBlank() }?.let {
+                chatState.projectPath = it
+            }
         }
     }
 
@@ -1402,6 +2119,19 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun deleteConversation(conversation: NativeConversation) {
         NativeHistorySnapshotCache.remove(conversation.threadId)
+        NativeTaskNotificationManager.reset(this, conversation.threadId)
+        val snapshots = NativeWorkspaceSnapshotStore.load(this, conversation.threadId)
+        NativeWorkspaceSnapshotStore.clear(this, conversation.threadId)
+        if (snapshots.isNotEmpty()) Thread({
+            snapshots.filter { it.ref.isNotBlank() && it.projectPath.isNotBlank() }.forEach { snapshot ->
+                runGit(snapshot.projectPath, listOf("update-ref", "-d", snapshot.ref))
+            }
+        }, "NativeSnapshotCleanup").start()
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .remove(pendingUserInputPreferenceKey(conversation.threadId))
+            .remove(pendingApprovalPreferenceKey(conversation.threadId))
+            .remove(pendingPlanImplementationPreferenceKey(conversation.threadId))
+            .apply()
         CodexTaskStore.delete(this, conversation.threadId)
         refreshConversations()
     }
@@ -1513,11 +2243,13 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
-        cancelPendingApproval()
         discardPendingStreamEvents("resume")
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
         currentThreadId = threadId
+        notificationTargetThreadId = ""
+        NativeTaskNotificationManager.markSeen(this, threadId)
+        NativeTaskNotificationManager.setForegroundThread(this, threadId)
         val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
         val cachedHistory = NativeHistorySnapshotCache.get(threadId)
         pendingCachedHistoryThreadId = threadId.takeIf { cachedHistory != null }
@@ -1525,6 +2257,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         displayedHistorySnapshot = null
         chatState.resetConversation()
         chatState.currentThreadId = threadId
+        chatState.projectPath = selectedConversation?.projectPath.orEmpty()
         chatState.historyLoading = true
         // Commit the lightweight route before any cached messages. The screen can render its
         // loading shell in one frame instead of attaching history and changing route together.
@@ -1536,6 +2269,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             chatState.turnStartedAt = System.currentTimeMillis()
             chatState.phaseStartedAt = chatState.turnStartedAt
             startFrameDiagnostics()
+        } else if (selectedConversation?.state == CodexTaskStore.FAILED) {
+            chatState.phase = NativeTurnPhase.FAILED
+            chatState.processingLabel = nativeText(nativeLanguage, "\u4efb\u52a1\u672a\u5b8c\u6210", "Task incomplete")
         }
         chatState.ready = false
         chatState.connectionLabel = "\u6b63\u5728\u6062\u590d\u5bf9\u8bdd\u2026"
@@ -1560,8 +2296,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
     }
 
-    private fun newConversation() {
-        cancelPendingApproval()
+    private fun newConversation() = newConversationAtProject("")
+
+    private fun newConversationAtProject(requestedProjectPath: String) {
         discardPendingStreamEvents("new")
         chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
@@ -1574,10 +2311,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.currentThreadId = ""
         chatState.conversationAnimationKey = "new-${UUID.randomUUID()}"
         chatState.resetConversation()
+        chatState.projectPath = requestedProjectPath.takeIf { it.isNotBlank() && File(it).isDirectory } ?: configuredProjectPath()
         chatState.conversationTitle = "新对话"
         chatState.ready = false
         chatState.connectionLabel = "正在创建新对话…"
-        bridge?.newConversation()
+        if (requestedProjectPath.isNotBlank()) bridge?.newConversationAtCwd(chatState.projectPath)
+        else bridge?.newConversation()
     }
 
     private fun openHomeSettings() {
@@ -1746,6 +2485,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (currentThreadId != null && currentThreadId != value) return
                 currentThreadId = value
                 chatState.currentThreadId = value
+                if (chatState.projectPath.isBlank() && chatState.conversationAnimationKey.startsWith("new-")) {
+                    chatState.projectPath = configuredProjectPath()
+                }
                 restoreGoalForThread(value)
                 chatState.ready = true
                 bridge?.getThreadGoal()
@@ -1849,7 +2591,16 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (!planFlushScheduled && pendingPlan.isNotEmpty()) { planFlushScheduled = true; streamHandler.postDelayed(flushPlanRunnable, 56L) }
             }
             "onPlanComplete" -> {
-                flushAnswerDeltas(force = true); flushPlanDeltas(); chatState.finishReasoning(); chatState.completeProposedPlan(value); pendingPlanItemId = ""
+                flushAnswerDeltas(force = true)
+                flushPlanDeltas()
+                chatState.finishReasoning()
+                chatState.completeProposedPlan(value)
+                pendingPlanItemId = ""
+                val planText = chatState.messages.lastOrNull {
+                    it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+                }?.let { decodeNativeProposedPlan(it.content) }.orEmpty()
+                currentThreadId?.takeIf { planText.isNotBlank() }
+                    ?.let { persistPendingPlanImplementation(it, planText) }
             }
             "onPlanUpdated" -> {
                 // App-server versions have emitted the plan at params.plan, turn.plan,
@@ -1895,12 +2646,16 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.revision++
             }
             "onUserInputRequest" -> {
-                chatState.pendingUserInputRequest = value
-                chatState.phase = NativeTurnPhase.WAITING
-                chatState.processingLabel = "\u7b49\u5f85\u4f60\u7684\u56de\u7b54"
+                storePendingUserInput(value)
+                val requestThread = runCatching { JSONObject(value).optJSONObject("params")?.optString("threadId") }.getOrNull().orEmpty()
+                if (requestThread.isBlank() || requestThread == currentThreadId) {
+                    chatState.phase = NativeTurnPhase.WAITING
+                    chatState.processingLabel = "\u7b49\u5f85\u4f60\u7684\u56de\u7b54"
+                }
             }
+            "onUserInputResolved" -> handleUserInputResolved(value)
             "onApprovalRequest" -> {
-                chatState.pendingApprovalRequest = value
+                storePendingApproval(value)
                 chatState.phase = NativeTurnPhase.WAITING
                 chatState.processingLabel = nativeText(nativeLanguage, "\u7b49\u5f85\u6743\u9650\u786e\u8ba4", "Waiting for approval")
             }
@@ -1916,7 +2671,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 flushAnswerDeltas(force = true)
                 flushPlanDeltas()
                 flushCommandDeltas()
-                chatState.pendingApprovalRequest = ""
+                approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
+                currentThreadId?.takeIf { chatState.pendingUserInputRequest.isNotBlank() }
+                    ?.let(::clearPendingUserInput)
                 chatState.completeTurn()
                 pendingPlanItemId = ""
                 if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
@@ -1930,12 +2687,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 flushAnswerDeltas(force = true)
                 flushPlanDeltas()
                 flushCommandDeltas()
-                chatState.pendingApprovalRequest = ""
+                approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
                 NativeChatDiagnostics.record(this, "native_error", JSONObject()
                     .put("thread", currentThreadId.orEmpty().take(8))
                     .put("model", chatState.selectedModel)
                     .put("effort", chatState.selectedEffort)
                     .put("message", value.take(600)))
+                currentThreadId?.let { threadId ->
+                    NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.FAILED, value.hashCode().toString(), "")
+                }
                 chatState.addError(value)
                 stopFrameDiagnostics()
                 applyPendingProviderConfiguration()
@@ -1946,6 +2706,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onResume() {
         super.onResume()
+        NativeTaskNotificationManager.setForegroundThread(this, currentThreadId)
         // Settings is a separate native Activity. Refresh preferences here so a theme
         // or language change is visible immediately when returning to the chat.
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
@@ -1972,7 +2733,19 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onPause() {
         stopFrameDiagnostics()
+        NativeTaskNotificationManager.setForegroundThread(this, null)
         super.onPause()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val threadId = intent.getStringExtra(NativeTaskNotificationManager.EXTRA_THREAD_ID).orEmpty()
+        if (threadId.isBlank()) return
+        notificationTargetThreadId = threadId
+        NativeTaskNotificationManager.markSeen(this, threadId)
+        if (threadId != currentThreadId) resumeConversation(threadId)
+        else NativeTaskNotificationManager.setForegroundThread(this, threadId)
     }
 
     override fun onDestroy() {

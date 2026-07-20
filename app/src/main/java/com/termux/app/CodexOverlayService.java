@@ -102,6 +102,8 @@ public final class CodexOverlayService extends Service {
     }
 
     static void showCompletionNotification(Context context) {
+        if (context.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE)
+                .getBoolean("native_unified_notifications_v1", false)) return;
         ensureChannels(context);
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         PendingIntent pending = PendingIntent.getActivity(context, 7412, openCodexIntent(context), pendingFlags());
@@ -402,4 +404,3 @@ public final class CodexOverlayService extends Service {
             (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
     }
 }
-

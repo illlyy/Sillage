@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Direct JSONL bridge to `codex app-server --stdio`; no Node.js or external Termux required. */
 final class CodexAppServerBridge {
+    static final String IMPLEMENT_PLAN_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:";
+    static final String IMPLEMENT_PLAN_DISPLAY_PREFIX = "IMPLEMENT_PLAN|";
     interface EventListener {
         void onEvent(String function, String value);
         void onHistoryPrepared(String threadId, int generation, NativeHistorySnapshot snapshot);
@@ -371,6 +373,10 @@ final class CodexAppServerBridge {
     }
 
     @JavascriptInterface public void newConversation() {
+        newConversationAtCwd(null);
+    }
+
+    void newConversationAtCwd(String requestedCwd) {
         int generation = navigationGeneration.incrementAndGet();
         clearDeferredResume();
         threadId = null;
@@ -378,7 +384,7 @@ final class CodexAppServerBridge {
         visibleRouteReady = false;
         activeTurnId = null;
         NativeChatDiagnostics.record(activity, "conversation_route", navigationDetails(generation, "new"));
-        try { sendThreadStart(); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+        try { sendThreadStart(requestedCwd); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
     int resumeConversation(String resumeThreadId) {
@@ -639,8 +645,11 @@ final class CodexAppServerBridge {
         }
     }
 
-    void respondUserInput(int requestId, String answersJson) {
+    void respondUserInput(String rawRequest, String answersJson) {
         try {
+            JSONObject request = new JSONObject(rawRequest == null ? "{}" : rawRequest);
+            Object requestId = request.opt("requestId");
+            if (requestId == null || requestId == JSONObject.NULL) return;
             JSONObject result = new JSONObject();
             result.put("answers", new JSONObject(answersJson == null ? "{}" : answersJson));
             sendJson(new JSONObject().put("id", requestId).put("result", result));
@@ -700,11 +709,15 @@ final class CodexAppServerBridge {
         return NativePermissionMode.normalize(mobile.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS));
     }
 
-    private void sendThreadStart() throws Exception {
+    private void sendThreadStart() throws Exception { sendThreadStart(null); }
+
+    private void sendThreadStart(String requestedCwd) throws Exception {
         JSONObject params = new JSONObject();
         applyNativeMcpConfig(params);
         String mode = configuredPermissionMode();
-        NativePermissionMode.applyThreadParams(params, mode, configuredCwd());
+        String cwd = requestedCwd == null || requestedCwd.trim().isEmpty() ? configuredCwd() : requestedCwd.trim();
+        if (!new File(cwd).isDirectory()) cwd = configuredCwd();
+        NativePermissionMode.applyThreadParams(params, mode, cwd);
         Log.i(TAG, "THREAD_PERMISSIONS mode=" + mode + " approval="
             + NativePermissionMode.approvalPolicy(mode) + " sandbox=" + NativePermissionMode.sandbox(mode));
         int generation = navigationGeneration.get();
@@ -831,6 +844,11 @@ final class CodexAppServerBridge {
         if (message.has("id") && message.has("method")) {
             String inboundMethod = message.optString("method", "");
             if (NativeApprovalProtocol.isApprovalMethod(inboundMethod)) {
+                JSONObject inboundParams = message.optJSONObject("params");
+                String requestedThread = inboundParams == null ? "" : inboundParams.optString("threadId", "");
+                if (requestedThread.isEmpty()) requestedThread = threadId;
+                NativeTaskNotificationManager.notifyEvent(activity, requestedThread,
+                    NativeTaskNotificationPolicy.APPROVAL, String.valueOf(message.opt("id")), "");
                 emit("onApprovalRequest", new JSONObject()
                     .put("requestId", message.opt("id"))
                     .put("method", inboundMethod)
@@ -839,8 +857,20 @@ final class CodexAppServerBridge {
                 return;
             }
             if (inboundMethod.contains("requestUserInput") || "item/tool/requestUserInput".equals(inboundMethod)) {
+                JSONObject inboundParams = message.optJSONObject("params");
+                String requestedThread = inboundParams == null ? "" : inboundParams.optString("threadId", "");
+                if (requestedThread.isEmpty()) requestedThread = threadId;
+                String questionDetail = "";
+                JSONArray questions = inboundParams == null ? null : inboundParams.optJSONArray("questions");
+                if (questions != null && questions.length() > 0) {
+                    JSONObject firstQuestion = questions.optJSONObject(0);
+                    if (firstQuestion != null) questionDetail = firstQuestion.optString("header",
+                        firstQuestion.optString("question", ""));
+                }
+                NativeTaskNotificationManager.notifyEvent(activity, requestedThread,
+                    NativeTaskNotificationPolicy.ANSWER, String.valueOf(message.opt("id")), questionDetail);
                 emit("onUserInputRequest", new JSONObject()
-                    .put("requestId", message.optInt("id", -1))
+                    .put("requestId", message.opt("id"))
                     .put("method", inboundMethod)
                     .put("params", message.optJSONObject("params")).toString());
                 return;
@@ -994,6 +1024,10 @@ final class CodexAppServerBridge {
             }
             return;
         }
+        if ("serverRequest/resolved".equals(method) && params != null) {
+            if (desktopBridge == null) emit("onUserInputResolved", params.toString());
+            return;
+        }
         if (!primaryEvent && "item/completed".equals(method) && params != null) {
             JSONObject ignoredItem = params.optJSONObject("item");
             String ignoredThread = params.optString("threadId", "");
@@ -1120,10 +1154,13 @@ final class CodexAppServerBridge {
             }
             if (primaryEvent && !uiAlreadyCompleted) emit("onTurnComplete", "");
             if (isPrimaryTurn(params)) {
-                CodexTaskStore.markCompleted(activity, completedThread, turnFailed(params));
+                boolean failed = turnFailed(params);
+                JSONObject completedTurnObject = params == null ? null : params.optJSONObject("turn");
+                String completedTurnId = completedTurnObject == null ? "" : completedTurnObject.optString("id", "");
+                CodexTaskStore.markCompleted(activity, completedThread, failed);
                 NativeChatDiagnostics.record(activity, primaryEvent ? "turn_complete" : "background_turn_complete", new JSONObject()
-                    .put("thread", shortId(completedThread)).put("failed", turnFailed(params)));
-                if (!uiAlreadyCompleted) notifyTaskCompleted();
+                    .put("thread", shortId(completedThread)).put("failed", failed));
+                if (!uiAlreadyCompleted || failed) notifyTaskCompleted(completedThread, failed, completedTurnId);
             }
         } else if (primaryEvent && "error".equals(method) && params != null) {
             JSONObject error = params.optJSONObject("error");
@@ -1703,7 +1740,7 @@ final class CodexAppServerBridge {
     }
 
     private static JSONObject historyUserMessage(String value, JSONArray skills, JSONArray attachments) throws Exception {
-        String text = value == null ? "" : value.trim();
+        String text = normalizeHistoricalUserText(value);
         JSONObject message = new JSONObject().put("role", "user").put("content", text);
         if (skills != null && skills.length() > 0) message.put("skills", skills);
         if (attachments != null && attachments.length() > 0) message.put("attachments", attachments);
@@ -1715,8 +1752,8 @@ final class CodexAppServerBridge {
      * them only as a source of attachment and skill metadata. */
     static JSONObject confirmedHistoryUserMessage(JSONObject pending, JSONObject eventPayload) throws Exception {
         String fallback = pending == null ? "" : pending.optString("content", "");
-        String text = eventPayload == null ? fallback
-            : eventPayload.optString("message", eventPayload.optString("text", fallback)).trim();
+        String text = normalizeHistoricalUserText(eventPayload == null ? fallback
+            : eventPayload.optString("message", eventPayload.optString("text", fallback)));
         JSONObject message = pending == null
             ? new JSONObject().put("role", "user")
             : new JSONObject(pending.toString());
@@ -1732,6 +1769,15 @@ final class CodexAppServerBridge {
         if (attachments.length() > 0) message.put("attachments", attachments);
         boolean hasSkills = message.optJSONArray("skills") != null && message.optJSONArray("skills").length() > 0;
         return text.isEmpty() && attachments.length() == 0 && !hasSkills ? null : message;
+    }
+
+    static String normalizeHistoricalUserText(String value) {
+        String text = value == null ? "" : value.trim();
+        if (!text.startsWith(IMPLEMENT_PLAN_PROMPT_PREFIX)) return text;
+        String plan = text.substring(IMPLEMENT_PLAN_PROMPT_PREFIX.length()).trim();
+        String encoded = java.util.Base64.getEncoder().encodeToString(
+            plan.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return IMPLEMENT_PLAN_DISPLAY_PREFIX + encoded;
     }
 
     static boolean isInjectedContextMessage(String value) {
@@ -1859,7 +1905,7 @@ final class CodexAppServerBridge {
         // Keep drawer/task state consistent even when the provider never emits the trailing
         // turn/completed. A real completion may still correct this to failed milliseconds later.
         CodexTaskStore.markCompleted(activity, statusThread, false);
-        notifyTaskCompleted();
+        notifyTaskCompleted(statusThread, false, turn);
     }
 
     static boolean shouldSynthesizeMissingTurnCompletion(boolean pending, boolean hasActiveRequests,
@@ -1918,7 +1964,7 @@ final class CodexAppServerBridge {
                     if (isPrimaryEvent(syntheticParams)) emit("onTurnComplete", "");
                     if (isPrimaryTurn(syntheticParams)) {
                         CodexTaskStore.markCompleted(activity, thread, false);
-                        notifyTaskCompleted();
+                        notifyTaskCompleted(thread, false, turnId);
                     }
                     sendRequest("turn/interrupt", new JSONObject().put("threadId", thread).put("turnId", turnId));
                     return;
@@ -2039,7 +2085,10 @@ final class CodexAppServerBridge {
         return error != null && error != JSONObject.NULL;
     }
 
-    private void notifyTaskCompleted() {
+    private void notifyTaskCompleted(String completedThread, boolean failed, String token) {
+        NativeTaskNotificationManager.notifyEvent(activity, completedThread,
+            failed ? NativeTaskNotificationPolicy.FAILED : NativeTaskNotificationPolicy.COMPLETED,
+            token, "");
         if (activity instanceof CodexHomeActivity) {
             activity.runOnUiThread(((CodexHomeActivity) activity)::onCodexTaskCompleted);
         } else {

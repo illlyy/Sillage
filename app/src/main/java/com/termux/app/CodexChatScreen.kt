@@ -333,8 +333,14 @@ internal fun NativeChatScreen(
     onClearGoal: () -> Unit,
     onToggleGoalPause: () -> Unit,
     onCompact: () -> Unit,
-    onAnswerUserInput: (Int, String, String) -> Unit,
+    onAnswerUserInput: (String) -> Unit,
+    onExecutePendingPlan: () -> Unit,
+    onRevisePendingPlan: (String) -> Unit,
+    onCancelPendingPlan: () -> Unit,
     onAnswerApproval: (String, String) -> Unit,
+    onGitAction: (String, String) -> Unit,
+    onSnapshotAction: (String, String) -> Unit,
+    onWorktreeAction: (String, String) -> Unit,
     onPickImages: () -> Unit,
     onPickFiles: () -> Unit,
     onRemoveAttachment: (NativeAttachment) -> Unit,
@@ -415,9 +421,15 @@ internal fun NativeChatScreen(
     var renameConversation by remember { mutableStateOf<NativeConversation?>(null) }
     var deleteConversation by remember { mutableStateOf<NativeConversation?>(null) }
     var editMessage by remember { mutableStateOf<NativeChatMessage?>(null) }
+    var restoreCheckpointMessage by remember { mutableStateOf<NativeChatMessage?>(null) }
+    var restoreSnapshotRequest by remember { mutableStateOf<String?>(null) }
+    var mergeWorktreeRequest by remember { mutableStateOf<String?>(null) }
+    var removeWorktreePath by remember { mutableStateOf<String?>(null) }
     var previewAttachment by remember { mutableStateOf<NativeAttachment?>(null) }
     var showGoalDialog by remember { mutableStateOf(false) }
     var showWorkPanel by remember { mutableStateOf(false) }
+    var showUserInputDrawer by remember(conversationListKey) { mutableStateOf(false) }
+    var showPlanDecision by remember(conversationListKey) { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var drawerSubagentRaw by remember { mutableStateOf<String?>(null) }
     val openSubagentDrawer = remember { { item: JSONObject -> drawerSubagentRaw = item.toString() } }
@@ -444,6 +456,13 @@ internal fun NativeChatScreen(
     }
     val noOp: () -> Unit = remember { {} }
     LaunchedEffect(conversationListKey) { textSelectionActive = false }
+    LaunchedEffect(state.pendingUserInputRequest) {
+        showUserInputDrawer = state.pendingUserInputRequest.isNotBlank()
+    }
+    LaunchedEffect(state.pendingPlanImplementation, state.phase.active) {
+        if (state.pendingPlanImplementation.isNotBlank() && !state.phase.active) showPlanDecision = true
+        if (state.pendingPlanImplementation.isBlank()) showPlanDecision = false
+    }
     // Observe drawer/list motion from a coroutine instead of reading drawer state in the root
     // composition. Opening the drawer must not recompose the complete chat document.
     LaunchedEffect(drawerState, listState) {
@@ -793,6 +812,13 @@ internal fun NativeChatScreen(
                         }
                     }
                     }
+                    if (state.pendingUserInputRequest.isNotBlank()) {
+                        NativeUserInputBanner(
+                            raw = state.pendingUserInputRequest,
+                            drawerOpen = showUserInputDrawer,
+                            onToggle = { showUserInputDrawer = !showUserInputDrawer },
+                        )
+                    }
                     if (state.activeGoalObjective.isNotBlank()) {
                         NativeGoalBanner(
                             objective = state.activeGoalObjective,
@@ -881,10 +907,35 @@ internal fun NativeChatScreen(
             onClearGoal = onClearGoal,
             onExecutePlan = {
                 if (!state.phase.active && state.ready) {
-                    onModeChange("default")
-                    onSend(nativeText(language, "\u8bf7\u6309\u7167\u5de5\u4f5c\u9762\u677f\u4e2d\u7684\u8ba1\u5212\u5f00\u59cb\u6267\u884c\u3002", "Execute the plan shown in the work panel."))
+                    if (state.pendingPlanImplementation.isNotBlank()) {
+                        onExecutePendingPlan()
+                    } else {
+                        onModeChange("default")
+                        onSend(nativeText(language, "\u8bf7\u6309\u7167\u5de5\u4f5c\u9762\u677f\u4e2d\u7684\u8ba1\u5212\u5f00\u59cb\u6267\u884c\u3002", "Execute the plan shown in the work panel."))
+                    }
                     showWorkPanel = false
                 }
+            },
+            onGitAction = onGitAction,
+            onSnapshotAction = onSnapshotAction,
+            onWorktreeAction = onWorktreeAction,
+            onRequestMergeWorktree = { request -> mergeWorktreeRequest = request; showWorkPanel = false },
+            onRequestRemoveWorktree = { path -> removeWorktreePath = path; showWorkPanel = false },
+            onRequestRestoreFile = { request ->
+                restoreSnapshotRequest = request
+                showWorkPanel = false
+            },
+            onRestoreCheckpoint = { checkpoint ->
+                restoreCheckpointMessage = state.messages.firstOrNull { it.id == checkpoint.messageId }
+                showWorkPanel = false
+            },
+            onEditCheckpoint = { checkpoint ->
+                editMessage = state.messages.firstOrNull { it.id == checkpoint.messageId }
+                showWorkPanel = false
+            },
+            onContinueTask = {
+                onSend(nativeText(language, "\u8bf7\u4ece\u521a\u624d\u5931\u8d25\u6216\u4e2d\u65ad\u7684\u4f4d\u7f6e\u7ee7\u7eed\u6267\u884c\uff0c\u5148\u68c0\u67e5\u5f53\u524d\u5de5\u4f5c\u533a\u72b6\u6001\uff0c\u4e0d\u8981\u91cd\u590d\u5df2\u5b8c\u6210\u7684\u6b65\u9aa4\u3002", "Continue from the failed or interrupted point. Inspect the current workspace first and do not repeat completed steps."))
+                showWorkPanel = false
             },
             onDismiss = { showWorkPanel = false },
         )
@@ -900,10 +951,28 @@ internal fun NativeChatScreen(
             },
         )
     }
-    if (state.pendingUserInputRequest.isNotBlank()) {
-        NativeUserInputDialog(
+    if (showUserInputDrawer && state.pendingUserInputRequest.isNotBlank()) {
+        NativeUserInputDrawer(
             raw = state.pendingUserInputRequest,
             onAnswer = onAnswerUserInput,
+            onDismiss = { showUserInputDrawer = false },
+        )
+    }
+    if (showPlanDecision && state.pendingPlanImplementation.isNotBlank()) {
+        NativePlanImplementationDialog(
+            plan = state.pendingPlanImplementation,
+            onExecute = {
+                showPlanDecision = false
+                onExecutePendingPlan()
+            },
+            onRevise = { feedback ->
+                showPlanDecision = false
+                onRevisePendingPlan(feedback)
+            },
+            onCancel = {
+                showPlanDecision = false
+                onCancelPendingPlan()
+            },
         )
     }
     if (state.pendingApprovalRequest.isNotBlank()) {
@@ -930,6 +999,45 @@ internal fun NativeChatScreen(
             initialText = message.content,
             onDismiss = { editMessage = null },
             onConfirm = { value -> editMessage = null; onEditMessage(message.id, value) },
+        )
+    }
+    restoreCheckpointMessage?.let { message ->
+        RestoreCheckpointDialog(
+            prompt = message.content,
+            onDismiss = { restoreCheckpointMessage = null },
+            onConfirm = {
+                restoreCheckpointMessage = null
+                onEditMessage(message.id, message.content)
+            },
+        )
+    }
+    restoreSnapshotRequest?.let { request ->
+        val payload = remember(request) { runCatching { JSONObject(request) }.getOrNull() }
+        RestoreSnapshotFileDialog(
+            path = payload?.optString("path").orEmpty(),
+            onDismiss = { restoreSnapshotRequest = null },
+            onConfirm = {
+                restoreSnapshotRequest = null
+                onSnapshotAction("restore", request)
+            },
+        )
+    }
+    mergeWorktreeRequest?.let { request ->
+        val payload = remember(request) { runCatching { JSONObject(request) }.getOrNull() }
+        MergeWorktreeDialog(
+            sourceBranch = payload?.optString("sourceBranch").orEmpty(),
+            targetBranch = payload?.optString("targetBranch").orEmpty(),
+            commits = payload?.optString("commits").orEmpty(),
+            stat = payload?.optString("stat").orEmpty(),
+            onDismiss = { mergeWorktreeRequest = null },
+            onConfirm = { mergeWorktreeRequest = null; onWorktreeAction("merge", request) },
+        )
+    }
+    removeWorktreePath?.let { path ->
+        RemoveWorktreeDialog(
+            path = path,
+            onDismiss = { removeWorktreePath = null },
+            onConfirm = { removeWorktreePath = null; onWorktreeAction("remove", path) },
         )
     }
     if (showConversationSearch) {
@@ -1084,33 +1192,153 @@ private fun MessageSearchDialog(
 }
 
 @Composable
-private fun NativeUserInputDialog(raw: String, onAnswer: (Int, String, String) -> Unit) {
+private fun NativeUserInputBanner(raw: String, drawerOpen: Boolean, onToggle: () -> Unit) {
     val language = LocalNativeLanguage.current
     val payload = remember(raw) { runCatching { JSONObject(raw) }.getOrNull() }
-    val requestId = payload?.optInt("requestId", -1) ?: -1
     val params = payload?.optJSONObject("params")
     val questions = params?.optJSONArray("questions")
-    val question = questions?.optJSONObject(0) ?: params
-    val questionId = question?.optString("id", "answer").orEmpty().ifBlank { "answer" }
-    val prompt = question?.optString("question", question.optString("prompt", "")).orEmpty().ifBlank { nativeText(language, "\u6a21\u578b\u9700\u8981\u4f60\u7684\u56de\u7b54", "The model needs your input") }
-    val options = question?.optJSONArray("options")
-    var value by remember(raw) { mutableStateOf("") }
-    FlClashAnimatedDialog(
-        onDismissRequest = {},
-        title = { Text(nativeText(language, "\u9700\u8981\u4f60\u7684\u56de\u7b54", "Your input is needed")) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(prompt, style = MaterialTheme.typography.bodyLarge)
-                if (options != null && options.length() > 0) {
-                    for (index in 0 until options.length()) {
-                        val option = options.optJSONObject(index)
-                        val label = option?.optString("label", option.optString("value", "")) ?: options.optString(index)
-                        Surface(Modifier.fillMaxWidth().clickable { value = label }, shape = RoundedCornerShape(14.dp), color = if (value == label) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow) { Text(label, Modifier.padding(12.dp)) }
+    val count = questions?.length()?.coerceAtLeast(1) ?: 1
+    val firstQuestion = questions?.optJSONObject(0)?.optString("question").orEmpty()
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp).clickable(onClick = onToggle),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.84f),
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(HugeIcons.MessageAdd01, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(9.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    nativeText(language, "\u5f85\u56de\u7b54 \u00b7 $count \u4e2a\u95ee\u9898", "Answer needed \u00b7 $count question${if (count == 1) "" else "s"}"),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (firstQuestion.isNotBlank()) Text(firstQuestion, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+            }
+            Icon(HugeIcons.ArrowDown01, null, Modifier.size(16.dp).graphicsLayer { rotationZ = if (drawerOpen) 180f else 0f })
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NativeUserInputDrawer(raw: String, onAnswer: (String) -> Unit, onDismiss: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    val payload = remember(raw) { runCatching { JSONObject(raw) }.getOrNull() }
+    val params = payload?.optJSONObject("params")
+    val questionArray = params?.optJSONArray("questions") ?: JSONArray().also { array -> if (params != null) array.put(params) }
+    val questions = remember(raw) {
+        buildList { for (index in 0 until questionArray.length()) questionArray.optJSONObject(index)?.let(::add) }
+    }
+    var answers by remember(raw) { mutableStateOf(emptyMap<String, String>()) }
+    val complete = questions.isNotEmpty() && questions.all { question ->
+        val id = question.optString("id", "answer").ifBlank { "answer" }
+        answers[id].orEmpty().isNotBlank()
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Column(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 680.dp).navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(nativeText(language, "\u9700\u8981\u4f60\u7684\u56de\u7b54", "Your input is needed"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(nativeText(language, "\u8bf7\u56de\u7b54\u4ee5\u4e0b ${questions.size} \u4e2a\u95ee\u9898", "Answer the ${questions.size} question${if (questions.size == 1) "" else "s"} below"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                IconButton(onClick = onDismiss) { Icon(HugeIcons.Cancel01, nativeText(language, "\u5173\u95ed", "Close")) }
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 500.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                itemsIndexed(questions, key = { index, question -> question.optString("id").ifBlank { index.toString() } }) { index, question ->
+                    val questionId = question.optString("id", "answer").ifBlank { "answer" }
+                    val header = question.optString("header").ifBlank { nativeText(language, "\u95ee\u9898 ${index + 1}", "Question ${index + 1}") }
+                    val prompt = question.optString("question", question.optString("prompt", "")).ifBlank { nativeText(language, "\u6a21\u578b\u9700\u8981\u4f60\u7684\u56de\u7b54", "The model needs your input") }
+                    val options = question.optJSONArray("options")
+                    val allowOther = question.optBoolean("isOther", options == null || options.length() == 0)
+                    val secret = question.optBoolean("isSecret", false)
+                    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                            Text(header, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                            Text(prompt, style = MaterialTheme.typography.bodyLarge, lineHeight = 23.sp)
+                            if (options != null) for (optionIndex in 0 until options.length()) {
+                                val option = options.optJSONObject(optionIndex)
+                                val label = option?.optString("label", option.optString("value", "")) ?: options.optString(optionIndex)
+                                val description = option?.optString("description").orEmpty()
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth().clickable { answers = answers + (questionId to label) },
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = if (answers[questionId] == label) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    border = if (answers[questionId] == label) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)) else null,
+                                ) {
+                                    Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                                        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                        if (description.isNotBlank()) Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                            if (allowOther || options == null || options.length() == 0) {
+                                OutlinedTextField(
+                                    value = answers[questionId].orEmpty().takeUnless { value -> options != null && (0 until options.length()).any { optionIndex -> options.optJSONObject(optionIndex)?.optString("label") == value } }.orEmpty(),
+                                    onValueChange = { answers = answers + (questionId to it) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text(nativeText(language, "\u5176\u4ed6\u56de\u7b54", "Other answer")) },
+                                    placeholder = { Text(nativeText(language, "\u8f93\u5165\u56de\u7b54", "Type your answer")) },
+                                    visualTransformation = if (secret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+                                    minLines = 1,
+                                    maxLines = 4,
+                                )
+                            }
+                        }
                     }
-                } else OutlinedTextField(value = value, onValueChange = { value = it }, modifier = Modifier.fillMaxWidth(), placeholder = { Text(nativeText(language, "\u8f93\u5165\u56de\u7b54", "Type your answer")) })
+                }
+            }
+            Button(
+                onClick = {
+                    onAnswer(encodeNativeUserInputAnswers(answers))
+                },
+                enabled = complete,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(18.dp),
+            ) { Text(nativeText(language, "\u63d0\u4ea4\u5168\u90e8\u56de\u7b54", "Submit answers")) }
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable
+private fun NativePlanImplementationDialog(plan: String, onExecute: () -> Unit, onRevise: (String) -> Unit, onCancel: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    var feedback by remember(plan) { mutableStateOf("") }
+    FlClashAnimatedDialog(
+        onDismissRequest = onCancel,
+        title = { Text(nativeText(language, "\u6267\u884c\u8fd9\u4e2a\u8ba1\u5212\uff1f", "Implement this plan?")) },
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(max = 470.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Box(Modifier.padding(14.dp)) { DeferredHistoricalRichText(plan) }
+                }
+                OutlinedTextField(
+                    value = feedback,
+                    onValueChange = { feedback = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(nativeText(language, "\u9700\u8981\u66f4\u6539\u7684\u5185\u5bb9", "Changes to make")) },
+                    placeholder = { Text(nativeText(language, "\u4f8b\u5982\uff1a\u5148\u8865\u5145\u6d4b\u8bd5\uff0c\u4e0d\u8981\u4fee\u6539 API", "For example: add tests first and keep the API unchanged")) },
+                    minLines = 2,
+                    maxLines = 5,
+                )
             }
         },
-        confirmButton = { TextButton(enabled = requestId >= 0 && value.isNotBlank(), onClick = { onAnswer(requestId, questionId, value.trim()) }) { Text(nativeText(language, "\u63d0\u4ea4", "Submit")) } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onCancel) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) }
+                TextButton(enabled = feedback.isNotBlank(), onClick = { onRevise(feedback.trim()) }) { Text(nativeText(language, "\u66f4\u6539\u8ba1\u5212", "Change plan")) }
+            }
+        },
+        confirmButton = { Button(onClick = onExecute) { Text(nativeText(language, "\u6267\u884c\u8ba1\u5212", "Implement plan")) } },
     )
 }
 
@@ -1205,6 +1433,92 @@ private fun EditMessageDialog(initialText: String, onDismiss: () -> Unit, onConf
         },
         confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) { Text(nativeText(language, "\u4fdd\u5b58\u5e76\u91cd\u65b0\u751f\u6210", "Save and regenerate")) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+    )
+}
+
+@Composable
+private fun RestoreCheckpointDialog(prompt: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(nativeText(language, "\u4ece\u6b64\u68c0\u67e5\u70b9\u91cd\u65b0\u6267\u884c\uff1f", "Rerun from this checkpoint?")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    nativeText(language, "\u6b64\u68c0\u67e5\u70b9\u4e4b\u540e\u7684\u5bf9\u8bdd\u8f6e\u6b21\u4f1a\u88ab\u56de\u6eda\uff0c\u7136\u540e\u91cd\u65b0\u63d0\u4ea4\u8fd9\u6761\u4efb\u52a1\u3002Codex \u4f1a\u6839\u636e\u5f53\u524d\u5de5\u4f5c\u533a\u518d\u6b21\u6267\u884c\u3002", "Later conversation turns will be rolled back and this task will be submitted again. Codex will rerun it against the current workspace."),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                    Text(prompt.take(2_000), Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodySmall, maxLines = 10, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        confirmButton = { Button(onClick = onConfirm) { Text(nativeText(language, "\u56de\u6eda\u5e76\u91cd\u65b0\u6267\u884c", "Rollback and rerun")) } },
+    )
+}
+
+@Composable
+private fun RestoreSnapshotFileDialog(path: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(nativeText(language, "\u6062\u590d\u8fd9\u4e2a\u6587\u4ef6\uff1f", "Restore this file?")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    nativeText(language, "\u5f53\u524d\u5de5\u4f5c\u533a\u4e2d\u7684\u8be5\u6587\u4ef6\u5c06\u66ff\u6362\u4e3a\u5feb\u7167\u7248\u672c\u3002\u6062\u590d\u524d\u4f1a\u81ea\u52a8\u518d\u521b\u5efa\u4e00\u4efd\u5b89\u5168\u5feb\u7167\u3002\u5f53\u524d Git \u6682\u5b58\u533a\u4e0d\u4f1a\u88ab\u4fee\u6539\u3002", "The working-tree file will be replaced by the snapshot version. A safety snapshot is created first, and the Git index is left unchanged."),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                    Text(path, Modifier.fillMaxWidth().padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        confirmButton = { Button(onClick = onConfirm) { Text(nativeText(language, "\u521b\u5efa\u5907\u4efd\u5e76\u6062\u590d", "Back up and restore")) } },
+    )
+}
+
+@Composable
+private fun MergeWorktreeDialog(sourceBranch: String, targetBranch: String, commits: String, stat: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(nativeText(language, "\u5408\u5e76\u9694\u79bb\u4efb\u52a1\uff1f", "Merge isolated task?")) },
+        text = {
+            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(nativeText(language, "\u5c06 $sourceBranch \u5408\u5e76\u5230 $targetBranch\u3002\u5408\u5e76\u524d\u4f1a\u521b\u5efa\u9690\u85cf\u5b89\u5168\u5feb\u7167\uff1b\u82e5\u51fa\u73b0\u51b2\u7a81\uff0c\u4f1a\u81ea\u52a8\u53d6\u6d88\u5408\u5e76\u3002", "Merge $sourceBranch into $targetBranch. A hidden safety snapshot is created first; conflicted merges are aborted automatically."), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (commits.isNotBlank()) {
+                    Text(nativeText(language, "\u5f85\u5408\u5e76\u63d0\u4ea4", "Commits"), fontWeight = FontWeight.SemiBold)
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                        SelectionContainer { Text(commits.take(12_000), Modifier.fillMaxWidth().padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+                if (stat.isNotBlank()) {
+                    Text(nativeText(language, "\u53d8\u66f4\u7edf\u8ba1", "Change summary"), fontWeight = FontWeight.SemiBold)
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                        SelectionContainer { Text(stat.take(12_000), Modifier.fillMaxWidth().padding(12.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        confirmButton = { Button(onClick = onConfirm) { Text(nativeText(language, "\u521b\u5efa\u5907\u4efd\u5e76\u5408\u5e76", "Back up and merge")) } },
+    )
+}
+
+@Composable
+private fun RemoveWorktreeDialog(path: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(nativeText(language, "\u79fb\u9664 worktree\uff1f", "Remove worktree?")) },
+        text = { Text(nativeText(language, "\u53ea\u4f1a\u79fb\u9664\u8fd9\u4e2a\u5e72\u51c0\u7684 worktree \u76ee\u5f55\uff0c\u5176 Git \u5206\u652f\u4f1a\u4fdd\u7559\u3002\n\n$path", "Only the clean worktree directory will be removed. Its Git branch will be kept.\n\n$path")) },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+        confirmButton = { Button(onClick = onConfirm) { Text(nativeText(language, "\u79fb\u9664 worktree", "Remove worktree")) } },
     )
 }
 
@@ -1508,7 +1822,11 @@ private fun RikkaEmptyState(
 @Composable
 private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: String?, chatState: NativeChatState, liveState: NativeChatState?, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}, onPreviewAttachment: (NativeAttachment) -> Unit = {}) {
     when (message.role) {
-        NativeChatRole.USER -> RikkaUserMessage(message.content, message.skills, message.attachments, onEdit, onPreviewAttachment)
+        NativeChatRole.USER -> {
+            val implementsPlan = message.content.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
+            val displayText = if (implementsPlan) nativeText(LocalNativeLanguage.current, "\u662f\uff0c\u6267\u884c\u6b64\u8ba1\u5212", "Yes, implement this plan") else message.content
+            RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan)
+        }
         NativeChatRole.ASSISTANT -> {
             val liveSnapshot = if (message.streaming && chatState.liveAssistantMessageId == message.id) {
                 chatState.liveAssistantSnapshot
@@ -1542,7 +1860,7 @@ private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: St
 }
 
 @Composable
-private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>, onEdit: () -> Unit, onPreviewAttachment: (NativeAttachment) -> Unit) {
+private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>, onEdit: () -> Unit, onPreviewAttachment: (NativeAttachment) -> Unit, editable: Boolean = true) {
     val language = LocalNativeLanguage.current
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1614,14 +1932,14 @@ private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachment
                     leadingIcon = { Icon(HugeIcons.Copy01, null, modifier = Modifier.size(18.dp)) },
                     onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)); menuExpanded = false },
                 )
-                DropdownMenuItem(
+                if (editable) DropdownMenuItem(
                     text = { Text(nativeText(language, "\u7f16\u8f91\u5e76\u91cd\u65b0\u751f\u6210", "Edit and regenerate")) },
                     leadingIcon = { Icon(HugeIcons.PencilEdit01, null, modifier = Modifier.size(18.dp)) },
                     onClick = { menuExpanded = false; onEdit() },
                 )
             }
         }
-        MessageActions(text = text, onEdit = onEdit)
+        MessageActions(text = text, onEdit = onEdit.takeIf { editable })
     }
 }
 
@@ -1973,6 +2291,25 @@ private fun associatedFileChangeItems(messages: List<NativeChatMessage>, assista
         index--
     }
     return result
+}
+
+private fun collectAllFileChangeItems(state: NativeChatState): List<JSONObject> {
+    val result = mutableListOf<JSONObject>()
+    state.messages.forEach { message ->
+        if (message.role != NativeChatRole.ACTIVITY || !message.content.startsWith("PROCESS2|")) return@forEach
+        val payload = runCatching {
+            JSONObject(String(Base64.decode(message.content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+        }.getOrNull() ?: return@forEach
+        val tools = payload.optJSONArray("tools") ?: return@forEach
+        for (index in 0 until tools.length()) {
+            val item = tools.optJSONObject(index) ?: runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
+            if (item.optString("type") == "fileChange") result.add(item)
+        }
+    }
+    state.toolDetails.forEach { raw ->
+        runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }?.let(result::add)
+    }
+    return result.distinctBy { it.optString("id", it.optString("itemId", it.toString())) }
 }
 
 private fun extractChangedFiles(items: List<JSONObject>): List<ChangedFileEntry> {
@@ -3440,7 +3777,7 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         val parts = text.split('|')
         val completed = parts.getOrNull(1) == "complete"
         val count = parts.getOrNull(2)?.toIntOrNull() ?: 0
-        var expanded by remember(message.id) { mutableStateOf(false) }
+        var expanded by remember(message.id) { mutableStateOf(true) }
         val planSteps = remember(state.planJson) { parsePlanItems(state.planJson) }
         Surface(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { expanded = !expanded },
@@ -3463,18 +3800,22 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
                 else CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
             }
             AnimatedVisibility(
-                visible = expanded && planSteps.isNotEmpty(),
+                visible = expanded && (planSteps.isNotEmpty() || state.planExplanation.isNotBlank()),
                 enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(tween(180)),
                 exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(tween(120)),
             ) {
                 Column(Modifier.padding(start = 42.dp, end = 16.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (state.planExplanation.isNotBlank()) {
+                        DeferredHistoricalRichText(state.planExplanation)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.12f))
+                    }
                     planSteps.forEachIndexed { index, step ->
                         val label = step.optString("step").ifBlank { step.optString("title") }.ifBlank { step.optString("description") }
                         val status = step.optString("status", "pending")
                         if (label.isNotBlank()) Row(verticalAlignment = Alignment.Top) {
-                            val mark = if (status == "completed") "?" else "${index + 1}."
+                            val mark = if (status == "completed") "✓" else "${index + 1}."
                             Text(mark, modifier = Modifier.width(24.dp), color = if (status == "completed") Color(0xFF5E8B68) else MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                            Text(label, style = MaterialTheme.typography.bodySmall, lineHeight = 18.sp)
+                            Box(Modifier.weight(1f)) { DeferredHistoricalRichText(label) }
                         }
                     }
                 }
@@ -3861,6 +4202,15 @@ private fun WorkPanelDialog(
     onEditGoal: () -> Unit,
     onClearGoal: () -> Unit,
     onExecutePlan: () -> Unit,
+    onGitAction: (String, String) -> Unit,
+    onSnapshotAction: (String, String) -> Unit,
+    onRequestRestoreFile: (String) -> Unit,
+    onWorktreeAction: (String, String) -> Unit,
+    onRequestMergeWorktree: (String) -> Unit,
+    onRequestRemoveWorktree: (String) -> Unit,
+    onRestoreCheckpoint: (NativeConversationCheckpoint) -> Unit,
+    onEditCheckpoint: (NativeConversationCheckpoint) -> Unit,
+    onContinueTask: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var entered by remember { mutableStateOf(false) }
@@ -3868,10 +4218,18 @@ private fun WorkPanelDialog(
     var tab by remember { mutableStateOf("plan") }
     var selectedAgentId by remember { mutableStateOf<String?>(null) }
     val agents = remember(state.revision, state.messages.size, state.liveSubagents.size) { collectAllSubagentItems(state) }
+    val changes = remember(state.revision, state.messages.size, state.toolDetails.size) { collectAllFileChangeItems(state) }
+    val modelChangedFiles = remember(changes.map { it.toString() }) { extractChangedFiles(changes) }
+    val gitEntries = remember(state.gitSnapshot) { parseGitEntries(state.gitSnapshot) }
+    val changedFiles = remember(modelChangedFiles, state.gitSnapshot) { mergeChangedFiles(modelChangedFiles, gitEntries) }
+    val checkpoints = remember(state.revision, state.messages.size, state.phase) { NativeCheckpointModel.build(state.messages, state.phase) }
     val agentThreads = remember(agents) { agents.map(::subagentThreadId).filter { it.isNotBlank() } }
     val close: () -> Unit = { entered = false }
     LaunchedEffect(tab, agentThreads) {
         if (tab == "agents") agentThreads.forEach(onLoadSubagentHistory)
+        if (tab in setOf("changes", "git") && !state.gitBusy) onGitAction("refresh", "")
+        if (tab == "snapshots") onSnapshotAction("refresh", "")
+        if (tab == "worktrees") onWorktreeAction("refresh", "")
     }
     LaunchedEffect(visible, entered) {
         if (visible && !entered) { delay(210L); visible = false; onDismiss() }
@@ -3911,23 +4269,46 @@ private fun WorkPanelDialog(
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                         if (selectedAgentId == null) {
-                            WorkPanelTabs(tab = tab, planCount = parsePlanItems(state.planJson).size, agentCount = agents.size, onTab = { tab = it })
+                            WorkPanelTabs(
+                                tab = tab,
+                                planCount = parsePlanItems(state.planJson).size,
+                                checkpointCount = checkpoints.size,
+                                snapshotCount = state.workspaceSnapshots.size,
+                                worktreeCount = state.worktrees.size,
+                                agentCount = agents.size,
+                                changeCount = changedFiles.size,
+                                gitCount = runCatching { JSONObject(state.gitSnapshot).optJSONArray("entries")?.length() ?: 0 }.getOrDefault(0),
+                                onTab = { tab = it },
+                            )
                             AnimatedContent(
                                 targetState = tab,
                                 transitionSpec = {
-                                    (fadeIn(tween(160)) + slideInHorizontally(tween(220, easing = FastOutSlowInEasing)) { if (targetState == "agents") it / 5 else -it / 5 }) togetherWith
-                                        (fadeOut(tween(100)) + slideOutHorizontally(tween(170, easing = FastOutSlowInEasing)) { if (targetState == "agents") -it / 5 else it / 5 })
+                                    val forward = workPanelTabIndex(targetState) >= workPanelTabIndex(initialState)
+                                    (fadeIn(tween(160)) + slideInHorizontally(tween(220, easing = FastOutSlowInEasing)) { if (forward) it / 5 else -it / 5 }) togetherWith
+                                        (fadeOut(tween(100)) + slideOutHorizontally(tween(170, easing = FastOutSlowInEasing)) { if (forward) -it / 5 else it / 5 })
                                 },
                                 label = "workPanelTab",
                             ) { selectedTab ->
-                                if (selectedTab == "agents") {
-                                    if (agents.isEmpty()) WorkPanelEmpty("\u6682\u65e0\u5b50\u4ee3\u7406", "\u5f53 Codex \u59d4\u6d3e\u4efb\u52a1\u540e\uff0c\u5b50\u4ee3\u7406\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002")
-                                    else SubagentOverview(state, agents) { agent ->
-                                        val thread = subagentThreadId(agent)
-                                        selectedAgentId = subagentKey(agent)
-                                        if (thread.isNotBlank()) onLoadSubagentHistory(thread)
-                                    }
-                                } else WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, state.ready && !state.phase.active, onEditGoal, onClearGoal, onExecutePlan)
+                                when (selectedTab) {
+                                    "agents" -> if (agents.isEmpty()) WorkPanelEmpty("\u6682\u65e0\u5b50\u4ee3\u7406", "\u5f53 Codex \u59d4\u6d3e\u4efb\u52a1\u540e\uff0c\u5b50\u4ee3\u7406\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002")
+                                        else SubagentOverview(state, agents) { agent ->
+                                            val thread = subagentThreadId(agent)
+                                            selectedAgentId = subagentKey(agent)
+                                            if (thread.isNotBlank()) onLoadSubagentHistory(thread)
+                                        }
+                                    "checkpoints" -> WorkCheckpointsView(
+                                        checkpoints = checkpoints,
+                                        actionEnabled = state.ready && !state.phase.active,
+                                        onRestore = onRestoreCheckpoint,
+                                        onEdit = onEditCheckpoint,
+                                        onContinue = onContinueTask,
+                                    )
+                                    "snapshots" -> WorkSnapshotsView(state, onSnapshotAction, onRequestRestoreFile)
+                                    "worktrees" -> WorktreesView(state, onWorktreeAction, onRequestMergeWorktree, onRequestRemoveWorktree)
+                                    "changes" -> WorkChangesView(state, changes, changedFiles, gitEntries, onGitAction)
+                                    "git" -> WorkGitView(state, onGitAction)
+                                    else -> WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, state.ready && !state.phase.active, onEditGoal, onClearGoal, onExecutePlan)
+                                }
                             }
                         } else {
                             val agent = agents.firstOrNull { subagentKey(it) == selectedAgentId }
@@ -3950,18 +4331,678 @@ private fun WorkPanelDialog(
     }
 }
 
+private fun workPanelTabIndex(tab: String): Int = listOf("plan", "checkpoints", "snapshots", "worktrees", "agents", "changes", "git").indexOf(tab).coerceAtLeast(0)
+
 @Composable
-private fun WorkPanelTabs(tab: String, planCount: Int, agentCount: Int, onTab: (String) -> Unit) {
+private fun WorkPanelTabs(tab: String, planCount: Int, checkpointCount: Int, snapshotCount: Int, worktreeCount: Int, agentCount: Int, changeCount: Int, gitCount: Int, onTab: (String) -> Unit) {
     val language = LocalNativeLanguage.current
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf("plan" to "${nativeText(language, "\u8ba1\u5212", "Plan")} $planCount", "agents" to "${nativeText(language, "\u5b50\u4ee3\u7406", "Agents")} $agentCount").forEach { (id, label) ->
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(
+            "plan" to "${nativeText(language, "\u8ba1\u5212", "Plan")} $planCount",
+            "checkpoints" to "${nativeText(language, "\u68c0\u67e5\u70b9", "Checkpoints")} $checkpointCount",
+            "snapshots" to "${nativeText(language, "\u5feb\u7167", "Snapshots")} $snapshotCount",
+            "worktrees" to "Worktrees $worktreeCount",
+            "agents" to "${nativeText(language, "\u5b50\u4ee3\u7406", "Agents")} $agentCount",
+            "changes" to "${nativeText(language, "\u53d8\u66f4", "Changes")} $changeCount",
+            "git" to "Git $gitCount",
+        ).forEach { (id, label) ->
             Surface(
-                modifier = Modifier.weight(1f).clickable { onTab(id) },
+                modifier = Modifier.clickable { onTab(id) },
                 shape = CircleShape,
                 color = if (tab == id) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
                 contentColor = if (tab == id) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-            ) { Text(label, Modifier.padding(vertical = 9.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge, fontWeight = if (tab == id) FontWeight.SemiBold else FontWeight.Normal) }
+            ) { Text(label, Modifier.padding(horizontal = 15.dp, vertical = 9.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge, fontWeight = if (tab == id) FontWeight.SemiBold else FontWeight.Normal) }
         }
+    }
+}
+
+@Composable
+private fun WorktreesView(
+    state: NativeChatState,
+    onAction: (String, String) -> Unit,
+    onRequestMerge: (String) -> Unit,
+    onRequestRemove: (String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    var branchName by remember(state.currentThreadId, state.projectPath) { mutableStateOf("") }
+    val preview = remember(state.worktreeMergePreview) { runCatching { JSONObject(state.worktreeMergePreview) }.getOrNull() }
+    val currentPath = state.projectPath.trimEnd('/', '\\')
+    val mainPath = state.worktrees.firstOrNull()?.path.orEmpty().trimEnd('/', '\\')
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        if (preview != null) {
+            item(key = "worktree-merge-preview") {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { onAction("clearPreview", "") }) { Icon(HugeIcons.ArrowRight01, null, Modifier.graphicsLayer { rotationZ = 180f }) }
+                            Column(Modifier.weight(1f)) {
+                                Text("${preview.optString("sourceBranch")} → ${preview.optString("targetBranch")}", fontWeight = FontWeight.SemiBold)
+                                Text(nativeText(language, "\u9694\u79bb\u4efb\u52a1\u5408\u5e76\u9884\u89c8", "Isolated task merge preview"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        if (preview.optString("commits").isNotBlank()) {
+                            SelectionContainer { Text(preview.optString("commits").take(16_000), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                        }
+                        if (preview.optString("stat").isNotBlank()) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            SelectionContainer { Text(preview.optString("stat").take(16_000), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                        }
+                        if (preview.optBoolean("canMerge")) Button(
+                            onClick = { onRequestMerge(state.worktreeMergePreview) },
+                            enabled = !state.worktreeBusy,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(15.dp),
+                        ) { Text(nativeText(language, "\u786e\u8ba4\u5408\u5e76", "Review and merge")) }
+                        else Text(nativeText(language, "\u6ca1\u6709\u53ef\u5408\u5e76\u7684\u65b0\u63d0\u4ea4", "No new commits to merge"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        } else {
+            item(key = "worktree-create") {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(nativeText(language, "\u521b\u5efa\u9694\u79bb\u4efb\u52a1", "Create isolated task"), fontWeight = FontWeight.SemiBold)
+                                Text(nativeText(language, "\u4e3a\u65b0\u5bf9\u8bdd\u521b\u5efa\u72ec\u7acb Git \u5206\u652f\u548c worktree", "Create a dedicated Git branch and worktree for a new conversation"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (state.worktreeBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        }
+                        OutlinedTextField(
+                            value = branchName,
+                            onValueChange = { branchName = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(nativeText(language, "\u5206\u652f\u540d\u79f0", "Branch name")) },
+                            placeholder = { Text("codex/feature-name") },
+                        )
+                        Button(
+                            onClick = { onAction("create", branchName); branchName = "" },
+                            enabled = !state.worktreeBusy,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(15.dp),
+                        ) { Text(nativeText(language, "\u521b\u5efa\u5e76\u5728\u65b0\u5bf9\u8bdd\u6253\u5f00", "Create and open new conversation")) }
+                    }
+                }
+            }
+            if (state.worktreeNotice.isNotBlank()) item(key = "worktree-notice") {
+                Text(state.worktreeNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 4.dp))
+            }
+            if (state.worktreeError.isNotBlank()) item(key = "worktree-error") {
+                Text(state.worktreeError.take(6_000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 4.dp))
+            }
+            if (state.worktrees.isEmpty() && !state.worktreeBusy) item(key = "worktree-empty") {
+                WorkPanelInlineEmpty(nativeText(language, "\u5f53\u524d\u9879\u76ee\u4e0d\u662f Git \u4ed3\u5e93\uff0c\u6216 Git \u6682\u4e0d\u53ef\u7528", "The current project is not a Git repository, or Git is unavailable"))
+            }
+            itemsIndexed(state.worktrees, key = { _, item -> item.path }) { index, worktree ->
+                val normalizedPath = worktree.path.trimEnd('/', '\\')
+                val current = normalizedPath == currentPath
+                val main = index == 0 || normalizedPath == mainPath
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.Folder01, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(worktree.branch.ifBlank { nativeText(language, "\u5206\u79bb HEAD", "Detached HEAD") }, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                                Text(worktree.path, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text(
+                                when { current -> nativeText(language, "\u5f53\u524d", "Current"); main -> nativeText(language, "\u4e3b\u5de5\u4f5c\u533a", "Main"); worktree.dirty -> nativeText(language, "\u6709\u53d8\u66f4", "Dirty"); else -> nativeText(language, "\u5e72\u51c0", "Clean") },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (worktree.dirty) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.End) {
+                            if (!current) TextButton(enabled = !state.worktreeBusy, onClick = { onAction("open", worktree.path) }) { Text(nativeText(language, "\u65b0\u5bf9\u8bdd\u6253\u5f00", "Open task")) }
+                            if (!main && !worktree.detached) TextButton(enabled = !state.worktreeBusy && !worktree.dirty, onClick = { onAction("previewMerge", worktree.path) }) { Text(nativeText(language, "\u9884\u89c8\u5408\u5e76", "Preview merge")) }
+                            if (!main && !current) TextButton(enabled = !state.worktreeBusy && !worktree.dirty && !worktree.locked, onClick = { onRequestRemove(worktree.path) }) { Text(nativeText(language, "\u79fb\u9664", "Remove")) }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun WorkSnapshotsView(
+    state: NativeChatState,
+    onAction: (String, String) -> Unit,
+    onRequestRestoreFile: (String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val preview = remember(state.workspaceSnapshotPreview) { runCatching { JSONObject(state.workspaceSnapshotPreview) }.getOrNull() }
+    val previewSnapshotId = preview?.optString("snapshotId").orEmpty()
+    val previewSnapshot = state.workspaceSnapshots.firstOrNull { it.id == previewSnapshotId }
+    val previewEntries = remember(state.workspaceSnapshotPreview) {
+        val array = preview?.optJSONArray("entries")
+        if (array == null) emptyList() else buildList { for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add) }
+    }
+    var label by remember(state.currentThreadId) { mutableStateOf("") }
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        if (preview != null && previewSnapshot != null) {
+            item(key = "snapshot-preview-header") {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                    Row(Modifier.padding(start = 6.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { onAction("clearPreview", "") }) {
+                            Icon(HugeIcons.ArrowRight01, nativeText(language, "\u8fd4\u56de", "Back"), Modifier.graphicsLayer { rotationZ = 180f })
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(previewSnapshot.label.ifBlank { nativeText(language, "\u5de5\u4f5c\u533a\u5feb\u7167", "Workspace snapshot") }, fontWeight = FontWeight.SemiBold)
+                            Text(nativeText(language, "\u4e0e\u5f53\u524d\u5de5\u4f5c\u533a\u76f8\u6bd4 · ${previewEntries.size} \u4e2a\u6587\u4ef6", "Compared with current workspace · ${previewEntries.size} files"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (state.workspaceSnapshotBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    }
+                }
+            }
+            if (previewEntries.isEmpty() && !state.workspaceSnapshotBusy) item(key = "snapshot-no-diff") {
+                WorkPanelInlineEmpty(nativeText(language, "\u5f53\u524d\u5de5\u4f5c\u533a\u4e0e\u8be5\u5feb\u7167\u4e00\u81f4", "The current workspace matches this snapshot"))
+            }
+            items(previewEntries, key = { it.optString("status") + "|" + it.optString("path") }) { entry ->
+                SnapshotDiffCard(state, previewSnapshot, entry, onAction, onRequestRestoreFile)
+            }
+        } else {
+            item(key = "snapshot-create") {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.Files02, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(nativeText(language, "\u975e\u7834\u574f\u6027\u5de5\u4f5c\u533a\u5feb\u7167", "Non-destructive workspace snapshot"), fontWeight = FontWeight.SemiBold)
+                                Text(nativeText(language, "\u4e0d\u4fee\u6539\u5206\u652f\u3001\u6682\u5b58\u533a\u6216\u5de5\u4f5c\u533a", "Does not modify the branch, index, or working tree"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (state.workspaceSnapshotBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        }
+                        OutlinedTextField(
+                            value = label,
+                            onValueChange = { label = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(nativeText(language, "\u5feb\u7167\u540d\u79f0", "Snapshot name")) },
+                            placeholder = { Text(nativeText(language, "\u4f8b\u5982\uff1a\u4fee\u590d\u767b\u5f55\u524d", "For example: Before login fix")) },
+                        )
+                        Button(
+                            onClick = { onAction("create", label); label = "" },
+                            enabled = !state.workspaceSnapshotBusy,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(15.dp),
+                        ) { Text(nativeText(language, "\u521b\u5efa\u5feb\u7167", "Create snapshot")) }
+                    }
+                }
+            }
+            if (state.workspaceSnapshotNotice.isNotBlank()) item(key = "snapshot-notice") {
+                Text(state.workspaceSnapshotNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 4.dp))
+            }
+            if (state.workspaceSnapshotError.isNotBlank()) item(key = "snapshot-error") {
+                Text(state.workspaceSnapshotError.take(4_000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 4.dp))
+            }
+            if (state.workspaceSnapshots.isEmpty() && !state.workspaceSnapshotBusy) item(key = "snapshot-empty") {
+                WorkPanelInlineEmpty(nativeText(language, "\u8fd8\u6ca1\u6709\u6587\u4ef6\u5feb\u7167", "No workspace snapshots yet"))
+            }
+            items(state.workspaceSnapshots, key = { it.id }) { snapshot ->
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.Files02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(snapshot.label.ifBlank { nativeText(language, "\u5de5\u4f5c\u533a\u5feb\u7167", "Workspace snapshot") }, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                                val date = remember(snapshot.createdAt) { java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(snapshot.createdAt)) }
+                                Text(date + if (snapshot.automatic) nativeText(language, " · \u81ea\u52a8\u5907\u4efd", " · automatic backup") else "", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(enabled = !state.workspaceSnapshotBusy, onClick = { onAction("delete", snapshot.id) }) { Text(nativeText(language, "\u5220\u9664", "Delete")) }
+                            TextButton(enabled = !state.workspaceSnapshotBusy, onClick = { onAction("preview", snapshot.id) }) { Text(nativeText(language, "\u9884\u89c8\u5dee\u5f02", "Preview changes")) }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun SnapshotDiffCard(
+    state: NativeChatState,
+    snapshot: NativeWorkspaceSnapshot,
+    entry: JSONObject,
+    onAction: (String, String) -> Unit,
+    onRequestRestoreFile: (String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val clipboard = LocalClipboardManager.current
+    val path = entry.optString("path")
+    val key = "${snapshot.id}|$path"
+    val diff = state.workspaceSnapshotDiffs[key].orEmpty()
+    var expanded by remember(key) { mutableStateOf(false) }
+    LaunchedEffect(expanded, key, diff) {
+        if (expanded && diff.isBlank() && key !in state.workspaceSnapshotDiffLoading) {
+            onAction("diff", JSONObject().put("snapshotId", snapshot.id).put("path", path).toString())
+        }
+    }
+    val status = entry.optString("status")
+    val statusLabel = when {
+        status.startsWith("A") -> nativeText(language, "\u5feb\u7167\u540e\u65b0\u589e", "Added after snapshot")
+        status.startsWith("D") -> nativeText(language, "\u5feb\u7167\u540e\u5220\u9664", "Deleted after snapshot")
+        status.startsWith("R") -> nativeText(language, "\u5feb\u7167\u540e\u91cd\u547d\u540d", "Renamed after snapshot")
+        else -> nativeText(language, "\u5feb\u7167\u540e\u4fee\u6539", "Modified after snapshot")
+    }
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Column {
+            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(start = 13.dp, end = 6.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.Files02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(path.substringAfterLast('/').substringAfterLast('\\'), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                    Text("$statusLabel · +${entry.optInt("additions")} -${entry.optInt("deletions")} · $path", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (key in state.workspaceSnapshotDiffLoading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                if (diff.isNotBlank()) IconButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(diff)) }) { Icon(HugeIcons.Copy01, null, Modifier.size(17.dp)) }
+                Icon(HugeIcons.ArrowDown01, null, Modifier.size(17.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f })
+            }
+            if (entry.optBoolean("restorable")) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = {
+                        onRequestRestoreFile(JSONObject().put("snapshotId", snapshot.id).put("path", path).toString())
+                    }) { Text(nativeText(language, "\u6062\u590d\u6b64\u6587\u4ef6", "Restore this file")) }
+                }
+            } else {
+                Text(nativeText(language, "\u4e3a\u907f\u514d\u610f\u5916\u5220\u9664\u6216\u91cd\u547d\u540d\uff0c\u8be5\u7c7b\u53d8\u66f4\u6682\u4e0d\u652f\u6301\u81ea\u52a8\u6062\u590d\u3002", "Automatic restore is disabled for added or renamed paths to avoid accidental deletion."), Modifier.padding(horizontal = 13.dp, vertical = 6.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            ReasoningCapsuleExpand(expanded && diff.isNotBlank()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SelectionContainer { GitDiffText(diff, Modifier.fillMaxWidth().padding(13.dp)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkCheckpointsView(
+    checkpoints: List<NativeConversationCheckpoint>,
+    actionEnabled: Boolean,
+    onRestore: (NativeConversationCheckpoint) -> Unit,
+    onEdit: (NativeConversationCheckpoint) -> Unit,
+    onContinue: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    if (checkpoints.isEmpty()) {
+        WorkPanelEmpty(
+            nativeText(language, "\u8fd8\u6ca1\u6709\u68c0\u67e5\u70b9", "No checkpoints yet"),
+            nativeText(language, "\u6bcf\u6b21\u53d1\u9001\u4efb\u52a1\u90fd\u4f1a\u81ea\u52a8\u5f62\u6210\u4e00\u4e2a\u53ef\u56de\u6eda\u3001\u4fee\u6539\u6216\u91cd\u65b0\u6267\u884c\u7684\u68c0\u67e5\u70b9\u3002", "Each submitted task becomes a checkpoint that can be edited or rerun."),
+        )
+        return
+    }
+    val latest = checkpoints.last()
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        if (latest.status in setOf("failed", "interrupted")) item(key = "continue-task") {
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Text(nativeText(language, "\u4efb\u52a1\u672a\u5b8c\u6210", "Task incomplete"), fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onErrorContainer)
+                    Text(
+                        nativeText(language, "\u53ef\u4ee5\u4fdd\u7559\u5f53\u524d\u5de5\u4f5c\u533a\u548c\u4e0a\u4e0b\u6587\uff0c\u8ba9 Codex \u5148\u68c0\u67e5\u73b0\u72b6\u518d\u7ee7\u7eed\u3002", "Keep the current workspace and context, then let Codex inspect the state and continue."),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.82f),
+                    )
+                    Button(onClick = onContinue, enabled = actionEnabled, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(15.dp)) {
+                        Text(nativeText(language, "\u4ece\u4e2d\u65ad\u5904\u7ee7\u7eed", "Continue from interruption"))
+                    }
+                }
+            }
+        }
+        items(checkpoints.asReversed(), key = { it.messageId }) { checkpoint ->
+            val statusColor = when (checkpoint.status) {
+                "completed" -> Color(0xFF5E8B68)
+                "running" -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.error
+            }
+            val statusLabel = when (checkpoint.status) {
+                "completed" -> nativeText(language, "\u5df2\u5b8c\u6210", "Completed")
+                "running" -> nativeText(language, "\u6267\u884c\u4e2d", "Running")
+                "failed" -> nativeText(language, "\u5931\u8d25", "Failed")
+                else -> nativeText(language, "\u5df2\u4e2d\u65ad", "Interrupted")
+            }
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(shape = CircleShape, color = statusColor.copy(alpha = 0.15f)) {
+                            Text(checkpoint.turnNumber.toString(), Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = statusColor)
+                        }
+                        Spacer(Modifier.width(9.dp))
+                        Text(nativeText(language, "\u68c0\u67e5\u70b9 ${checkpoint.turnNumber}", "Checkpoint ${checkpoint.turnNumber}"), Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                        Text(statusLabel, style = MaterialTheme.typography.labelSmall, color = statusColor, fontWeight = FontWeight.Medium)
+                    }
+                    Text(checkpoint.prompt, maxLines = 5, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                    if (checkpoint.responsePreview.isNotBlank()) {
+                        Text(checkpoint.responsePreview, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (checkpoint.status != "running") {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(enabled = actionEnabled, onClick = { onEdit(checkpoint) }) { Text(nativeText(language, "\u4fee\u6539\u5e76\u6267\u884c", "Edit and rerun")) }
+                            TextButton(enabled = actionEnabled, onClick = { onRestore(checkpoint) }) { Text(nativeText(language, "\u4ece\u6b64\u5904\u91cd\u65b0\u6267\u884c", "Rerun from here")) }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+}
+
+private fun parseGitEntries(raw: String): List<JSONObject> = runCatching {
+    val array = JSONObject(raw).optJSONArray("entries") ?: JSONArray()
+    buildList { for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add) }
+}.getOrDefault(emptyList())
+
+private fun mergeChangedFiles(modelFiles: List<ChangedFileEntry>, gitEntries: List<JSONObject>): List<ChangedFileEntry> {
+    val result = linkedMapOf<String, ChangedFileEntry>()
+    modelFiles.forEach { result[it.path] = it }
+    gitEntries.forEach { entry ->
+        val path = entry.optString("path")
+        if (path.isNotBlank()) result[path] = ChangedFileEntry(path, entry.optString("operation", "edit"))
+    }
+    return result.values.toList()
+}
+
+@Composable
+private fun WorkChangesView(
+    state: NativeChatState,
+    items: List<JSONObject>,
+    files: List<ChangedFileEntry>,
+    gitEntries: List<JSONObject>,
+    onGitAction: (String, String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val clipboard = LocalClipboardManager.current
+    if (files.isEmpty()) {
+        if (state.gitBusy) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            return
+        }
+        WorkPanelEmpty(
+            nativeText(language, "\u6682\u65e0\u6587\u4ef6\u53d8\u66f4", "No file changes"),
+            nativeText(language, "Codex \u4fee\u6539\u6587\u4ef6\u540e\uff0c\u53d8\u66f4\u6458\u8981\u548c diff \u4f1a\u6c47\u603b\u5728\u8fd9\u91cc\u3002", "File summaries and diffs will appear here after Codex edits the workspace."),
+        )
+        return
+    }
+    val added = files.count { it.operation == "add" }
+    val deleted = files.count { it.operation == "delete" }
+    val edited = files.size - added - deleted
+    val staged = gitEntries.count { it.optBoolean("staged") }
+    val unstaged = gitEntries.count { it.optBoolean("unstaged") }
+    val summary = buildString {
+        append(nativeText(language, "\u53d8\u66f4 ${files.size} \u4e2a\u6587\u4ef6", "${files.size} changed files"))
+        append(" · +$added ~${edited.coerceAtLeast(0)} -$deleted")
+        files.forEach { append("\n").append(it.operation).append(" ").append(it.path) }
+    }
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        item(key = "changes-summary") {
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                Row(Modifier.padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(HugeIcons.Files02, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(9.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(nativeText(language, "\u6587\u4ef6\u5ba1\u67e5", "File review"), fontWeight = FontWeight.SemiBold)
+                        Text("+$added  ~$edited  -$deleted · ${nativeText(language, "\u5df2\u6682\u5b58", "staged")} $staged · ${nativeText(language, "\u672a\u6682\u5b58", "unstaged")} $unstaged", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (state.gitBusy) CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp)
+                    else IconButton(onClick = { onGitAction("refresh", "") }) { Icon(HugeIcons.Refresh03, nativeText(language, "\u5237\u65b0", "Refresh"), Modifier.size(18.dp)) }
+                    IconButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(summary)) }) {
+                        Icon(HugeIcons.Copy01, nativeText(language, "\u590d\u5236\u6458\u8981", "Copy summary"), Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+        if (state.gitNotice.isNotBlank()) item(key = "changes-git-notice") {
+            Text(state.gitNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 4.dp))
+        }
+        if (state.gitError.isNotBlank()) item(key = "changes-git-error") {
+            Text(state.gitError.take(4_000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 4.dp))
+        }
+        items(files, key = { it.path }) { file ->
+            val matching = remember(file.path, items.map { it.toString() }) {
+                items.mapNotNull { item ->
+                    val detail = item.optString("changes").ifBlank { item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) }
+                    detail.takeIf { it.isNotBlank() && (it.contains(file.path) || items.size == 1) }
+                }.distinct().joinToString("\n\n").take(80_000)
+            }
+            val gitEntry = gitEntries.firstOrNull { it.optString("path") == file.path }
+            WorkChangeFileCard(state, file, gitEntry, matching, onGitAction)
+        }
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun WorkChangeFileCard(
+    state: NativeChatState,
+    file: ChangedFileEntry,
+    gitEntry: JSONObject?,
+    modelDetail: String,
+    onGitAction: (String, String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val clipboard = LocalClipboardManager.current
+    var expanded by remember(file.path) { mutableStateOf(false) }
+    val gitDiff = state.gitDiffs[file.path]
+    val diffPayload = remember(gitDiff) { gitDiff?.let { runCatching { JSONObject(it) }.getOrNull() } }
+    val stagedDiff = diffPayload?.optString("staged").orEmpty()
+    val unstagedDiff = diffPayload?.optString("unstaged").orEmpty()
+    val additions = diffPayload?.optInt("additions") ?: 0
+    val deletions = diffPayload?.optInt("deletions") ?: 0
+    val detail = remember(stagedDiff, unstagedDiff, modelDetail) {
+        buildString {
+            if (stagedDiff.isNotBlank()) append("## ").append(nativeText(language, "\u5df2\u6682\u5b58", "Staged")).append("\n").append(stagedDiff.trim())
+            if (unstagedDiff.isNotBlank()) {
+                if (isNotEmpty()) append("\n\n")
+                append("## ").append(nativeText(language, "\u672a\u6682\u5b58", "Unstaged")).append("\n").append(unstagedDiff.trim())
+            }
+            if (isEmpty()) append(modelDetail)
+        }.take(240_000)
+    }
+    LaunchedEffect(expanded, file.path, gitEntry, gitDiff) {
+        if (expanded && gitEntry != null && gitDiff == null && file.path !in state.gitDiffLoading) onGitAction("diff", file.path)
+    }
+    val operation = when (file.operation) {
+        "add" -> nativeText(language, "\u65b0\u5efa", "Added")
+        "delete" -> nativeText(language, "\u5220\u9664", "Deleted")
+        else -> nativeText(language, "\u4fee\u6539", "Modified")
+    }
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(start = 13.dp, end = 5.dp, top = 10.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(HugeIcons.Files02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(file.path.substringAfterLast('/').substringAfterLast('\\'), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                    Text(
+                        buildString {
+                            append(operation).append(" · ").append(file.path)
+                            if (additions > 0 || deletions > 0) append(" · +").append(additions).append(" -").append(deletions)
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (file.path in state.gitDiffLoading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                if (detail.isNotBlank()) IconButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(detail)) }) {
+                    Icon(HugeIcons.Copy01, nativeText(language, "\u590d\u5236 diff", "Copy diff"), Modifier.size(17.dp))
+                }
+                Icon(HugeIcons.ArrowDown01, null, Modifier.size(17.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f })
+                Spacer(Modifier.width(8.dp))
+            }
+            if (gitEntry != null) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp), horizontalArrangement = Arrangement.End) {
+                    if (gitEntry.optBoolean("unstaged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("stage", file.path) }) {
+                        Text(nativeText(language, "\u6682\u5b58", "Stage"))
+                    }
+                    if (gitEntry.optBoolean("staged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("unstage", file.path) }) {
+                        Text(nativeText(language, "\u53d6\u6d88\u6682\u5b58", "Unstage"))
+                    }
+                }
+            }
+            ReasoningCapsuleExpand(expanded && detail.isNotBlank()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SelectionContainer {
+                    GitDiffText(detail, Modifier.fillMaxWidth().padding(13.dp))
+                }
+            }
+            if (expanded && file.path in state.gitDiffLoading && detail.isBlank()) {
+                Box(Modifier.fillMaxWidth().padding(18.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp) }
+            }
+            if (expanded && gitDiff != null && detail.isBlank() && diffPayload?.optString("error").orEmpty().isBlank()) {
+                Text(
+                    nativeText(language, "\u8be5\u6587\u4ef6\u6ca1\u6709\u53ef\u663e\u793a\u7684\u6587\u672c diff\uff0c\u53ef\u80fd\u662f\u4e8c\u8fdb\u5236\u6587\u4ef6\u3002", "No textual diff is available; this may be a binary file."),
+                    Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            diffPayload?.optString("error")?.takeIf { it.isNotBlank() }?.let { error ->
+                Text(error, Modifier.padding(horizontal = 13.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GitDiffText(text: String, modifier: Modifier = Modifier) {
+    val addition = Color(0xFF3F7D4C)
+    val deletion = MaterialTheme.colorScheme.error
+    val header = MaterialTheme.colorScheme.primary
+    val annotated = remember(text, addition, deletion, header) {
+        androidx.compose.ui.text.buildAnnotatedString {
+            text.lineSequence().forEach { line ->
+                val color = when {
+                    line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff --git") || line.startsWith("## ") -> header
+                    line.startsWith("+") -> addition
+                    line.startsWith("-") -> deletion
+                    else -> Color.Unspecified
+                }
+                withStyle(androidx.compose.ui.text.SpanStyle(color = color)) { append(line) }
+                append('\n')
+            }
+        }
+    }
+    Text(annotated, modifier, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, lineHeight = 18.sp)
+}
+
+@Composable
+private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) -> Unit) {
+    val language = LocalNativeLanguage.current
+    val snapshot = remember(state.gitSnapshot) { runCatching { JSONObject(state.gitSnapshot) }.getOrNull() }
+    val entries = remember(state.gitSnapshot) {
+        val array = snapshot?.optJSONArray("entries")
+        if (array == null) emptyList() else buildList { for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add) }
+    }
+    var commitMessage by remember(state.currentThreadId, state.projectPath) { mutableStateOf("") }
+    val stagedCount = entries.count { it.optBoolean("staged") }
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        item(key = "git-header") {
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                Row(Modifier.padding(start = 14.dp, end = 5.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(9.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(snapshot?.optString("branch").orEmpty().ifBlank { nativeText(language, "Git \u5de5\u4f5c\u533a", "Git workspace") }, fontWeight = FontWeight.SemiBold)
+                        Text(state.projectPath.ifBlank { nativeText(language, "\u672a\u7ed1\u5b9a\u9879\u76ee", "No project selected") }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        val ahead = snapshot?.optInt("ahead") ?: 0
+                        val behind = snapshot?.optInt("behind") ?: 0
+                        if (ahead > 0 || behind > 0) Text("↑$ahead  ↓$behind", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                    if (state.gitBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else IconButton(onClick = { onGitAction("refresh", "") }) { Icon(HugeIcons.Refresh03, nativeText(language, "\u5237\u65b0", "Refresh"), Modifier.size(19.dp)) }
+                }
+            }
+        }
+        if (state.gitError.isNotBlank()) item(key = "git-action-error") {
+            Text(state.gitError.take(4_000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 4.dp))
+        }
+        if (state.gitNotice.isNotBlank()) item(key = "git-action-notice") {
+            Text(state.gitNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 4.dp))
+        }
+        if (snapshot?.optBoolean("available", true) == false) item(key = "git-unavailable") {
+            WorkPanelInlineEmpty(snapshot.optString("error", nativeText(language, "Git \u4e0d\u53ef\u7528", "Git unavailable")))
+        } else if (!state.gitBusy && entries.isEmpty()) item(key = "git-clean") {
+            WorkPanelInlineEmpty(nativeText(language, "\u5de5\u4f5c\u533a\u5e72\u51c0\uff0c\u6ca1\u6709\u5f85\u63d0\u4ea4\u53d8\u66f4", "Working tree clean"))
+        } else {
+            items(entries, key = { it.optString("originalPath", it.optString("path")) }) { entry ->
+                val path = entry.optString("path")
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(HugeIcons.Files02, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(9.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(path.substringAfterLast('/').substringAfterLast('\\'), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                            Text("${entry.optString("index")}${entry.optString("worktree")} · $path", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (entry.optBoolean("unstaged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("stage", path) }) { Text(nativeText(language, "\u6682\u5b58", "Stage")) }
+                        if (entry.optBoolean("staged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("unstage", path) }) { Text(nativeText(language, "\u53d6\u6d88\u6682\u5b58", "Unstage")) }
+                    }
+                }
+            }
+            item(key = "git-commit") {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        OutlinedTextField(
+                            value = commitMessage,
+                            onValueChange = { commitMessage = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text(nativeText(language, "\u63d0\u4ea4\u8bf4\u660e", "Commit message")) },
+                            minLines = 2,
+                            maxLines = 4,
+                        )
+                        Button(
+                            onClick = { onGitAction("commit", commitMessage); commitMessage = "" },
+                            enabled = stagedCount > 0 && commitMessage.isNotBlank() && !state.gitBusy,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                        ) { Text(nativeText(language, "\u63d0\u4ea4 $stagedCount \u4e2a\u5df2\u6682\u5b58\u6587\u4ef6", "Commit $stagedCount staged files")) }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun WorkPanelInlineEmpty(text: String) {
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Text(text, Modifier.padding(16.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -4008,7 +5049,11 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
                 }
             }
         }
-        if (explanation.isNotBlank()) item(key = "explanation") { Text(explanation, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 21.sp, modifier = Modifier.padding(bottom = 4.dp)) }
+        if (explanation.isNotBlank()) item(key = "explanation") {
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Box(Modifier.padding(14.dp)) { DeferredHistoricalRichText(explanation) }
+            }
+        }
         itemsIndexed(plan, key = { index, item -> item.optString("step").ifBlank { index.toString() } }) { index, item ->
             val status = item.optString("status", "pending")
             val color = when (status) {
@@ -4025,7 +5070,7 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
                     }
                     Spacer(Modifier.width(11.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(item.optString("step", item.optString("text", item.toString())), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
+                        DeferredHistoricalRichText(item.optString("step", item.optString("text", item.toString())))
                         Text(when (status) { "completed" -> nativeText(language, "\u5df2\u5b8c\u6210", "Completed"); "in_progress", "inProgress" -> nativeText(language, "\u8fdb\u884c\u4e2d", "In progress"); else -> nativeText(language, "\u5f85\u5904\u7406", "Pending") }, style = MaterialTheme.typography.labelSmall, color = color, modifier = Modifier.padding(top = 4.dp))
                     }
                 }
@@ -5835,7 +6880,9 @@ private fun RikkaDrawerV2(
         var result = 31 * value + conversation.threadId.hashCode()
         result = 31 * result + conversation.title.hashCode()
         result = 31 * result + conversation.projectPath.hashCode()
+        result = 31 * result + conversation.state.hashCode()
         result = 31 * result + conversation.favorite.hashCode()
+        result = 31 * result + conversation.attention.hashCode()
         result
     }
     val conversationSnapshot = remember(conversationRevision) { conversations.toList() }
@@ -6058,6 +7105,41 @@ private fun DrawerEmptyState(text: String) {
 }
 
 @Composable
+private fun ConversationAttentionBadge(attention: String) {
+    val language = LocalNativeLanguage.current
+    val label = when (attention) {
+        "answer" -> nativeText(language, "\u5f85\u7b54", "Answer")
+        "approval" -> nativeText(language, "\u5f85\u5ba1\u6279", "Approve")
+        "resume" -> nativeText(language, "\u5f85\u7ee7\u7eed", "Resume")
+        else -> nativeText(language, "\u5f85\u6267\u884c", "Plan")
+    }
+    val container = when (attention) {
+        "answer" -> MaterialTheme.colorScheme.tertiaryContainer
+        "approval" -> MaterialTheme.colorScheme.errorContainer
+        "resume" -> MaterialTheme.colorScheme.errorContainer
+        else -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    val content = when (attention) {
+        "answer" -> MaterialTheme.colorScheme.onTertiaryContainer
+        "approval" -> MaterialTheme.colorScheme.onErrorContainer
+        "resume" -> MaterialTheme.colorScheme.onErrorContainer
+        else -> MaterialTheme.colorScheme.onSecondaryContainer
+    }
+    Surface(
+        shape = CircleShape,
+        color = container,
+        contentColor = content,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
 private fun DrawerProjectRow(
     project: NativeDrawerProject,
     taskCount: Int,
@@ -6121,6 +7203,10 @@ private fun DrawerConversationTaskRow(
                 else Icon(HugeIcons.Sparkles, null, Modifier.size(18.dp), tint = if (conversation.state == CodexTaskStore.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(10.dp))
                 Text(conversation.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                if (conversation.attention.isNotBlank()) {
+                    Spacer(Modifier.width(7.dp))
+                    ConversationAttentionBadge(conversation.attention)
+                }
                 if (conversation.favorite) Icon(HugeIcons.InLove, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.76f))
             }
         }
@@ -6157,6 +7243,7 @@ private fun RikkaDrawer(
         conversationRevision = 31 * conversationRevision + conversation.projectPath.hashCode()
         conversationRevision = 31 * conversationRevision + conversation.state.hashCode()
         conversationRevision = 31 * conversationRevision + conversation.favorite.hashCode()
+        conversationRevision = 31 * conversationRevision + conversation.attention.hashCode()
     }
     val conversationSnapshot = remember(conversationRevision) { conversations.toList() }
     val projectPaths = remember(conversationRevision) {
@@ -6269,6 +7356,10 @@ private fun RikkaDrawer(
                                     overflow = TextOverflow.Ellipsis,
                                     fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
                                 )
+                                if (conversation.attention.isNotBlank()) {
+                                    Spacer(Modifier.width(7.dp))
+                                    ConversationAttentionBadge(conversation.attention)
+                                }
                                 if (conversation.favorite) {
                                     Spacer(Modifier.width(8.dp))
                                     Icon(HugeIcons.InLove, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.76f))
