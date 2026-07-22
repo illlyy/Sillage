@@ -276,7 +276,7 @@ public final class TermuxConstants {
      */
 
     /** Termux app name */
-    public static final String TERMUX_APP_NAME = "Codex"; // Default: "Termux"
+    public static final String TERMUX_APP_NAME = "Sillage"; // Default: "Termux"
     /** Termux package name */
     public static final String TERMUX_PACKAGE_NAME = "com.ilyop.codex"; // Default: "com.termux"
     /** Termux Github repo name */

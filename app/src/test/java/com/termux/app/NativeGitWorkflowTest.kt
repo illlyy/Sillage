@@ -37,6 +37,12 @@ class NativeGitWorkflowTest {
     }
 
     @Test
+    fun normalizesDetachedHeadHeading() {
+        val result = JSONObject(NativeGitWorkflow.parse("/repo", "## HEAD (no branch)"))
+        assertEquals("", result.getString("branch"))
+    }
+
+    @Test
     fun countsChangedLinesAcrossStagedAndUnstagedDiffs() {
         val result = JSONObject(NativeGitWorkflow.diffSnapshot(
             "--- a/A.kt\n+++ b/A.kt\n@@ -1 +1,2 @@\n-old\n+new\n+next",

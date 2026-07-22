@@ -83,6 +83,13 @@ internal class FcodeInteractiveDrawerState internal constructor(initiallyOpen: B
 
     suspend fun close(initialVelocity: Float = 0f) = animateTo(0f, initialVelocity)
 
+    /** A shorter, still eased close used when handing the surface to another Activity. */
+    suspend fun closeForNavigation() = animateTo(
+        target = 0f,
+        initialVelocity = 0f,
+        stiffness = 860f,
+    )
+
     suspend fun settle(widthPx: Float, velocityPxPerSecond: Float) {
         if (widthPx <= 0f) return
         val normalizedVelocity = (velocityPxPerSecond / widthPx).coerceIn(-4f, 4f)
@@ -90,7 +97,11 @@ internal class FcodeInteractiveDrawerState internal constructor(initiallyOpen: B
         animateTo(target, normalizedVelocity)
     }
 
-    private suspend fun animateTo(target: Float, initialVelocity: Float) {
+    private suspend fun animateTo(
+        target: Float,
+        initialVelocity: Float,
+        stiffness: Float = 520f,
+    ) {
         val runningJob = currentCoroutineContext()[Job]
         if (animationJob !== runningJob) animationJob?.cancel()
         animationJob = runningJob
@@ -103,7 +114,7 @@ internal class FcodeInteractiveDrawerState internal constructor(initiallyOpen: B
                 initialVelocity = initialVelocity,
                 animationSpec = spring(
                     dampingRatio = 0.94f,
-                    stiffness = 520f,
+                    stiffness = stiffness,
                     visibilityThreshold = 0.001f,
                 ),
             ) { value, _ ->

@@ -2,6 +2,9 @@ package com.termux.app
 
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
@@ -19,8 +22,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -31,7 +41,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -48,6 +60,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -58,13 +72,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.io.File
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.rerere.hugeicons.HugeIcons
@@ -74,7 +91,10 @@ import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.hugeicons.stroke.Code
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Folder01
+import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.LanguageCircle
+import me.rerere.hugeicons.stroke.LookTop
+import me.rerere.hugeicons.stroke.MagicWand01
 import me.rerere.hugeicons.stroke.Moon02
 import me.rerere.hugeicons.stroke.Refresh03
 import me.rerere.hugeicons.stroke.Settings03
@@ -86,6 +106,7 @@ private enum class SettingsPage {
     ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND,
     MCP, MCP_EDITOR, SKILLS,
     OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY,
+    DEVELOPER,
 }
 
 private val SettingsPage.navigationDepth: Int
@@ -93,11 +114,52 @@ private val SettingsPage.navigationDepth: Int
         SettingsPage.ROOT -> 0
         SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
-        SettingsPage.WEB_UI, SettingsPage.PROXY -> 1
+        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER -> 1
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE,
         SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR -> 2
         SettingsPage.CHAT_BACKGROUND -> 3
     }
+
+private val SettingsPage.previousPage: SettingsPage?
+    get() = when (this) {
+        SettingsPage.ROOT -> null
+        SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
+        SettingsPage.MCP_EDITOR -> SettingsPage.MCP
+        SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
+        SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
+        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
+        SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
+        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER -> SettingsPage.ROOT
+    }
+
+/** A short-lived, in-memory snapshot used only to bridge the settings Activity back to chat. */
+internal object NativeSettingsBackPreview {
+    @Volatile
+    private var bitmap: Bitmap? = null
+    var revision by mutableIntStateOf(0)
+        private set
+
+    fun capture(window: android.view.Window) {
+        val decor = window.decorView
+        val sourceWidth = decor.width
+        val sourceHeight = decor.height
+        if (sourceWidth <= 0 || sourceHeight <= 0) return
+        runCatching {
+            val previewWidth = (sourceWidth * 0.75f).roundToInt().coerceAtLeast(1)
+            val previewHeight = (sourceHeight * previewWidth.toFloat() / sourceWidth).roundToInt().coerceAtLeast(1)
+            val preview = Bitmap.createBitmap(previewWidth, previewHeight, Bitmap.Config.ARGB_8888)
+            Canvas(preview).apply {
+                val scale = previewWidth.toFloat() / sourceWidth.toFloat()
+                scale(scale, scale)
+                decor.draw(this)
+            }
+            bitmap = preview
+            revision++
+        }
+    }
+
+    fun current(): Bitmap? = bitmap
+}
 
 private data class SettingsEnvironmentSnapshot(
     val loaded: Boolean = false,
@@ -127,19 +189,36 @@ class NativeSettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 34) {
-            overrideActivityTransition(OVERRIDE_TRANSITION_OPEN, R.anim.codex_settings_enter, R.anim.codex_chat_hold)
-            overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, R.anim.codex_chat_reenter, R.anim.codex_settings_exit)
+            // Keep Activity motion in the same choreography as the Compose gesture below. The
+            // root page owns its own live chat preview, so a second platform close animation
+            // would create a visible handoff seam.
+            overrideActivityTransition(
+                OVERRIDE_TRANSITION_OPEN,
+                R.anim.codex_settings_enter,
+                R.anim.codex_chat_hold,
+            )
+            // A short window fade (instead of an instant removal) keeps the chat preview
+            // visible while the paused chat window underneath resumes and draws its first
+            // frame, closing the one-frame gap that flashed on finish().
+            overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, 0, R.anim.codex_settings_close_exit)
         }
         enableEdgeToEdge()
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
         val providerStore = CodexProviderStore(prefs)
         setContent {
             var page by remember { mutableStateOf(SettingsPage.ROOT) }
+            var predictiveBackSource by remember { mutableStateOf<SettingsPage?>(null) }
+            var predictiveBackPage by remember { mutableStateOf<SettingsPage?>(null) }
+            var predictiveBackToChat by remember { mutableStateOf(false) }
+            var predictiveBackHandoff by remember { mutableStateOf(false) }
+            var suppressNextPageTransition by remember { mutableStateOf(false) }
             var editingProfileId by remember { mutableStateOf<String?>(null) }
             var editingMcpKey by remember { mutableStateOf<String?>(null) }
             var providerRevision by remember { mutableIntStateOf(0) }
             var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
             var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
+            var interfaceStyle by remember { mutableStateOf(FcodeInterfaceStyle.from(prefs.getString(FcodeAppearancePreferences.INTERFACE_STYLE, FcodeInterfaceStyle.MATERIAL.value)).value) }
             var chatBackground by remember { mutableStateOf(FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value) }
             var chatBackgroundImage by remember { mutableStateOf(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()) }
             var chatBackgroundDim by remember { mutableFloatStateOf(prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)) }
@@ -151,6 +230,8 @@ class NativeSettingsActivity : ComponentActivity() {
             var showResponseStats by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_RESPONSE_STATS, true)) }
             var showModelSubtitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_MODEL_SUBTITLE, true)) }
             var showReasoningTitles by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING_TITLES, true)) }
+            var hideStatusBar by remember { mutableStateOf(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)) }
+            var compactComposerOnScroll by remember { mutableStateOf(prefs.getBoolean(FcodeAppearancePreferences.COMPACT_COMPOSER_ON_SCROLL, true)) }
             var dialog by remember { mutableStateOf<String?>(null) }
             var missingCliFeature by remember { mutableStateOf<CodexDependentFeature?>(null) }
             var codexCliInstalled by remember { mutableStateOf(isCodexCliInstalled()) }
@@ -168,20 +249,13 @@ class NativeSettingsActivity : ComponentActivity() {
                 }
             }
             val navigateBack = {
-                page = when (page) {
-                    SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
-                    SettingsPage.MCP_EDITOR -> SettingsPage.MCP
-                    SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
-                    SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
-                    SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
-                    SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
-                    SettingsPage.WEB_UI, SettingsPage.PROXY -> SettingsPage.ROOT
-                    SettingsPage.ROOT -> { finish(); SettingsPage.ROOT }
-                }
+                val previous = page.previousPage
+                if (previous == null) finish() else page = previous
             }
             FcodeChatTheme(
                 theme, lang, animations, reasoning, follow,
                 colorPalette = colorPalette,
+                interfaceStyle = interfaceStyle,
                 chatBackground = chatBackground,
                 chatBackgroundImage = chatBackgroundImage,
                 chatBackgroundDim = chatBackgroundDim,
@@ -191,82 +265,112 @@ class NativeSettingsActivity : ComponentActivity() {
             ) {
                 val settingsBackplate = MaterialTheme.colorScheme.surfaceContainer
                 val settingsPageShape = remember { RoundedCornerShape(28.dp) }
-                SideEffect {
-                    // The Activity previously inherited Theme.Termux's black window. Predictive
-                    // back exposes that window behind the scaled page, producing black corners.
-                    window.setBackgroundDrawable(ColorDrawable(settingsBackplate.toArgb()))
-                }
                 val predictiveBackProgress = remember { androidx.compose.animation.core.Animatable(0f) }
+                val predictiveBackHandoffProgress = remember { androidx.compose.animation.core.Animatable(1f) }
+                var predictiveBackHandoffStartProgress by remember { mutableFloatStateOf(1f) }
                 var predictiveBackFromLeft by remember { mutableStateOf(true) }
-                val latestNavigateBack by rememberUpdatedState(navigateBack)
-                PredictiveBackHandler(enabled = true) { progress ->
+                val latestPage by rememberUpdatedState(page)
+                val previewRevision = NativeSettingsBackPreview.revision
+                // Keep child-page navigation interactive, but let the system own back from the
+                // root page. On Android 14+ that is what reveals the chat Activity underneath
+                // during a predictive back gesture instead of showing only this window's scale.
+                PredictiveBackHandler(enabled = page != SettingsPage.ROOT || (previewRevision > 0 && NativeSettingsBackPreview.current() != null)) { progress ->
+                    val source = latestPage
+                    val destination = source.previousPage ?: SettingsPage.ROOT
+                    val returningToChat = destination == SettingsPage.ROOT && source == SettingsPage.ROOT
+                    predictiveBackProgress.snapTo(0f)
+                    predictiveBackHandoff = false
+                    predictiveBackHandoffProgress.snapTo(1f)
+                    predictiveBackSource = source
+                    predictiveBackToChat = returningToChat
+                    predictiveBackPage = destination.takeUnless { returningToChat }
                     try {
                         progress.collect { event ->
                             predictiveBackFromLeft = event.swipeEdge == BackEventCompat.EDGE_LEFT
                             predictiveBackProgress.snapTo(event.progress)
                         }
-                        latestNavigateBack()
-                        // Preserve the presentation value after commit, then settle the
-                        // destination page. A snap here made the gesture disappear on release.
+                        // Continue from the finger's presentation value. A very short finish
+                        // closes the small gap left by gestures released just before 100%.
                         withContext(NonCancellable) {
-                            predictiveBackProgress.animateTo(
-                                targetValue = 0f,
-                                animationSpec = spring(dampingRatio = 0.9f, stiffness = 410f),
-                            )
+                            // Sweep the page off-screen immediately from wherever the finger
+                            // released. The destination settles to its resting state in
+                            // parallel. The old "animate progress to 100% first, then hand
+                            // off" ordering caused a visible ~240ms stall before the slide
+                            // began.
+                            predictiveBackHandoffStartProgress = predictiveBackProgress.value.coerceIn(0.05f, 1f)
+                            predictiveBackHandoff = true
+                            predictiveBackSource = null
+                            predictiveBackHandoffProgress.snapTo(0f)
+                            coroutineScope {
+                                launch {
+                                    predictiveBackProgress.animateTo(
+                                        targetValue = 1f,
+                                        animationSpec = tween(300, easing = FastOutSlowInEasing),
+                                    )
+                                }
+                                launch {
+                                    predictiveBackHandoffProgress.animateTo(
+                                        targetValue = 1f,
+                                        animationSpec = tween(
+                                            if (returningToChat) 320 else 300,
+                                            easing = FastOutSlowInEasing,
+                                        ),
+                                    )
+                                }
+                            }
+                            if (returningToChat) {
+                                // The chat Activity is paused underneath us. Finish only after
+                                // the captured chat surface has fully replaced settings, avoiding
+                                // a second platform close animation or a sudden disappearance.
+                                finish()
+                            } else {
+                                // The destination has already been painted underneath for the
+                                // entire handoff. Commit the route after the slide-out so the
+                                // AnimatedContent swap itself is visually invisible. The
+                                // destination layer is intentionally kept for one extra frame
+                                // (removed by the LaunchedEffect above); dropping it in this
+                                // same frame as the route swap exposed the Activity backplate
+                                // for a single frame on slower GPUs.
+                                suppressNextPageTransition = true
+                                page = destination
+                                predictiveBackToChat = false
+                                predictiveBackHandoff = false
+                                predictiveBackProgress.snapTo(0f)
+                                predictiveBackHandoffProgress.snapTo(1f)
+                            }
                         }
                     } catch (_: CancellationException) {
                         // A cancelled gesture settles from its current presentation value.
                         withContext(NonCancellable) {
                             predictiveBackProgress.animateTo(
                                 targetValue = 0f,
-                                animationSpec = spring(dampingRatio = 0.88f, stiffness = 430f),
+                                animationSpec = spring(dampingRatio = 1f, stiffness = 360f),
                             )
+                            predictiveBackSource = null
+                            predictiveBackPage = null
+                            predictiveBackToChat = false
+                            predictiveBackHandoff = false
+                            predictiveBackHandoffProgress.snapTo(1f)
                         }
                     }
                 }
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
-                    AnimatedContent(
-                        targetState = page,
-                        modifier = Modifier.fillMaxSize().background(settingsBackplate).graphicsLayer {
-                            val progress = predictiveBackProgress.value
-                            val direction = if (predictiveBackFromLeft) 1f else -1f
-                            translationX = size.width * 0.075f * progress * direction
-                            translationY = size.height * 0.012f * progress
-                            scaleX = 1f - 0.055f * progress
-                            scaleY = 1f - 0.055f * progress
-                            alpha = 1f - 0.03f * progress
-                            transformOrigin = TransformOrigin(if (predictiveBackFromLeft) 0.35f else 0.65f, 0.5f)
-                            // Clip only while the page separates from the screen edges. At rest the
-                            // page remains pixel-identical and edge-to-edge.
-                            shape = settingsPageShape
-                            clip = progress > 0.001f
-                            shadowElevation = 18.dp.toPx() * progress
-                            ambientShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.18f)
-                            spotShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.22f)
-                        },
-                        transitionSpec = {
-                            val forward = targetState.navigationDepth > initialState.navigationDepth
-                            val enterOffset: (Int) -> Int = { width -> if (forward) width / 9 else -width / 12 }
-                            val exitOffset: (Int) -> Int = { width -> if (forward) -width / 14 else width / 10 }
-                            (fadeIn(tween(175, easing = FastOutSlowInEasing)) +
-                                slideInHorizontally(
-                                    animationSpec = spring(dampingRatio = 0.9f, stiffness = 440f),
-                                    initialOffsetX = enterOffset,
-                                ) +
-                                scaleIn(
-                                    initialScale = 0.988f,
-                                    animationSpec = spring(dampingRatio = 0.92f, stiffness = 470f),
-                                )).togetherWith(
-                                fadeOut(tween(115)) +
-                                    slideOutHorizontally(
-                                        animationSpec = spring(dampingRatio = 0.94f, stiffness = 520f),
-                                        targetOffsetX = exitOffset,
-                                    ) +
-                                    scaleOut(targetScale = 0.992f, animationSpec = tween(150)),
-                            )
-                        },
-                        label = "settingsPage",
-                    ) { target ->
+                LaunchedEffect(page) {
+                    if (suppressNextPageTransition) {
+                        // Bridge the AnimatedContent route swap. Its enter/exit animations tick
+                        // one frame AFTER the state change, so on the swap frame the outgoing
+                        // page would otherwise be painted once at its resting position (a
+                        // visible flash). Keep this layer's sibling hidden (alpha 0 above) and
+                        // the already-painted destination visible for two frames, until the new
+                        // target is guaranteed fully entered.
+                        withFrameNanos { }
+                        withFrameNanos { }
+                        suppressNextPageTransition = false
+                        if (predictiveBackPage == page && !predictiveBackToChat) {
+                            predictiveBackPage = null
+                        }
+                    }
+                }
+                val settingsPageContent: @Composable (SettingsPage) -> Unit = { target ->
                     when (target) {
                         SettingsPage.ROOT -> SettingsRootPage(
                             lang, providerStore.active(),
@@ -284,6 +388,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onSkills = { page = SettingsPage.SKILLS },
                             onLanguage = { dialog = "language" },
                             onTypography = { dialog = "typography" },
+                            onDeveloper = { page = SettingsPage.DEVELOPER },
                             prefs = prefs,
                             onAbout = { dialog = "about" },
                         )
@@ -291,6 +396,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             lang = lang,
                             theme = theme,
                             colorPalette = colorPalette,
+                            interfaceStyle = interfaceStyle,
                             onBack = navigateBack,
                             onTheme = { page = SettingsPage.THEME },
                             onChat = { page = SettingsPage.CHAT_APPEARANCE },
@@ -299,6 +405,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             lang = lang,
                             colorMode = theme,
                             paletteValue = colorPalette,
+                            interfaceStyleValue = interfaceStyle,
                             backgroundValue = chatBackground,
                             onBack = navigateBack,
                             onColorModeChange = { value ->
@@ -308,6 +415,10 @@ class NativeSettingsActivity : ComponentActivity() {
                             onPaletteChange = { value ->
                                 colorPalette = FcodeColorPalette.from(value).value
                                 prefs.edit().putString(FcodeAppearancePreferences.COLOR_PALETTE, colorPalette).apply()
+                            },
+                            onInterfaceStyleChange = { value ->
+                                interfaceStyle = FcodeInterfaceStyle.from(value).value
+                                prefs.edit().putString(FcodeAppearancePreferences.INTERFACE_STYLE, interfaceStyle).apply()
                             },
                             onOpenChatBackground = { page = SettingsPage.CHAT_BACKGROUND },
                         )
@@ -320,6 +431,8 @@ class NativeSettingsActivity : ComponentActivity() {
                             showResponseStats = showResponseStats,
                             showModelSubtitle = showModelSubtitle,
                             showReasoningTitles = showReasoningTitles,
+                            hideStatusBar = hideStatusBar,
+                            compactComposerOnScroll = compactComposerOnScroll,
                             onBack = navigateBack,
                             onAnimations = { animations = it; prefs.edit().putBoolean(KEY_STREAM_ANIMATIONS, it).apply() },
                             onFixedStreamingViewport = { fixedStreamingViewport = it; prefs.edit().putBoolean(KEY_STREAM_FIXED_VIEWPORT, it).apply() },
@@ -328,6 +441,15 @@ class NativeSettingsActivity : ComponentActivity() {
                             onShowResponseStats = { showResponseStats = it; prefs.edit().putBoolean(KEY_SHOW_RESPONSE_STATS, it).apply() },
                             onShowModelSubtitle = { showModelSubtitle = it; prefs.edit().putBoolean(KEY_SHOW_MODEL_SUBTITLE, it).apply() },
                             onShowReasoningTitles = { showReasoningTitles = it; prefs.edit().putBoolean(KEY_SHOW_REASONING_TITLES, it).apply() },
+                            onHideStatusBar = {
+                                hideStatusBar = it
+                                prefs.edit().putBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, it).apply()
+                                applyNativeStatusBarVisibility(it)
+                            },
+                            onCompactComposerOnScroll = {
+                                compactComposerOnScroll = it
+                                prefs.edit().putBoolean(FcodeAppearancePreferences.COMPACT_COMPOSER_ON_SCROLL, it).apply()
+                            },
                         )
                         SettingsPage.CHAT_BACKGROUND -> ChatBackgroundSettingsPage(
                             lang = lang,
@@ -401,8 +523,145 @@ class NativeSettingsActivity : ComponentActivity() {
                             onOpenDashboard = { startActivity(Intent(this@NativeSettingsActivity, MihomoDashboardActivity::class.java)) },
                             onClearCache = { resetWebUiPreferences(lang) },
                         )
+                        SettingsPage.DEVELOPER -> DeveloperSettingsPage(lang, navigateBack)
                     }
                 }
+                val chatPreview = if (predictiveBackToChat) NativeSettingsBackPreview.current() else null
+                val backplateDrawable = remember(chatPreview, settingsBackplate) {
+                    chatPreview?.let { preview ->
+                        BitmapDrawable(resources, preview).apply {
+                            gravity = android.view.Gravity.FILL
+                        }
+                    } ?: ColorDrawable(settingsBackplate.toArgb())
+                }
+                // Use the same captured surface as the Activity fallback. If Android removes the
+                // window between the last Compose frame and the resumed chat Activity, the exposed
+                // pixel is still the expected destination instead of a colored flash.
+                LaunchedEffect(backplateDrawable) {
+                    window.setBackgroundDrawable(backplateDrawable)
+                }
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(if (chatPreview == null) MaterialTheme.colorScheme.surfaceContainerHighest else androidx.compose.ui.graphics.Color.Transparent),
+                ) {
+                    chatPreview?.let { preview ->
+                        Image(
+                            bitmap = preview.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                    val gestureActive = predictiveBackSource != null || predictiveBackHandoff
+                    predictiveBackPage?.let { destination ->
+                        // The destination is a real, independently composed page. The current
+                        // AnimatedContent stays alive above it, preserving scroll/input state while
+                        // its layer follows the user's finger.
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    // Rest at the settled state whenever the gesture is not
+                                    // live, so the layer never snaps back to its peek transform
+                                    // after the route commits.
+                                    val progress = if (gestureActive) predictiveBackProgress.value else 1f
+                                    val direction = if (predictiveBackFromLeft) 1f else -1f
+                                    val destinationScale = 0.982f + 0.018f * progress
+                                    translationX = -size.width * 0.025f * (1f - progress) * direction
+                                    scaleX = destinationScale
+                                    scaleY = destinationScale
+                                    alpha = 0.84f + 0.16f * progress
+                                }
+                                .background(settingsBackplate),
+                        ) {
+                            settingsPageContent(destination)
+                        }
+                    }
+                    AnimatedContent(
+                        targetState = page,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                val progress = if (gestureActive) predictiveBackProgress.value else 0f
+                                val direction = if (predictiveBackFromLeft) 1f else -1f
+                                if (predictiveBackHandoff) {
+                                    // Once the gesture commits, sweep the page off the left
+                                    // edge of the screen instead of cross-fading it away. The
+                                    // slide starts exactly where the finger left the page, so
+                                    // the motion stays continuous with no settle stall.
+                                    val handoff = predictiveBackHandoffProgress.value
+                                    val startP = predictiveBackHandoffStartProgress
+                                    val startX = size.width * 0.16f * startP * direction
+                                    val endX = -size.width * 1.1f
+                                    translationX = startX + (endX - startX) * handoff
+                                    translationY = size.height * 0.008f * startP * (1f - handoff)
+                                    val handoffScale = 1f - 0.045f * startP
+                                    scaleX = handoffScale
+                                    scaleY = handoffScale
+                                    alpha = 1f
+                                } else {
+                                    // Leave enough room for the destination to remain legible
+                                    // beside Android's own edge-back indicator, not merely a
+                                    // few pixels.
+                                    translationX = size.width * 0.16f * progress * direction
+                                    translationY = size.height * 0.008f * progress
+                                    scaleX = 1f - 0.045f * progress
+                                    scaleY = 1f - 0.045f * progress
+                                    alpha = 1f
+                                }
+                                // While the route swap is settling, keep this layer invisible;
+                                // the already-painted destination layer underneath shows through,
+                                // so the AnimatedContent swap can never flash the outgoing page.
+                                if (suppressNextPageTransition) alpha = 0f
+                                transformOrigin = TransformOrigin(if (predictiveBackFromLeft) 0.35f else 0.65f, 0.5f)
+                                // Corners and elevation appear only after the page separates
+                                // from the display edges, preserving the resting layout.
+                                shape = settingsPageShape
+                                clip = predictiveBackHandoff || progress > 0.001f
+                                shadowElevation = 8.dp.toPx() * (if (predictiveBackHandoff) 1f else progress)
+                                ambientShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.08f)
+                                spotShadowColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.1f)
+                            }
+                            .background(settingsBackplate),
+                        transitionSpec = {
+                            if (suppressNextPageTransition) {
+                                fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                            } else {
+                                val forward = targetState.navigationDepth > initialState.navigationDepth
+                                val goingBack = targetState.navigationDepth < initialState.navigationDepth
+                                val enterOffset: (Int) -> Int = { width -> if (forward) width * 2 / 5 else -width * 2 / 5 }
+                                val exitOffset: (Int) -> Int = { width -> if (forward) -width / 5 else width / 5 }
+                                // One shared emphasized curve drives every property so the two
+                                // pages settle as a single physical motion. The incoming page
+                                // starts partially opaque (never a ghost) and the outgoing page
+                                // only dims while it is still mostly covered.
+                                val motionEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+                                (fadeIn(tween(200, easing = FastOutSlowInEasing), initialAlpha = 0.4f) +
+                                    slideInHorizontally(
+                                        animationSpec = tween(340, easing = motionEasing),
+                                        initialOffsetX = enterOffset,
+                                    ) +
+                                    scaleIn(
+                                        initialScale = if (goingBack) 0.97f else 0.996f,
+                                        animationSpec = tween(340, easing = motionEasing),
+                                    )).togetherWith(
+                                    fadeOut(tween(260, easing = FastOutSlowInEasing), targetAlpha = 0.25f) +
+                                        slideOutHorizontally(
+                                            animationSpec = tween(340, easing = motionEasing),
+                                            targetOffsetX = exitOffset,
+                                        ) +
+                                        scaleOut(
+                                            targetScale = if (goingBack) 0.985f else 0.992f,
+                                            animationSpec = tween(340, easing = motionEasing),
+                                        ),
+                                )
+                            }
+                        },
+                        label = "settingsPage",
+                    ) { target ->
+                        settingsPageContent(target)
+                    }
                 }
                 when (dialog) {
                     "language" -> ChoiceDialog(
@@ -416,7 +675,7 @@ class NativeSettingsActivity : ComponentActivity() {
                         lang, { dialog = null },
                     )
                     "about" -> InfoDialog(
-                        "Fcode",
+                        "Sillage",
                         tr(lang, "版本 ${BuildConfig.VERSION_NAME}\n原生 Compose 对话与设置\n独立 WebUI、Goal、Plan 与多任务支持", "Version ${BuildConfig.VERSION_NAME}\nNative Compose chat and settings\nIndependent WebUI, Goal, Plan and multitasking support"),
                         lang, { dialog = null },
                     )
@@ -441,6 +700,18 @@ class NativeSettingsActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
+    }
+
+    private fun applyNativeStatusBarVisibility(hidden: Boolean) {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        if (hidden) controller.hide(WindowInsetsCompat.Type.statusBars())
+        else controller.show(WindowInsetsCompat.Type.statusBars())
     }
 
     override fun finish() {
@@ -1271,6 +1542,7 @@ private fun AppearanceSettingsPage(
     lang: String,
     theme: String,
     colorPalette: String,
+    interfaceStyle: String,
     onBack: () -> Unit,
     onTheme: () -> Unit,
     onChat: () -> Unit,
@@ -1299,6 +1571,8 @@ private fun ChatAppearanceSettingsPage(
     showResponseStats: Boolean,
     showModelSubtitle: Boolean,
     showReasoningTitles: Boolean,
+    hideStatusBar: Boolean,
+    compactComposerOnScroll: Boolean,
     onBack: () -> Unit,
     onAnimations: (Boolean) -> Unit,
     onFixedStreamingViewport: (Boolean) -> Unit,
@@ -1307,6 +1581,8 @@ private fun ChatAppearanceSettingsPage(
     onShowResponseStats: (Boolean) -> Unit,
     onShowModelSubtitle: (Boolean) -> Unit,
     onShowReasoningTitles: (Boolean) -> Unit,
+    onHideStatusBar: (Boolean) -> Unit,
+    onCompactComposerOnScroll: (Boolean) -> Unit,
 ) {
     SettingsScaffold(
         tr(lang, "\u804a\u5929", "Chat"),
@@ -1318,6 +1594,9 @@ private fun ChatAppearanceSettingsPage(
             item { ToggleSettingsRow(HugeIcons.Sparkles, tr(lang, "\u6d41\u5f0f\u52a8\u753b", "Streaming animation"), tr(lang, "\u7528\u6e10\u53d8\u906e\u7f69\u663e\u793a\u65b0\u751f\u6210\u6587\u5b57", "Reveal newly generated text with a gradient mask"), animations, onAnimations) }
             item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u751f\u6210\u65f6\u56fa\u5b9a\u6b63\u6587\u9ad8\u5ea6", "Fixed streaming viewport"), tr(lang, "\u964d\u4f4e\u957f\u56de\u7b54\u6301\u7eed\u589e\u957f\u65f6\u7684\u5e03\u5c40\u5f00\u9500", "Reduce layout work while long responses grow"), fixedStreamingViewport, onFixedStreamingViewport) }
             item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "\u81ea\u52a8\u8ddf\u968f\u56de\u7b54", "Auto-follow output"), tr(lang, "\u751f\u6210\u65f6\u4fdd\u6301\u6700\u65b0\u5185\u5bb9\u53ef\u89c1", "Keep the newest output visible while generating"), follow, onFollow) }
+            item { SettingsSection(tr(lang, "\u754c\u9762", "Interface")) }
+            item { ToggleSettingsRow(HugeIcons.LookTop, tr(lang, "\u9690\u85cf\u72b6\u6001\u680f", "Hide status bar"), tr(lang, "\u8ba9\u539f\u751f\u804a\u5929\u754c\u9762\u4f7f\u7528\u66f4\u5927\u7684\u53ef\u89c6\u533a\u57df", "Use more vertical space in the native chat UI"), hideStatusBar, onHideStatusBar) }
+            item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "滚动时收起输入框", "Compact composer on scroll"), tr(lang, "滑动对话后将输入框收成玻璃长条；点击长条会弹性展开", "Collapse the composer into a glass pill after scrolling; tap it to spring open"), compactComposerOnScroll, onCompactComposerOnScroll) }
             item { SettingsSection(tr(lang, "\u5185\u5bb9", "Content")) }
             item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u601d\u8003\u8fc7\u7a0b", "Reasoning"), tr(lang, "\u5728\u56de\u7b54\u4e2d\u663e\u793a\u6a21\u578b\u7684\u63a8\u7406\u6458\u8981", "Show model reasoning summaries"), reasoning, onReasoning) }
             item { ToggleSettingsRow(HugeIcons.Sparkles, tr(lang, "\u601d\u8003\u6807\u9898", "Reasoning titles"), tr(lang, "\u5c06 Sol \u7b49\u6a21\u578b\u8f93\u51fa\u7684\u7b80\u77ed\u601d\u8003\u6458\u8981\u663e\u793a\u4e3a\u80f6\u56ca\u6807\u9898", "Use short reasoning summaries from models such as Sol as the capsule title"), showReasoningTitles, onShowReasoningTitles) }
@@ -1333,13 +1612,16 @@ private fun ThemeSettingsPage(
     lang: String,
     colorMode: String,
     paletteValue: String,
+    interfaceStyleValue: String,
     backgroundValue: String,
     onBack: () -> Unit,
     onColorModeChange: (String) -> Unit,
     onPaletteChange: (String) -> Unit,
+    onInterfaceStyleChange: (String) -> Unit,
     onOpenChatBackground: () -> Unit,
 ) {
     val selectedPalette = FcodeColorPalette.from(paletteValue)
+    val selectedStyle = FcodeInterfaceStyle.from(interfaceStyleValue)
     val selectedBackground = FcodeChatBackgroundStyle.from(backgroundValue)
     val dark = currentFcodeDarkMode(colorMode)
     SettingsScaffold(
@@ -1352,12 +1634,13 @@ private fun ThemeSettingsPage(
                 ThemeOverviewCard(
                     lang = lang,
                     palette = selectedPalette,
+                    interfaceStyle = selectedStyle,
                     colorMode = colorMode,
                     background = selectedBackground,
                 )
             }
             item { SettingsSection(tr(lang, "界面风格", "Interface style")) }
-            item { InterfaceStyleCard(lang) }
+            item { InterfaceStyleCard(lang, selectedStyle) { onInterfaceStyleChange(it.value) } }
             item { SettingsSection(tr(lang, "颜色模式", "Color mode")) }
             item {
                 Row(
@@ -1370,12 +1653,22 @@ private fun ThemeSettingsPage(
                         "dark" to tr(lang, "深色", "Dark"),
                     ).forEach { (value, label) ->
                         val selected = colorMode == value
+                        val containerColor by animateColorAsState(
+                            if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                            animationSpec = tween(180),
+                            label = "colorModeContainer",
+                        )
+                        val contentColor by animateColorAsState(
+                            if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                            animationSpec = tween(180),
+                            label = "colorModeContent",
+                        )
                         Surface(
                             onClick = { onColorModeChange(value) },
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(16.dp),
-                            color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
-                            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                            color = containerColor,
+                            contentColor = contentColor,
                             border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .45f)) else null,
                         ) {
                             Column(
@@ -1390,25 +1683,48 @@ private fun ThemeSettingsPage(
                     }
                 }
             }
-            item { SettingsSection(tr(lang, "配色主题", "Color palette")) }
-            item {
-                Column(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    FcodeColorPalette.entries.chunked(2).forEach { row ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            row.forEach { palette ->
-                                PaletteChoiceCard(
-                                    modifier = Modifier.weight(1f),
-                                    lang = lang,
-                                    palette = palette,
-                                    dark = dark,
-                                    selected = palette == selectedPalette,
-                                    onClick = { onPaletteChange(palette.value) },
-                                )
+            if (selectedStyle == FcodeInterfaceStyle.MATERIAL) {
+                item { SettingsSection(tr(lang, "配色主题", "Color palette")) }
+                item {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        FcodeColorPalette.entries.chunked(2).forEach { row ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                row.forEach { palette ->
+                                    PaletteChoiceCard(
+                                        modifier = Modifier.weight(1f),
+                                        lang = lang,
+                                        palette = palette,
+                                        dark = dark,
+                                        selected = palette == selectedPalette,
+                                        onClick = { onPaletteChange(palette.value) },
+                                    )
+                                }
+                                if (row.size == 1) Spacer(Modifier.weight(1f))
                             }
-                            if (row.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            } else {
+                item { SettingsSection(tr(lang, "液态玻璃配色", "Liquid Glass colors")) }
+                item {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)),
+                    ) {
+                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Surface(Modifier.size(38.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {}
+                            Spacer(Modifier.width(10.dp))
+                            Surface(Modifier.size(38.dp), shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHighest) {}
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(tr(lang, "苹果黑白", "Apple monochrome"), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                                Text(tr(lang, "会自动适配浅色与深色模式；切回 Material 后保留原配色。", "Adapts to light and dark; your Material palette is kept."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
                 }
@@ -1433,6 +1749,7 @@ private fun ThemeSettingsPage(
 private fun ThemeOverviewCard(
     lang: String,
     palette: FcodeColorPalette,
+    interfaceStyle: FcodeInterfaceStyle,
     colorMode: String,
     background: FcodeChatBackgroundStyle,
 ) {
@@ -1452,7 +1769,11 @@ private fun ThemeOverviewCard(
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(tr(lang, "当前外观", "Current appearance"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("${paletteLabel(lang, palette)} · ${themeLabel(lang, colorMode)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${if (interfaceStyle == FcodeInterfaceStyle.LIQUID_GLASS) tr(lang, "液态玻璃", "Liquid Glass") else paletteLabel(lang, palette)} · ${themeLabel(lang, colorMode)}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                 }
                 Spacer(Modifier.weight(1f))
@@ -1472,35 +1793,64 @@ private fun ThemeOverviewCard(
 }
 
 @Composable
-private fun InterfaceStyleCard(lang: String) {
+private fun InterfaceStyleCard(
+    lang: String,
+    selected: FcodeInterfaceStyle,
+    onSelected: (FcodeInterfaceStyle) -> Unit,
+) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         shape = RoundedCornerShape(22.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)),
     ) {
         Column {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                SettingsIcon(HugeIcons.Sparkles)
-                Spacer(Modifier.width(13.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Material Expressive", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                    Text(tr(lang, "当前设计风格", "Current design style"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FcodeInterfaceStyle.entries.forEachIndexed { index, style ->
+                val active = selected == style
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelected(style) }
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Surface(
+                        Modifier.size(40.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                HugeIcons.Sparkles,
+                                null,
+                                Modifier.size(20.dp),
+                                tint = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(13.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (style == FcodeInterfaceStyle.MATERIAL) "Material Expressive" else tr(lang, "液态玻璃", "Liquid Glass"),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            if (style == FcodeInterfaceStyle.MATERIAL) tr(lang, "Material 动态配色与组件", "Material color palettes and components")
+                            else tr(lang, "苹果风黑白配色与折射玻璃", "Apple monochrome colors and refractive glass"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (active) {
+                        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                            Icon(HugeIcons.Tick02, tr(lang, "使用中", "Active"), Modifier.padding(8.dp).size(16.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                    }
                 }
-                Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primaryContainer) {
-                    Text(tr(lang, "使用中", "Active"), Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium)
+                if (index < FcodeInterfaceStyle.entries.lastIndex) {
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f))
                 }
-            }
-            HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f))
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(Modifier.size(38.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
-                    Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-                }
-                Spacer(Modifier.width(13.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(tr(lang, "液态玻璃", "Liquid Glass"), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(tr(lang, "主题接口已预留，接入后无需重做页面", "Theme hooks are ready; pages will not need rebuilding"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Text(tr(lang, "待接入", "Planned"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -1516,17 +1866,39 @@ private fun PaletteChoiceCard(
     onClick: () -> Unit,
 ) {
     val scheme = fcodeColorScheme(palette, dark)
+    val cardColor by animateColorAsState(
+        if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .62f) else MaterialTheme.colorScheme.surfaceContainerLow,
+        animationSpec = tween(180),
+        label = "paletteCardColor",
+    )
+    val borderColor by animateColorAsState(
+        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .55f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .48f),
+        animationSpec = tween(180),
+        label = "paletteCardBorder",
+    )
     Surface(
         onClick = onClick,
         modifier = modifier,
         shape = RoundedCornerShape(20.dp),
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .62f) else MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .55f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .48f)),
+        color = cardColor,
+        border = BorderStroke(1.dp, borderColor),
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(paletteLabel(lang, palette), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                if (selected) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                    AnimatedContent(
+                        targetState = selected,
+                        transitionSpec = {
+                            (fadeIn(tween(130)) + scaleIn(initialScale = .75f, animationSpec = tween(130))).togetherWith(
+                                fadeOut(tween(90)) + scaleOut(targetScale = .75f, animationSpec = tween(90)),
+                            )
+                        },
+                        label = "paletteSelectionTick",
+                    ) { visible ->
+                        if (visible) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
             }
             Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 listOf(scheme.primary, scheme.secondary, scheme.tertiary, scheme.surfaceContainerHighest).forEach { color ->
@@ -1793,12 +2165,17 @@ private fun BackgroundChoiceCard(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
+    val borderColor by animateColorAsState(
+        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .65f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f),
+        animationSpec = tween(180),
+        label = "backgroundCardBorder",
+    )
     Surface(
         onClick = onClick,
         modifier = modifier,
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .65f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+        border = BorderStroke(1.dp, borderColor),
     ) {
         Column {
             Box(Modifier.fillMaxWidth().height(88.dp)) {
@@ -1811,7 +2188,19 @@ private fun BackgroundChoiceCard(
             }
             Row(Modifier.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(backgroundLabel(lang, style), Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                if (selected) Icon(HugeIcons.Tick02, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                Box(Modifier.size(17.dp), contentAlignment = Alignment.Center) {
+                    AnimatedContent(
+                        targetState = selected,
+                        transitionSpec = {
+                            (fadeIn(tween(130)) + scaleIn(initialScale = .75f, animationSpec = tween(130))).togetherWith(
+                                fadeOut(tween(90)) + scaleOut(targetScale = .75f, animationSpec = tween(90)),
+                            )
+                        },
+                        label = "backgroundSelectionTick",
+                    ) { visible ->
+                        if (visible) Icon(HugeIcons.Tick02, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
             }
         }
     }
@@ -2274,6 +2663,7 @@ private fun SettingsRootPage(
     onSkills: () -> Unit,
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
+    onDeveloper: () -> Unit,
     prefs: SharedPreferences,
     onAbout: () -> Unit,
 ) {
@@ -2344,6 +2734,7 @@ private fun SettingsRootPage(
             item { NavigationSettingsRow(HugeIcons.Moon02, tr(lang, "\u5916\u89c2", "Appearance"), tr(lang, "\u4e3b\u9898\u3001\u804a\u5929\u754c\u9762\u4e0e\u751f\u6210\u663e\u793a", "Theme, chat interface and generation display"), onAppearance) }
             item { NavigationSettingsRow(HugeIcons.LanguageCircle, tr(lang, "语言", "Language"), tr(lang, "简体中文 / 跟随系统", "English / System"), onLanguage) }
             item { NavigationSettingsRow(HugeIcons.Text, tr(lang, "文字与 Markdown", "Typography & Markdown"), tr(lang, "代码、表格、列表与公式", "Code, tables, lists and math"), onTypography) }
+            item { NavigationSettingsRow(HugeIcons.Code, tr(lang, "开发者选项", "Developer options"), tr(lang, "页面切换动画与交互测试", "Page transition and interaction testing"), onDeveloper) }
             item { SettingsSection(tr(lang, "系统", "System")) }
             item {
                 val developmentSummary = when {
@@ -3303,7 +3694,7 @@ private fun ProxyOverviewContent(
             )
         }
         item { SettingsSection(tr(lang, "应用内代理", "In-app routing")) }
-        item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "Fcode 请求使用 Mihomo", "Route Fcode through Mihomo"), tr(lang, "不创建 Android VPN，也不会影响其他应用", "Does not create an Android VPN or affect other apps"), routeApi, onRouteChange) }
+        item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "Sillage 请求使用 Mihomo", "Route Sillage through Mihomo"), tr(lang, "不创建 Android VPN，也不会影响其他应用", "Does not create an Android VPN or affect other apps"), routeApi, onRouteChange) }
         item { NavigationSettingsRow(HugeIcons.Code, "MetaCubeXD", tr(lang, "流量、规则、连接和高级控制台", "Traffic, rules, connections and advanced console"), onDashboard) }
     }
 }
@@ -3633,13 +4024,410 @@ private fun WebUiSettingsPage(
     )
 }
 
+@Immutable
+private data class PlaygroundCard(
+    val id: String,
+    val titleZh: String,
+    val titleEn: String,
+    val subtitleZh: String,
+    val subtitleEn: String,
+    val bodyZh: String,
+    val bodyEn: String,
+    val icon: ImageVector,
+    val color: Color,
+)
+
+@Composable
+private fun DeveloperSettingsPage(lang: String, onBack: () -> Unit) {
+    var showPlayground by remember { mutableStateOf(false) }
+    if (showPlayground) {
+        SettingsScaffold(
+            tr(lang, "页面切换动画", "Page transitions"),
+            tr(lang, "现代化页面切换动画与交互测试", "Modern page transition and interaction testing"),
+            { showPlayground = false },
+        ) { contentPadding ->
+            PageTransitionPlayground(lang, Modifier.fillMaxSize().padding(contentPadding))
+        }
+    } else {
+        SettingsScaffold(
+            tr(lang, "开发者选项", "Developer options"),
+            tr(lang, "液态玻璃与页面切换动画调试", "Liquid glass and page transition debugging"),
+            onBack,
+        ) { contentPadding ->
+            LazyColumn(Modifier.fillMaxSize().padding(contentPadding)) {
+                item { LiquidGlassSettingsSection(lang) }
+                item {
+                    NavigationSettingsRow(
+                        HugeIcons.MagicWand01,
+                        tr(lang, "页面切换动画", "Page transitions"),
+                        tr(lang, "现代化页面切换动画与交互测试", "Modern page transition and interaction testing"),
+                        { showPlayground = true },
+                    )
+                }
+                item { Spacer(Modifier.height(24.dp)) }
+            }
+        }
+    }
+}
+
+/**
+ * Developer controls for the chat input's liquid-glass effect, mirroring the adjustable
+ * parameters of the Backdrop catalog playground (vendor/AndroidLiquidGlass). Values persist to
+ * SharedPreferences and are read live by the composer.
+ */
+@Composable
+private fun LiquidGlassSettingsSection(lang: String) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE) }
+    var enabled by remember { mutableStateOf(prefs.getBoolean(LiquidGlassSpec.KEY_ENABLED, true)) }
+    var cornerRadius by remember { mutableStateOf(prefs.getFloat(LiquidGlassSpec.KEY_CORNER_RADIUS, LiquidGlassSpec.DEFAULT_CORNER_RADIUS)) }
+    var blur by remember { mutableStateOf(prefs.getFloat(LiquidGlassSpec.KEY_BLUR, LiquidGlassSpec.DEFAULT_BLUR)) }
+    var refractionHeight by remember { mutableStateOf(prefs.getFloat(LiquidGlassSpec.KEY_REFRACTION_HEIGHT, LiquidGlassSpec.DEFAULT_REFRACTION_HEIGHT)) }
+    var refractionAmount by remember { mutableStateOf(prefs.getFloat(LiquidGlassSpec.KEY_REFRACTION_AMOUNT, LiquidGlassSpec.DEFAULT_REFRACTION_AMOUNT)) }
+    var chromatic by remember { mutableStateOf(prefs.getBoolean(LiquidGlassSpec.KEY_CHROMATIC, LiquidGlassSpec.DEFAULT_CHROMATIC)) }
+    var bubbleEnabled by remember { mutableStateOf(prefs.getBoolean(UserBubbleLiquidGlassConfig.KEY_ENABLED, true)) }
+    var bubbleCornerRadius by remember { mutableStateOf(prefs.getFloat(UserBubbleLiquidGlassConfig.KEY_CORNER_RADIUS, UserBubbleLiquidGlassConfig.DEFAULT_CORNER_RADIUS)) }
+    var bubbleBlur by remember { mutableStateOf(prefs.getFloat(UserBubbleLiquidGlassConfig.KEY_BLUR, UserBubbleLiquidGlassConfig.DEFAULT_BLUR)) }
+    var bubbleRefractionHeight by remember { mutableStateOf(prefs.getFloat(UserBubbleLiquidGlassConfig.KEY_REFRACTION_HEIGHT, UserBubbleLiquidGlassConfig.DEFAULT_REFRACTION_HEIGHT)) }
+    var bubbleRefractionAmount by remember { mutableStateOf(prefs.getFloat(UserBubbleLiquidGlassConfig.KEY_REFRACTION_AMOUNT, UserBubbleLiquidGlassConfig.DEFAULT_REFRACTION_AMOUNT)) }
+    var bubbleChromatic by remember { mutableStateOf(prefs.getBoolean(UserBubbleLiquidGlassConfig.KEY_CHROMATIC, UserBubbleLiquidGlassConfig.DEFAULT_CHROMATIC)) }
+    var bubbleTintAlpha by remember { mutableStateOf(prefs.getFloat(UserBubbleLiquidGlassConfig.KEY_TINT_ALPHA, UserBubbleLiquidGlassConfig.DEFAULT_TINT_ALPHA)) }
+    var topBarEnabled by remember { mutableStateOf(prefs.getBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, true)) }
+    var topBarBlur by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_BLUR, TopBarLiquidGlassConfig.DEFAULT_BLUR)) }
+    var topBarTint by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY)) }
+    var topBarMaskStart by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_MASK_START, TopBarLiquidGlassConfig.DEFAULT_MASK_START)) }
+    var topBarMaskEnd by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_MASK_END, TopBarLiquidGlassConfig.DEFAULT_MASK_END)) }
+    var topBarTopAlpha by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_TOP_ALPHA, TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA)) }
+    var topBarBottomAlpha by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_BOTTOM_ALPHA, TopBarLiquidGlassConfig.DEFAULT_BOTTOM_ALPHA)) }
+
+    val topBarConfig = TopBarLiquidGlassConfig(
+        enabled = topBarEnabled,
+        blurRadiusDp = topBarBlur,
+        tintIntensity = topBarTint,
+        maskStartFraction = topBarMaskStart.coerceIn(0f, 0.92f),
+        maskEndFraction = topBarMaskEnd.coerceIn(topBarMaskStart.coerceIn(0f, 0.92f) + 0.04f, 1f),
+        topAlpha = topBarTopAlpha,
+        bottomAlpha = topBarBottomAlpha,
+    )
+    SettingsSection(tr(lang, "液态玻璃 · 顶栏渐变 Mask", "Liquid glass · top-bar fade mask"))
+    TopBarLiquidGlassPreview(topBarConfig, Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+    ToggleSettingsRow(
+        HugeIcons.Sparkles,
+        tr(lang, "启用顶栏渐变玻璃", "Enable progressive top-bar glass"),
+        tr(lang, "模糊和色调向下连续淡出，不覆盖聊天内容", "Blur and tint fade continuously into the conversation"),
+        topBarEnabled,
+    ) { value -> topBarEnabled = value; prefs.edit().putBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, value).apply() }
+    GlassSliderRow(tr(lang, "顶栏模糊", "Top-bar blur"), topBarBlur, 0f..32f, { "${it.toInt()} dp" }) { value ->
+        topBarBlur = value; prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_BLUR, value).apply()
+    }
+    GlassSliderRow(tr(lang, "玻璃色调", "Glass tint"), topBarTint, 0f..0.72f, { "${(it * 100).toInt()}%" }) { value ->
+        topBarTint = value; prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, value).apply()
+    }
+    GlassSliderRow(tr(lang, "渐变开始", "Fade start"), topBarMaskStart, 0f..0.92f, { "${(it * 100).toInt()}%" }) { value ->
+        topBarMaskStart = value
+        if (topBarMaskEnd < value + 0.04f) topBarMaskEnd = (value + 0.04f).coerceAtMost(1f)
+        prefs.edit()
+            .putFloat(TopBarLiquidGlassConfig.KEY_MASK_START, topBarMaskStart)
+            .putFloat(TopBarLiquidGlassConfig.KEY_MASK_END, topBarMaskEnd)
+            .apply()
+    }
+    GlassSliderRow(tr(lang, "渐变结束", "Fade end"), topBarMaskEnd, 0.04f..1f, { "${(it * 100).toInt()}%" }) { value ->
+        topBarMaskEnd = value.coerceAtLeast(topBarMaskStart + 0.04f).coerceAtMost(1f)
+        prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_MASK_END, topBarMaskEnd).apply()
+    }
+    GlassSliderRow(tr(lang, "顶部透明度", "Top opacity"), topBarTopAlpha, 0f..1f, { "${(it * 100).toInt()}%" }) { value ->
+        topBarTopAlpha = value; prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_TOP_ALPHA, value).apply()
+    }
+    GlassSliderRow(tr(lang, "底部透明度", "Bottom opacity"), topBarBottomAlpha, 0f..1f, { "${(it * 100).toInt()}%" }) { value ->
+        topBarBottomAlpha = value; prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_BOTTOM_ALPHA, value).apply()
+    }
+    TextButton(
+        onClick = {
+            topBarEnabled = true
+            topBarBlur = TopBarLiquidGlassConfig.DEFAULT_BLUR
+            topBarTint = TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY
+            topBarMaskStart = TopBarLiquidGlassConfig.DEFAULT_MASK_START
+            topBarMaskEnd = TopBarLiquidGlassConfig.DEFAULT_MASK_END
+            topBarTopAlpha = TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA
+            topBarBottomAlpha = TopBarLiquidGlassConfig.DEFAULT_BOTTOM_ALPHA
+            prefs.edit()
+                .putBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, true)
+                .putFloat(TopBarLiquidGlassConfig.KEY_BLUR, TopBarLiquidGlassConfig.DEFAULT_BLUR)
+                .putFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY)
+                .putFloat(TopBarLiquidGlassConfig.KEY_MASK_START, TopBarLiquidGlassConfig.DEFAULT_MASK_START)
+                .putFloat(TopBarLiquidGlassConfig.KEY_MASK_END, TopBarLiquidGlassConfig.DEFAULT_MASK_END)
+                .putFloat(TopBarLiquidGlassConfig.KEY_TOP_ALPHA, TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA)
+                .putFloat(TopBarLiquidGlassConfig.KEY_BOTTOM_ALPHA, TopBarLiquidGlassConfig.DEFAULT_BOTTOM_ALPHA)
+                .apply()
+        },
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    ) { Text(tr(lang, "恢复顶栏默认值", "Reset top-bar defaults")) }
+
+    SettingsSection(tr(lang, "液态玻璃 · 聊天输入框", "Liquid glass · chat input"))
+    LiquidGlassPreview(
+        LiquidGlassSpec(
+            cornerRadiusDp = cornerRadius,
+            blurRadiusDp = blur,
+            refractionHeightDp = refractionHeight,
+            refractionAmountDp = refractionAmount,
+            chromaticAberration = chromatic,
+        ),
+        Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+    )
+    ToggleSettingsRow(
+        HugeIcons.Sparkles,
+        tr(lang, "启用液态玻璃", "Enable liquid glass"),
+        if (liquidGlassSupported) tr(lang, "苹果风格折射玻璃，随明暗主题自适应", "Apple-style refractive glass, adapts to light/dark")
+        else tr(lang, "需要 Android 12+，当前设备自动回退普通样式", "Requires Android 12+; falls back to the plain style here"),
+        enabled,
+    ) { value -> enabled = value; prefs.edit().putBoolean(LiquidGlassSpec.KEY_ENABLED, value).apply() }
+    ToggleSettingsRow(
+        HugeIcons.Image02,
+        tr(lang, "色散", "Chromatic aberration"),
+        tr(lang, "玻璃边缘的彩虹色散效果", "Rainbow dispersion at the glass edge"),
+        chromatic,
+    ) { value -> chromatic = value; prefs.edit().putBoolean(LiquidGlassSpec.KEY_CHROMATIC, value).apply() }
+    GlassSliderRow(tr(lang, "圆角半径", "Corner radius"), cornerRadius, 8f..48f, { "${it.toInt()} dp" }) { value -> cornerRadius = value; prefs.edit().putFloat(LiquidGlassSpec.KEY_CORNER_RADIUS, value).apply() }
+    GlassSliderRow(tr(lang, "模糊半径", "Blur radius"), blur, 0f..32f, { "${it.toInt()} dp" }) { value -> blur = value; prefs.edit().putFloat(LiquidGlassSpec.KEY_BLUR, value).apply() }
+    GlassSliderRow(tr(lang, "折射高度", "Refraction height"), refractionHeight, 0f..48f, { "${it.toInt()} dp" }) { value -> refractionHeight = value; prefs.edit().putFloat(LiquidGlassSpec.KEY_REFRACTION_HEIGHT, value).apply() }
+    GlassSliderRow(tr(lang, "折射强度", "Refraction amount"), refractionAmount, 0f..48f, { "${it.toInt()} dp" }) { value -> refractionAmount = value; prefs.edit().putFloat(LiquidGlassSpec.KEY_REFRACTION_AMOUNT, value).apply() }
+    TextButton(
+        onClick = {
+            enabled = true
+            cornerRadius = LiquidGlassSpec.DEFAULT_CORNER_RADIUS
+            blur = LiquidGlassSpec.DEFAULT_BLUR
+            refractionHeight = LiquidGlassSpec.DEFAULT_REFRACTION_HEIGHT
+            refractionAmount = LiquidGlassSpec.DEFAULT_REFRACTION_AMOUNT
+            chromatic = LiquidGlassSpec.DEFAULT_CHROMATIC
+            prefs.edit()
+                .putBoolean(LiquidGlassSpec.KEY_ENABLED, true)
+                .putFloat(LiquidGlassSpec.KEY_CORNER_RADIUS, LiquidGlassSpec.DEFAULT_CORNER_RADIUS)
+                .putFloat(LiquidGlassSpec.KEY_BLUR, LiquidGlassSpec.DEFAULT_BLUR)
+                .putFloat(LiquidGlassSpec.KEY_REFRACTION_HEIGHT, LiquidGlassSpec.DEFAULT_REFRACTION_HEIGHT)
+                .putFloat(LiquidGlassSpec.KEY_REFRACTION_AMOUNT, LiquidGlassSpec.DEFAULT_REFRACTION_AMOUNT)
+                .putBoolean(LiquidGlassSpec.KEY_CHROMATIC, LiquidGlassSpec.DEFAULT_CHROMATIC)
+                .apply()
+        },
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    ) { Text(tr(lang, "恢复默认", "Reset to defaults")) }
+
+    SettingsSection(tr(lang, "液态玻璃 · 用户消息气泡", "Liquid glass · user bubble"))
+    val bubbleConfig = UserBubbleLiquidGlassConfig(
+        enabled = bubbleEnabled,
+        spec = LiquidGlassSpec(
+            cornerRadiusDp = bubbleCornerRadius,
+            blurRadiusDp = bubbleBlur,
+            refractionHeightDp = bubbleRefractionHeight,
+            refractionAmountDp = bubbleRefractionAmount,
+            chromaticAberration = bubbleChromatic,
+        ),
+        tintAlpha = bubbleTintAlpha,
+    )
+    UserBubbleLiquidGlassPreview(bubbleConfig, Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+    ToggleSettingsRow(
+        HugeIcons.Sparkles,
+        tr(lang, "启用用户气泡玻璃", "Enable glass user bubble"),
+        tr(lang, "仅液态玻璃界面使用；发送动画在所有主题中保持启用", "Used by the Liquid Glass style; send motion stays available in every theme"),
+        bubbleEnabled,
+    ) { value -> bubbleEnabled = value; prefs.edit().putBoolean(UserBubbleLiquidGlassConfig.KEY_ENABLED, value).apply() }
+    ToggleSettingsRow(
+        HugeIcons.Image02,
+        tr(lang, "气泡色散", "Bubble chromatic aberration"),
+        tr(lang, "为气泡折射边缘加入轻微彩色分离", "Adds subtle color separation at the refracted edge"),
+        bubbleChromatic,
+    ) { value -> bubbleChromatic = value; prefs.edit().putBoolean(UserBubbleLiquidGlassConfig.KEY_CHROMATIC, value).apply() }
+    GlassSliderRow(tr(lang, "气泡底色", "Bubble tint"), bubbleTintAlpha, 0.08f..0.58f, { "${(it * 100).toInt()}%" }) { value -> bubbleTintAlpha = value; prefs.edit().putFloat(UserBubbleLiquidGlassConfig.KEY_TINT_ALPHA, value).apply() }
+    GlassSliderRow(tr(lang, "气泡圆角", "Bubble corner radius"), bubbleCornerRadius, 12f..36f, { "${it.toInt()} dp" }) { value -> bubbleCornerRadius = value; prefs.edit().putFloat(UserBubbleLiquidGlassConfig.KEY_CORNER_RADIUS, value).apply() }
+    GlassSliderRow(tr(lang, "气泡模糊", "Bubble blur"), bubbleBlur, 0f..24f, { "${it.toInt()} dp" }) { value -> bubbleBlur = value; prefs.edit().putFloat(UserBubbleLiquidGlassConfig.KEY_BLUR, value).apply() }
+    GlassSliderRow(tr(lang, "气泡折射高度", "Bubble refraction height"), bubbleRefractionHeight, 0f..36f, { "${it.toInt()} dp" }) { value -> bubbleRefractionHeight = value; prefs.edit().putFloat(UserBubbleLiquidGlassConfig.KEY_REFRACTION_HEIGHT, value).apply() }
+    GlassSliderRow(tr(lang, "气泡折射强度", "Bubble refraction amount"), bubbleRefractionAmount, 0f..40f, { "${it.toInt()} dp" }) { value -> bubbleRefractionAmount = value; prefs.edit().putFloat(UserBubbleLiquidGlassConfig.KEY_REFRACTION_AMOUNT, value).apply() }
+    TextButton(
+        onClick = {
+            bubbleEnabled = true
+            bubbleCornerRadius = UserBubbleLiquidGlassConfig.DEFAULT_CORNER_RADIUS
+            bubbleBlur = UserBubbleLiquidGlassConfig.DEFAULT_BLUR
+            bubbleRefractionHeight = UserBubbleLiquidGlassConfig.DEFAULT_REFRACTION_HEIGHT
+            bubbleRefractionAmount = UserBubbleLiquidGlassConfig.DEFAULT_REFRACTION_AMOUNT
+            bubbleChromatic = UserBubbleLiquidGlassConfig.DEFAULT_CHROMATIC
+            bubbleTintAlpha = UserBubbleLiquidGlassConfig.DEFAULT_TINT_ALPHA
+            prefs.edit()
+                .putBoolean(UserBubbleLiquidGlassConfig.KEY_ENABLED, true)
+                .putFloat(UserBubbleLiquidGlassConfig.KEY_CORNER_RADIUS, UserBubbleLiquidGlassConfig.DEFAULT_CORNER_RADIUS)
+                .putFloat(UserBubbleLiquidGlassConfig.KEY_BLUR, UserBubbleLiquidGlassConfig.DEFAULT_BLUR)
+                .putFloat(UserBubbleLiquidGlassConfig.KEY_REFRACTION_HEIGHT, UserBubbleLiquidGlassConfig.DEFAULT_REFRACTION_HEIGHT)
+                .putFloat(UserBubbleLiquidGlassConfig.KEY_REFRACTION_AMOUNT, UserBubbleLiquidGlassConfig.DEFAULT_REFRACTION_AMOUNT)
+                .putBoolean(UserBubbleLiquidGlassConfig.KEY_CHROMATIC, UserBubbleLiquidGlassConfig.DEFAULT_CHROMATIC)
+                .putFloat(UserBubbleLiquidGlassConfig.KEY_TINT_ALPHA, UserBubbleLiquidGlassConfig.DEFAULT_TINT_ALPHA)
+                .apply()
+        },
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    ) { Text(tr(lang, "恢复气泡默认值", "Reset bubble defaults")) }
+}
+
+@Composable
+private fun GlassSliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Float>, format: (Float) -> String, onValueChange: (Float) -> Unit) {
+    Column(Modifier.padding(horizontal = 20.dp, vertical = 2.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(format(value), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Slider(value = value, onValueChange = onValueChange, valueRange = range)
+    }
+}
+
+/**
+ * A container-transform playground inspired by FlClash's OpenContainer, rebuilt on Compose's
+ * shared-element APIs and pushed further: the tapped card grows and glides toward the center
+ * while the whole list recedes (scales down + dims) like a modern OS app-open animation.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun PageTransitionPlayground(lang: String, modifier: Modifier = Modifier) {
+    val items = remember {
+        listOf(
+            PlaygroundCard(
+                "transform", "容器变换", "Container transform",
+                "卡片展开为整页", "Card expands into a full page",
+                "点击卡片后，它会从原来的位置平滑放大并移动到屏幕中心，背后的列表整体下压、变暗，形成类似现代系统打开应用的纵深感。",
+                "Tap a card and it grows from its spot toward the center while the list behind recedes and dims, like a modern OS app-open animation.",
+                HugeIcons.Sparkles, Color(0xFF7C6FF0),
+            ),
+            PlaygroundCard(
+                "shared", "共享元素", "Shared element",
+                "跨页面边界变形", "Morphs across page boundaries",
+                "共享元素转场会让同一个视觉元素在两个页面之间连续变形，而不是简单的淡入淡出，从而保持空间的连贯性。",
+                "A shared element morphs continuously between two pages instead of a plain cross-fade, keeping spatial continuity.",
+                HugeIcons.Refresh03, Color(0xFF2E9E8F),
+            ),
+            PlaygroundCard(
+                "motion", "运动曲线", "Motion curves",
+                "强调减速与弹性", "Emphasized easing and springs",
+                "打开使用快入慢出的强调曲线，让元素先快速移动、再轻柔落定；返回时列表从缩小状态弹回原位。",
+                "Opening uses a fast-then-gentle emphasized curve; returning springs the list back from its receded state.",
+                HugeIcons.Moon02, Color(0xFFE0823D),
+            ),
+        )
+    }
+    var selected by remember { mutableStateOf<PlaygroundCard?>(null) }
+    val motionEasing = remember { CubicBezierEasing(0.2f, 0f, 0f, 1f) }
+    SharedTransitionLayout(modifier) {
+        AnimatedContent(
+            targetState = selected,
+            transitionSpec = {
+                if (targetState != null) {
+                    // Opening: the detail fades in while the grid recedes (pushed down + dimmed).
+                    fadeIn(tween(170, delayMillis = 150, easing = LinearOutSlowInEasing))
+                        .togetherWith(
+                            scaleOut(targetScale = 0.94f, animationSpec = tween(360, easing = motionEasing)) +
+                                fadeOut(tween(210, delayMillis = 90, easing = FastOutSlowInEasing), targetAlpha = 0.3f),
+                        )
+                } else {
+                    // Returning: the grid springs back from its receded state while the detail
+                    // collapses into the originating card.
+                    (fadeIn(tween(230, easing = LinearOutSlowInEasing)) +
+                        scaleIn(initialScale = 0.94f, animationSpec = tween(360, easing = motionEasing)))
+                        .togetherWith(fadeOut(tween(150, delayMillis = 150), targetAlpha = 0.4f))
+                }
+            },
+            label = "playgroundContainer",
+        ) { target ->
+            if (target == null) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    item {
+                        Text(
+                            tr(lang, "点击下方卡片，体验容器变换转场", "Tap a card to preview the container transform"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 2.dp),
+                        )
+                    }
+                    items(items, key = { it.id }) { item ->
+                        Surface(
+                            onClick = { selected = item },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .sharedBounds(
+                                    rememberSharedContentState(key = "playground-${item.id}"),
+                                    animatedVisibilityScope = this@AnimatedContent,
+                                ),
+                            shape = RoundedCornerShape(26.dp),
+                            color = item.color.copy(alpha = 0.15f),
+                        ) {
+                            Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Surface(Modifier.size(46.dp), shape = RoundedCornerShape(16.dp), color = item.color) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(item.icon, null, Modifier.size(23.dp), tint = Color.White)
+                                    }
+                                }
+                                Spacer(Modifier.width(14.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(tr(lang, item.titleZh, item.titleEn), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                    Text(tr(lang, item.subtitleZh, item.subtitleEn), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Icon(HugeIcons.ArrowRight01, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            } else {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .sharedBounds(
+                            rememberSharedContentState(key = "playground-${target.id}"),
+                            animatedVisibilityScope = this@AnimatedContent,
+                        ),
+                    shape = RoundedCornerShape(26.dp),
+                    color = target.color.copy(alpha = 0.12f),
+                ) {
+                    Column(Modifier.fillMaxSize()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { selected = null }) { Icon(HugeIcons.ArrowLeft01, null) }
+                            Text(tr(lang, target.titleZh, target.titleEn), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        }
+                        Surface(
+                            Modifier.fillMaxWidth().height(220.dp).padding(horizontal = 20.dp),
+                            shape = RoundedCornerShape(28.dp),
+                            color = target.color,
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(target.icon, null, Modifier.size(72.dp), tint = Color.White)
+                            }
+                        }
+                        Text(
+                            tr(lang, target.bodyZh, target.bodyEn),
+                            modifier = Modifier.padding(22.dp),
+                            style = MaterialTheme.typography.bodyLarge,
+                            lineHeight = 26.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScaffold(title: String, subtitle: String, onBack: () -> Unit, content: @Composable (PaddingValues) -> Unit) {
     Scaffold(
         topBar = {
             Surface(color = MaterialTheme.colorScheme.background) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     IconButton(onBack) { Icon(HugeIcons.ArrowLeft01, null) }
                     Column(Modifier.weight(1f).padding(end = 12.dp)) {
                         Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)

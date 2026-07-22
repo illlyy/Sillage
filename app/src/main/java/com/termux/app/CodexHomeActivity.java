@@ -1492,7 +1492,7 @@ public final class CodexHomeActivity extends Activity {
         this.appServerBridge.start(active.baseUrl, active.apiKey, active.model,
             resolvedApiFormat(active), this.appServerUsesMihomo, active.forwardReasoningContext,
             active.ultraSubagentLimit, active.normalSubagentLimit, active.ultraTransportEfforts(),
-            active.customSubagentStability && active.hasCustomV2Models());
+            active.hasV2Models(), active.customSubagentStability && active.hasCustomV2Models());
         Toast.makeText(this, "\u6b63\u5728\u5e94\u7528\u65b0\u914d\u7f6e", Toast.LENGTH_SHORT).show();
     }
 
@@ -1519,7 +1519,7 @@ public final class CodexHomeActivity extends Activity {
             this.appServerBridge.start(active.baseUrl, active.apiKey, active.model,
                 resolvedApiFormat(active), this.appServerUsesMihomo, active.forwardReasoningContext,
                 active.ultraSubagentLimit, active.normalSubagentLimit, active.ultraTransportEfforts(),
-            active.customSubagentStability && active.hasCustomV2Models());
+                active.hasV2Models(), active.customSubagentStability && active.hasCustomV2Models());
         }, delay);
     }
 
@@ -2144,7 +2144,7 @@ public final class CodexHomeActivity extends Activity {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) { Toast.makeText(this, "\u5f53\u524d\u684c\u9762\u4e0d\u652f\u6301\u5e94\u7528\u5185\u6dfb\u52a0\u5feb\u6377\u56fe\u6807", Toast.LENGTH_SHORT).show(); return; }
         ShortcutManager manager = getSystemService(ShortcutManager.class);
         if (manager == null || !manager.isRequestPinShortcutSupported()) { Toast.makeText(this, "\u5f53\u524d\u684c\u9762\u4e0d\u652f\u6301\u56fa\u5b9a\u5feb\u6377\u56fe\u6807", Toast.LENGTH_SHORT).show(); return; }
-        String id = terminal ? "codex_termux" : "codex_webui"; String label = terminal ? "Fcode Termux" : "Fcode WebUI";
+        String id = terminal ? "codex_termux" : "codex_webui"; String label = terminal ? "Sillage Termux" : "Sillage WebUI";
         Intent launch = new Intent(this, CodexHomeActivity.class).setAction(terminal ? ACTION_OPEN_TERMUX : ACTION_OPEN_WEBUI).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         ShortcutInfo shortcut = new ShortcutInfo.Builder(this, id).setShortLabel(label).setLongLabel(terminal ? "\u542f\u52a8 Codex \u5185\u7f6e Termux" : "\u6253\u5f00 Codex WebUI").setIcon(Icon.createWithResource(this, terminal ? com.termux.R.drawable.ic_new_session : com.termux.R.drawable.ic_codex_logo)).setIntent(launch).build();
         Toast.makeText(this, manager.requestPinShortcut(shortcut, null) ? "\u5df2\u8bf7\u6c42\u5c06 " + label + " \u6dfb\u52a0\u5230\u684c\u9762" : "\u684c\u9762\u5feb\u6377\u56fe\u6807\u6dfb\u52a0\u5931\u8d25", Toast.LENGTH_SHORT).show();
@@ -2166,11 +2166,11 @@ public final class CodexHomeActivity extends Activity {
         ImageView logo = new ImageView(this);
         logo.setImageResource(com.termux.R.drawable.ic_codex_logo);
         logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        logo.setContentDescription("Fcode");
+        logo.setContentDescription("Sillage");
         LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(88), dp(88));
         logoParams.topMargin = dp(34);
         panel.addView(logo, logoParams);
-        TextView title = text("Fcode", 30.0f, TEXT);
+        TextView title = text("Sillage", 30.0f, TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setGravity(Gravity.CENTER);
         title.setIncludeFontPadding(false);
@@ -4508,7 +4508,7 @@ public final class CodexHomeActivity extends Activity {
             webUiReloadPending = hadLoadedWebUi;
             appServerBridge.start(url, key, selectedModel, activeApiFormat(), route, shouldForwardReasoningContext(),
                 activeUltraSubagentLimit(), activeNormalSubagentLimit(), activeUltraTransportEfforts(),
-                activePreventRecursiveSubagents());
+                activeHasV2Models(), activePreventRecursiveSubagents());
         } else if (webUiReloadPending) {
             status.setText("正在重新加载 WebUI…");
         }
@@ -4534,6 +4534,11 @@ public final class CodexHomeActivity extends Activity {
     private java.util.Map<String, String> activeUltraTransportEfforts() {
         CodexProviderStore.Profile active = providerStore == null ? null : providerStore.active();
         return active == null ? java.util.Collections.emptyMap() : active.ultraTransportEfforts();
+    }
+
+    private boolean activeHasV2Models() {
+        CodexProviderStore.Profile active = providerStore == null ? null : providerStore.active();
+        return active != null && active.hasV2Models();
     }
 
     private boolean activePreventRecursiveSubagents() {
@@ -4671,7 +4676,7 @@ public final class CodexHomeActivity extends Activity {
             this.appServerUsesMihomo = shouldRouteWebUi(providerStore.active());
             this.appServerBridge.start(url, key, selectedModel, activeApiFormat(), this.appServerUsesMihomo, shouldForwardReasoningContext(),
                 activeUltraSubagentLimit(), activeNormalSubagentLimit(), activeUltraTransportEfforts(),
-                activePreventRecursiveSubagents());
+                activeHasV2Models(), activePreventRecursiveSubagents());
         } else {
             this.status.setText("API configuration saved to private app storage.");
         }
@@ -4986,7 +4991,7 @@ public final class CodexHomeActivity extends Activity {
             this.prefs.edit().putBoolean("overlay_enable_pending", false).putBoolean("startup_overlay_flow", false).putBoolean("overlay_enabled", granted && pending).apply();
             if (granted && pending) {
                 CodexOverlayService.start(this);
-                showTopNotice("Fcode \u60ac\u6d6e\u7a97\u5df2\u5f00\u542f", true);
+                showTopNotice("Sillage \u60ac\u6d6e\u7a97\u5df2\u5f00\u542f", true);
             } else if (pending && !startupFlow) {
                 showTopNotice("\u672a\u6388\u4e88\u60ac\u6d6e\u7a97\u6743\u9650", false);
             }

@@ -69,6 +69,7 @@ internal object NativeGitWorkflow {
                     when {
                         value.startsWith("No commits yet on ") -> value.substringAfter("No commits yet on ")
                         value.startsWith("Initial commit on ") -> value.substringAfter("Initial commit on ")
+                        value == "HEAD (no branch)" || value == "HEAD" -> ""
                         else -> value
                     }
                 }

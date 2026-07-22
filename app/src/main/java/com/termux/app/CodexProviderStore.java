@@ -545,9 +545,7 @@ final class CodexProviderStore {
 
         static void appendAgentConfig(StringBuilder toml, Profile profile) {
             int ultra = profile == null ? DEFAULT_ULTRA_SUBAGENT_LIMIT : profile.ultraSubagentLimit;
-            int normal = profile == null ? DEFAULT_NORMAL_SUBAGENT_LIMIT : profile.normalSubagentLimit;
             ultra = normalizeSubagentLimit(ultra, DEFAULT_ULTRA_SUBAGENT_LIMIT);
-            normal = normalizeSubagentLimit(normal, DEFAULT_NORMAL_SUBAGENT_LIMIT);
             boolean enableV2 = profile != null && profile.hasV2Models();
             boolean stableCustomV2 = enableV2 && profile.customSubagentStability && profile.hasCustomV2Models();
             if (enableV2) toml.append("suppress_unstable_features_warning = true\n\n");
@@ -572,10 +570,11 @@ final class CodexProviderStore {
                 toml.append("subagent_usage_hint_text = ").append(JSONObject.quote(childHint)).append("\n");
             }
             toml.append("\n");
-            if (!enableV2) {
-                toml.append("[agents]\n");
-                toml.append("max_threads = ").append(normal).append("\n\n");
-            }
+            // agents.max_threads is supplied exclusively via command-line overrides (see
+            // CodexAppServerBridge.agentConfigOverrides), which only set it when multi_agent_v2
+            // is disabled. Keeping it out of config.toml guarantees it can never coexist with an
+            // enabled features.multi_agent_v2, even if this file is stale from an earlier profile
+            // state or is being rewritten concurrently with a codex launch.
         }
     }
 

@@ -68,6 +68,7 @@ object NativeLargePayloadStore {
         }
         if (compact.optString("type").isBlank()) compact.put("type", type)
         if (compact.optString("status").isBlank()) compact.put("status", "completed")
+        if (type == "fileChange") attachFileSummary(source, compact)
 
         val detail = toolDetail(source)
         val toolSlot = source.optString("id").ifBlank { UUID.randomUUID().toString() }
@@ -153,6 +154,24 @@ object NativeLargePayloadStore {
     @JvmStatic
     @Synchronized
     fun cachedCharacterCount(): Int = cachedChars
+
+    /**
+     * Keeps a tiny inline list of changed file paths + operations so the collapsed UI can show
+     * "N files changed" and file names without loading the (heavy) diff payload.
+     */
+    private fun attachFileSummary(source: JSONObject, compact: JSONObject) {
+        val changes = source.optJSONArray("changes") ?: return
+        val summary = JSONArray()
+        for (index in 0 until changes.length()) {
+            val change = changes.optJSONObject(index) ?: continue
+            val path = listOf("path", "filePath", "file", "name")
+                .firstNotNullOfOrNull { key -> change.optString(key).takeIf { it.isNotBlank() } } ?: continue
+            val op = listOf("type", "kind")
+                .firstNotNullOfOrNull { key -> change.optString(key).takeIf { it.isNotBlank() } } ?: "update"
+            summary.put(JSONObject().put("path", path).put("op", op))
+        }
+        if (summary.length() > 0) compact.put("fileSummary", summary)
+    }
 
     private fun toolDetail(source: JSONObject): String {
         val type = source.optString("type")

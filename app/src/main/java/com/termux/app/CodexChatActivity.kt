@@ -2,6 +2,7 @@ package com.termux.app
 
 import android.app.ActivityOptions
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -15,6 +16,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -48,6 +51,8 @@ private const val NATIVE_USER_INPUT_TIMEOUT_MS = 240_000L
 private const val NATIVE_SHOW_RESPONSE_STATS_PREFERENCE = "native_show_response_stats_v1"
 private const val NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE = "native_show_model_subtitle_v1"
 private const val NATIVE_SHOW_REASONING_TITLES_PREFERENCE = "native_show_reasoning_titles_v1"
+private const val NATIVE_FOLLOW_UP_ACTION_PREFERENCE = "native_follow_up_submit_action_v1"
+internal const val NATIVE_HIDE_STATUS_BAR_PREFERENCE = "native_hide_status_bar_v1"
 internal fun encodeNativeProposedPlan(text: String): String = NATIVE_PROPOSED_PLAN_PREFIX + text
 internal fun decodeNativeProposedPlan(content: String): String = content.substringAfter('|')
 internal fun encodeNativeImplementPlan(text: String): String = NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX +
@@ -65,6 +70,38 @@ internal fun encodeNativeUserInputAnswers(answers: Map<String, String>): String 
 
 @Immutable
 data class NativeAttachment(val name: String, val path: String, val image: Boolean)
+
+internal enum class NativeFollowUpSubmitAction {
+    STEER, QUEUE;
+
+    companion object {
+        fun from(value: String?): NativeFollowUpSubmitAction =
+            if (value.equals("queue", ignoreCase = true)) QUEUE else STEER
+    }
+}
+
+@Immutable
+internal data class NativeQueuedFollowUp(
+    val id: String = UUID.randomUUID().toString(),
+    val text: String,
+    val attachments: List<NativeAttachment>,
+    val skills: List<NativeSkill>,
+    val model: String,
+    val effort: String,
+    val mode: String,
+)
+
+@Immutable
+internal data class NativeSubmitResult(
+    val accepted: Boolean,
+    val messageId: String? = null,
+    val queued: Boolean = false,
+)
+
+private data class PendingNativeSteer(
+    val messageId: String,
+    val followUp: NativeQueuedFollowUp,
+)
 
 @Immutable
 data class NativeSkill(val name: String, val description: String, val path: String)
@@ -110,6 +147,8 @@ internal class NativeChatState {
     val subagentStatuses = mutableStateMapOf<String, String>()
     val subagentHistoryErrors = mutableStateMapOf<String, String>()
     val loadingSubagentHistories = mutableStateListOf<String>()
+    val queuedFollowUps = mutableStateListOf<NativeQueuedFollowUp>()
+    var followUpSubmitAction by mutableStateOf(NativeFollowUpSubmitAction.STEER)
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
     var ready by mutableStateOf(false)
@@ -146,6 +185,7 @@ internal class NativeChatState {
     var worktreeError by mutableStateOf("")
     var worktreeNotice by mutableStateOf("")
     var worktreeMergePreview by mutableStateOf("")
+    var worktreePrHandoff by mutableStateOf("")
     var permissionMode by mutableStateOf(NativePermissionMode.FULL_ACCESS)
     var planJson by mutableStateOf("[]")
     var planExplanation by mutableStateOf("")
@@ -173,7 +213,12 @@ internal class NativeChatState {
     private var liveAssistantPresentedChars = 0
     private var pendingTurnUsage: NativeTurnUsage? = null
     var processingLabel by mutableStateOf("")
-    var reasoningText by mutableStateOf("")
+    // Reasoning accumulates in a StringBuilder and the observable exposes an immutable
+    // snapshot. This replaces `reasoningText += delta`, which reallocated the entire growing
+    // String on every flush (O(n^2) over a long chain of thought).
+    private val reasoningBuilder = StringBuilder()
+    private val reasoningTextState = mutableStateOf("")
+    val reasoningText: String get() = reasoningTextState.value
     var reasoningComplete by mutableStateOf(false)
     var reasoningCompletedAt by mutableStateOf(0L)
     // commandText is a bounded live preview. The complete stream never enters Compose
@@ -186,6 +231,8 @@ internal class NativeChatState {
     var turnMessageStartIndex by mutableIntStateOf(0)
     var phaseStartedAt by mutableStateOf(0L)
     var phaseMessageStartIndex by mutableIntStateOf(0)
+    private var retryStatusMessageId = ""
+    private var retryStatusAttempts = 0
 
     fun resetConversation() {
         historyLoading = false
@@ -196,6 +243,8 @@ internal class NativeChatState {
         activeProposedPlanItemId = ""
         activeGoalObjective = ""
         activeGoalStatus = "active"
+        retryStatusMessageId = ""
+        retryStatusAttempts = 0
         pendingUserInputRequest = ""
         pendingApprovalRequest = ""
         pendingPlanImplementation = ""
@@ -217,9 +266,10 @@ internal class NativeChatState {
         worktreeError = ""
         worktreeNotice = ""
         worktreeMergePreview = ""
+        worktreePrHandoff = ""
         phase = NativeTurnPhase.IDLE
         processingLabel = ""
-        reasoningText = ""
+        clearReasoning()
         reasoningComplete = false
         reasoningCompletedAt = 0L
         commandText = ""
@@ -234,6 +284,7 @@ internal class NativeChatState {
         subagentStatuses.clear()
         subagentHistoryErrors.clear()
         loadingSubagentHistories.clear()
+        queuedFollowUps.clear()
         turnStartedAt = 0L
         turnMessageStartIndex = 0
         phaseStartedAt = 0L
@@ -241,12 +292,37 @@ internal class NativeChatState {
         revision++
     }
 
-    fun addUser(text: String, skills: List<NativeSkill> = emptyList(), attachments: List<NativeAttachment> = emptyList()) {
-        messages.add(NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList()))
+    fun addFollowUpUser(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>): NativeChatMessage {
+        val message = NativeChatMessage(
+            role = NativeChatRole.USER,
+            content = text,
+            skills = skills.toList(),
+            attachments = attachments.toList(),
+        )
+        messages.add(message)
+        revision++
+        return message
+    }
+
+    fun removeMessage(messageId: String) {
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index >= 0) {
+            messages.removeAt(index)
+            revision++
+        }
+    }
+
+    fun addUser(text: String, skills: List<NativeSkill> = emptyList(), attachments: List<NativeAttachment> = emptyList()): NativeChatMessage {
+        // A new user turn starts a fresh retry presentation. Keep any old card in history, but
+        // never let a later error update it instead of the current turn's card.
+        retryStatusMessageId = ""
+        retryStatusAttempts = 0
+        val message = NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList())
+        messages.add(message)
         turnMessageStartIndex = messages.size
         phase = NativeTurnPhase.WAITING
         processingLabel = "处理中"
-        reasoningText = ""
+        clearReasoning()
         reasoningComplete = false
         reasoningCompletedAt = 0L
         commandText = ""
@@ -260,6 +336,7 @@ internal class NativeChatState {
         phaseStartedAt = turnStartedAt
         phaseMessageStartIndex = turnMessageStartIndex
         revision++
+        return message
     }
 
     private fun processPayload(): String {
@@ -303,7 +380,7 @@ internal class NativeChatState {
         sealCurrentPhase()
         val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT && it.streaming }
         if (lastAssistant >= 0) sealLiveAssistant(lastAssistant)
-        reasoningText = ""
+        clearReasoning()
         reasoningComplete = false
         reasoningCompletedAt = 0L
         commandText = ""
@@ -315,6 +392,23 @@ internal class NativeChatState {
         phaseStartedAt = System.currentTimeMillis()
         phaseMessageStartIndex = messages.size
         revision++
+    }
+
+    fun appendReasoning(delta: String) {
+        if (delta.isEmpty()) return
+        reasoningBuilder.append(delta)
+        reasoningTextState.value = reasoningBuilder.toString()
+    }
+
+    fun replaceReasoning(full: String) {
+        reasoningBuilder.setLength(0)
+        reasoningBuilder.append(full)
+        reasoningTextState.value = full
+    }
+
+    fun clearReasoning() {
+        reasoningBuilder.setLength(0)
+        reasoningTextState.value = ""
     }
 
     fun finishReasoning() {
@@ -555,7 +649,8 @@ internal class NativeChatState {
         if (delta.isEmpty()) return
         commandOutputBuffer.append(delta)
         commandText = NativeCommandOutputStore.livePreview(commandOutputBuffer)
-        revision++
+        // commandText is independently observable; bumping the global revision here made the
+        // work panel recompute its message scans on every terminal chunk.
     }
 
     fun commandOutputLength(): Int = commandOutputBuffer.length
@@ -651,7 +746,7 @@ internal class NativeChatState {
             completeCommand(unfinished.toString())
         }
         sealCurrentPhase()
-        reasoningText = ""
+        clearReasoning()
         commandText = ""
         liveCommandJson = ""
         commandOutputBuffer.setLength(0)
@@ -713,6 +808,62 @@ internal class NativeChatState {
         connectionLabel = "连接异常"
         revision++
     }
+
+    fun hasRetryStatus(): Boolean = retryStatusMessageId.isNotBlank()
+
+    fun retryStatusAttempts(): Int = retryStatusAttempts
+
+    /** Update one stable retry card instead of appending a new error for every provider retry. */
+    fun updateRetryStatus(message: String, automaticGoal: Boolean, terminal: Boolean) {
+        if (retryStatusMessageId.isBlank()) retryStatusMessageId = UUID.randomUUID().toString()
+        retryStatusAttempts++
+        val prefix = when {
+            automaticGoal -> "目标自动重试 · 第 ${retryStatusAttempts} 次"
+            terminal -> "重试失败 · 共 ${retryStatusAttempts} 次"
+            else -> "正在重试 · 第 ${retryStatusAttempts} 次"
+        }
+        val content = "$prefix\n${message.ifBlank { "Codex 后端暂时没有返回结果" }}"
+        val index = messages.indexOfFirst { it.id == retryStatusMessageId }
+        val updated = NativeChatMessage(
+            id = retryStatusMessageId,
+            role = NativeChatRole.ERROR,
+            content = content,
+        )
+        if (index >= 0) messages[index] = updated else messages.add(updated)
+        phase = if (terminal) NativeTurnPhase.FAILED else NativeTurnPhase.WAITING
+        processingLabel = if (automaticGoal) "目标仍在执行，准备重试…" else "正在重试…"
+        connectionLabel = "连接异常"
+        revision++
+    }
+
+    /** Replace the merged error card with a compact success notice after a retry recovers. */
+    fun completeRetryStatus() {
+        val index = messages.indexOfFirst { it.id == retryStatusMessageId }
+        if (index >= 0) {
+            messages[index] = messages[index].copy(
+                role = NativeChatRole.ACTIVITY,
+                content = "NOTICE|重试后已恢复（共 ${retryStatusAttempts} 次）",
+            )
+            revision++
+        }
+        retryStatusMessageId = ""
+        retryStatusAttempts = 0
+    }
+
+    /** Keep the same card at the end of the current user turn when a goal starts another try. */
+    fun prepareForRetry(preserveRetryStatus: Boolean) {
+        val retryCard = if (preserveRetryStatus) messages.firstOrNull { it.id == retryStatusMessageId } else null
+        if (retryCard != null) messages.removeAll { it.id == retryCard.id }
+        while (messages.isNotEmpty() && messages.last().role != NativeChatRole.USER) {
+            messages.removeAt(messages.lastIndex)
+        }
+        if (retryCard != null) messages.add(retryCard)
+        if (!preserveRetryStatus) {
+            retryStatusMessageId = ""
+            retryStatusAttempts = 0
+        }
+        revision++
+    }
 }
 
 class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
@@ -725,6 +876,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private val chatState = NativeChatState()
     private var bridge: CodexAppServerBridge? = null
+    private val pendingNativeSteers = mutableMapOf<Int, PendingNativeSteer>()
     private var activeProfileId: String = ""
     private var appliedProviderFingerprint: String? = null
     private var appliedProviderDefaultModel: String = ""
@@ -744,6 +896,22 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
     }
     private val streamHandler = Handler(Looper.getMainLooper())
+    private var goalRetryCycleActive = false
+    private var goalRetryWaitingForCompletion = false
+    private var goalRetryScheduled = false
+    private var suppressGoalRetryUntilNewTurn = false
+    private val goalRetryRunnable = Runnable {
+        goalRetryScheduled = false
+        if (!canAutoRetryGoal()) return@Runnable
+        if (chatState.busy) {
+            scheduleGoalRetry(2_000L)
+            return@Runnable
+        }
+        val prompt = chatState.messages.lastOrNull { it.role == NativeChatRole.USER }?.content.orEmpty()
+        if (prompt.isBlank()) return@Runnable
+        goalRetryWaitingForCompletion = false
+        retryMessage(prompt, preserveRetryStatus = true)
+    }
     private val pendingReasoning = StringBuilder()
     private val pendingAnswer = StringBuilder()
     private val pendingPlan = StringBuilder()
@@ -828,6 +996,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var displayedHistorySnapshot: NativeHistorySnapshot? = null
     private var nativeThemeMode by mutableStateOf("system")
     private var nativeColorPalette by mutableStateOf(FcodeColorPalette.ROSE.value)
+    private var nativeInterfaceStyle by mutableStateOf(FcodeInterfaceStyle.MATERIAL.value)
+    private var nativeAppearanceRevision by mutableIntStateOf(0)
     private var nativeChatBackground by mutableStateOf(FcodeChatBackgroundStyle.THEME.value)
     private var nativeChatBackgroundImage by mutableStateOf("")
     private var nativeChatBackgroundDim by mutableStateOf(0.32f)
@@ -839,6 +1009,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var showResponseStats by mutableStateOf(true)
     private var showModelSubtitle by mutableStateOf(true)
     private var showReasoningTitles by mutableStateOf(true)
+    private var hideNativeStatusBar by mutableStateOf(false)
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         uris.forEach { cacheAttachment(it, true) }
     }
@@ -859,10 +1030,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }.apply()
         }
         chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
+        chatState.followUpSubmitAction = NativeFollowUpSubmitAction.from(
+            nativePrefs.getString(NATIVE_FOLLOW_UP_ACTION_PREFERENCE, "steer"),
+        )
         chatState.selectedMode = nativePrefs.getString("native_chat_mode_v1", "default").orEmpty().takeIf { it == "plan" } ?: "default"
         chatState.permissionMode = NativePermissionMode.normalize(nativePrefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
         nativeThemeMode = FcodeAppearancePreferences.normalizeColorMode(nativePrefs.getString(FcodeAppearancePreferences.COLOR_MODE, "system"))
         nativeColorPalette = FcodeColorPalette.from(nativePrefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value
+        nativeInterfaceStyle = FcodeInterfaceStyle.from(nativePrefs.getString(FcodeAppearancePreferences.INTERFACE_STYLE, FcodeInterfaceStyle.MATERIAL.value)).value
         nativeChatBackground = FcodeChatBackgroundStyle.from(nativePrefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value
         nativeChatBackgroundImage = nativePrefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()
         nativeChatBackgroundDim = nativePrefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
@@ -874,10 +1049,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         showResponseStats = nativePrefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
         showModelSubtitle = nativePrefs.getBoolean(NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE, true)
         showReasoningTitles = nativePrefs.getBoolean(NATIVE_SHOW_REASONING_TITLES_PREFERENCE, true)
+        hideNativeStatusBar = nativePrefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
         )
+        applyNativeStatusBarVisibility(hideNativeStatusBar)
 
         setContent {
             FcodeChatTheme(
@@ -887,6 +1064,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 showReasoning,
                 autoFollowOutput,
                 colorPalette = nativeColorPalette,
+                interfaceStyle = nativeInterfaceStyle,
+                appearanceRevision = nativeAppearanceRevision,
                 chatBackground = nativeChatBackground,
                 chatBackgroundImage = nativeChatBackgroundImage,
                 chatBackgroundDim = nativeChatBackgroundDim,
@@ -904,6 +1083,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onRetry = ::retryMessage,
                     onEditMessage = ::editMessage,
                     onStop = ::stopCurrentTurn,
+                    onFollowUpActionChange = ::setFollowUpSubmitAction,
+                    onRemoveQueuedFollowUp = ::removeQueuedFollowUp,
                     onNewConversation = ::newConversation,
                     onResumeConversation = ::resumeConversation,
                     onUiMotionChanged = ::setUiMotionActive,
@@ -942,6 +1123,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
         getSharedPreferences("codex_mobile", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(taskPreferenceListener)
         startRuntimeAfterFirstDraw()
+    }
+
+    private fun applyNativeStatusBarVisibility(hidden: Boolean) {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        if (hidden) controller.hide(WindowInsetsCompat.Type.statusBars())
+        else controller.show(WindowInsetsCompat.Type.statusBars())
     }
 
     private fun startRuntimeAfterFirstDraw() {
@@ -1035,6 +1222,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             profile.ultraSubagentLimit,
             profile.normalSubagentLimit,
             profile.ultraTransportEfforts(),
+            profile.hasV2Models(),
             profile.customSubagentStability && profile.hasCustomV2Models(),
         )
         if (!retainedThread.isNullOrBlank()) {
@@ -1199,7 +1387,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.phase = NativeTurnPhase.WAITING
         startFrameDiagnostics()
         chatState.processingLabel = "处理中"
-        chatState.reasoningText = ""
+        chatState.clearReasoning()
         chatState.reasoningComplete = false
         chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
@@ -1213,21 +1401,23 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         bridge?.editTurn(value, chatState.selectedModel, chatState.selectedEffort, rollbackTurns)
     }
 
-    private fun retryMessage(text: String) {
+    private fun retryMessage(text: String, preserveRetryStatus: Boolean = false) {
         val displayValue = text.trim()
         if (displayValue.isEmpty() || chatState.busy || !chatState.ready) return
+        if (!preserveRetryStatus) {
+            cancelGoalAutoRetry()
+            suppressGoalRetryUntilNewTurn = false
+        }
         val implementsPlan = displayValue.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
         val value = if (implementsPlan) {
             "${CodexAppServerBridge.IMPLEMENT_PLAN_PROMPT_PREFIX}\n${decodeNativeImplementPlan(displayValue)}"
         } else displayValue
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
-        while (chatState.messages.isNotEmpty() && chatState.messages.last().role != NativeChatRole.USER) {
-            chatState.messages.removeAt(chatState.messages.lastIndex)
-        }
+        chatState.prepareForRetry(preserveRetryStatus)
         chatState.phase = NativeTurnPhase.WAITING
         startFrameDiagnostics()
         chatState.processingLabel = "处理中"
-        chatState.reasoningText = ""
+        chatState.clearReasoning()
         chatState.reasoningComplete = false
         chatState.reasoningCompletedAt = 0L
         chatState.commandText = ""
@@ -1250,32 +1440,118 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         persistDraft(value)
     }
 
-    private fun sendMessage(text: String) {
-        val value = text.trim()
-        if ((value.isEmpty() && chatState.attachments.isEmpty()) || chatState.busy || !chatState.ready) return
+    private fun captureFollowUp(value: String): NativeQueuedFollowUp = NativeQueuedFollowUp(
+        text = value,
+        attachments = chatState.attachments.toList(),
+        skills = chatState.selectedSkills.toList(),
+        model = chatState.selectedModel,
+        effort = chatState.selectedEffort,
+        mode = chatState.selectedMode,
+    )
+
+    private fun attachmentsJson(followUp: NativeQueuedFollowUp): String = JSONArray().also { array ->
+        followUp.attachments.forEach { attachment ->
+            array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))
+        }
+    }.toString()
+
+    private fun skillsJson(followUp: NativeQueuedFollowUp): String = JSONArray().also { array ->
+        followUp.skills.forEach { skill ->
+            array.put(JSONObject().put("name", skill.name).put("path", skill.path))
+        }
+    }.toString()
+
+    private fun clearComposerAfterSubmit() {
+        updateDraft("")
+        chatState.attachments.clear()
+        chatState.selectedSkills.clear()
+    }
+
+    private fun queueFollowUp(followUp: NativeQueuedFollowUp, clearComposer: Boolean = true): NativeSubmitResult {
+        if (chatState.queuedFollowUps.none { it.id == followUp.id }) chatState.queuedFollowUps.add(followUp)
+        if (clearComposer) clearComposerAfterSubmit()
+        return NativeSubmitResult(accepted = true, queued = true)
+    }
+
+    private fun startNewTurn(followUp: NativeQueuedFollowUp, clearComposer: Boolean = true): NativeSubmitResult {
+        cancelGoalAutoRetry()
+        goalRetryCycleActive = false
+        goalRetryWaitingForCompletion = false
+        suppressGoalRetryUntilNewTurn = false
         currentThreadId?.let { NativeTaskNotificationManager.reset(this, it) }
         currentThreadId?.takeIf { chatState.pendingPlanImplementation.isNotBlank() }
             ?.let(::clearPendingPlanImplementation)
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
-        updateDraft("")
-        if (chatState.conversationTitle == "新对话" && value.isNotBlank()) {
-            chatState.conversationTitle = value.lineSequence().firstOrNull().orEmpty().trim().let { if (it.length > 28) it.take(27) + "…" else it }.ifBlank { "新对话" }
+        // A queued item was cleared when it entered the queue. Do not erase a newer draft that
+        // the user typed while the previous turn was finishing.
+        if (clearComposer) clearComposerAfterSubmit()
+        if (chatState.conversationTitle == "新对话" && followUp.text.isNotBlank()) {
+            chatState.conversationTitle = followUp.text.lineSequence().firstOrNull().orEmpty().trim()
+                .let { if (it.length > 28) it.take(27) + "…" else it }
+                .ifBlank { "新对话" }
         }
-        val referencedSkills = chatState.selectedSkills.toList()
-        val referencedAttachments = chatState.attachments.toList()
-        chatState.addUser(value, referencedSkills, referencedAttachments)
+        val userMessage = chatState.addUser(followUp.text, followUp.skills, followUp.attachments)
         startFrameDiagnostics()
-        val attachments = JSONArray().also { array ->
-            chatState.attachments.forEach { attachment ->
-                array.put(JSONObject().put("name", attachment.name).put("path", attachment.path).put("image", attachment.image))
-            }
+        bridge?.sendMessage(
+            followUp.text,
+            followUp.model,
+            followUp.effort,
+            attachmentsJson(followUp),
+            followUp.mode,
+            skillsJson(followUp),
+        )
+        return NativeSubmitResult(accepted = true, messageId = userMessage.id)
+    }
+
+    private fun submitSteer(followUp: NativeQueuedFollowUp): NativeSubmitResult {
+        cancelGoalAutoRetry()
+        goalRetryWaitingForCompletion = false
+        currentThreadId?.let(NativeHistorySnapshotCache::remove)
+        val requestId = bridge?.steerMessage(
+            followUp.text,
+            attachmentsJson(followUp),
+            skillsJson(followUp),
+        ) ?: -1
+        if (requestId < 0) {
+            Toast.makeText(
+                this,
+                nativeText(nativeLanguage, "当前回答尚未可引导，已加入发送队列", "The active turn is not steerable yet; queued instead"),
+                Toast.LENGTH_SHORT,
+            ).show()
+            return queueFollowUp(followUp)
         }
-        val skills = JSONArray().also { array ->
-            chatState.selectedSkills.forEach { skill -> array.put(JSONObject().put("name", skill.name).put("path", skill.path)) }
+        val userMessage = chatState.addFollowUpUser(followUp.text, followUp.skills, followUp.attachments)
+        pendingNativeSteers[requestId] = PendingNativeSteer(userMessage.id, followUp)
+        clearComposerAfterSubmit()
+        return NativeSubmitResult(accepted = true, messageId = userMessage.id)
+    }
+
+    private fun sendMessage(text: String): NativeSubmitResult? {
+        val value = text.trim()
+        if ((value.isEmpty() && chatState.attachments.isEmpty()) || !chatState.ready) return null
+        val followUp = captureFollowUp(value)
+        if (!chatState.busy) return startNewTurn(followUp)
+        return when (chatState.followUpSubmitAction) {
+            NativeFollowUpSubmitAction.STEER -> submitSteer(followUp)
+            NativeFollowUpSubmitAction.QUEUE -> queueFollowUp(followUp)
         }
-        bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, attachments.toString(), chatState.selectedMode, skills.toString())
-        chatState.attachments.clear()
-        chatState.selectedSkills.clear()
+    }
+
+    private fun setFollowUpSubmitAction(action: NativeFollowUpSubmitAction) {
+        chatState.followUpSubmitAction = action
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .putString(NATIVE_FOLLOW_UP_ACTION_PREFERENCE, action.name.lowercase(Locale.ROOT))
+            .apply()
+    }
+
+    private fun removeQueuedFollowUp(id: String) {
+        chatState.queuedFollowUps.removeAll { it.id == id }
+    }
+
+    private fun sendNextQueuedFollowUp() {
+        if (chatState.busy || !chatState.ready || chatState.queuedFollowUps.isEmpty()) return
+        val followUp = chatState.queuedFollowUps.removeAt(0)
+        startNewTurn(followUp, clearComposer = false)
     }
 
     private fun setChatMode(mode: String) {
@@ -1366,6 +1642,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .remove(goalStatusPreferenceKey(threadId))
             .apply()
         if (currentThreadId == threadId) {
+            cancelGoalAutoRetry()
+            goalRetryCycleActive = false
+            goalRetryWaitingForCompletion = false
             chatState.activeGoalObjective = ""
             chatState.activeGoalStatus = "active"
         }
@@ -1385,6 +1664,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val normalizedStatus = status.takeIf { it == "active" || it == "paused" || it == "budgetLimited" } ?: "active"
         chatState.activeGoalObjective = objective
         chatState.activeGoalStatus = normalizedStatus
+        if (normalizedStatus != "active") cancelGoalAutoRetry()
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
             .putString(goalPreferenceKey(threadId), objective)
             .putString(goalStatusPreferenceKey(threadId), normalizedStatus)
@@ -1399,6 +1679,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
             .putString(goalPreferenceKey(threadId), value).putString(goalStatusPreferenceKey(threadId), "active").apply()
         chatState.activeGoalStatus = "active"
+        suppressGoalRetryUntilNewTurn = false
         bridge?.setThreadGoal(value)
     }
 
@@ -1619,6 +1900,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         Thread({
             val result = when (action) {
                 "refresh" -> 0 to ""
+                "fetch" -> runGit(project, listOf("fetch", "--prune", "--all"), mapOf("GIT_TERMINAL_PROMPT" to "0"))
+                "push" -> pushCurrentBranch(project)
                 "stage" -> runGit(project, listOf("add", "--", value))
                 "unstage" -> {
                     val restore = runGit(project, listOf("restore", "--staged", "--", value))
@@ -1641,6 +1924,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                         "stage" -> nativeText(nativeLanguage, "已暂存 $value", "Staged $value")
                         "unstage" -> nativeText(nativeLanguage, "已取消暂存 $value", "Unstaged $value")
                         "commit" -> result.second.lineSequence().firstOrNull().orEmpty().ifBlank { nativeText(nativeLanguage, "提交成功", "Commit created") }
+                        "fetch" -> nativeText(nativeLanguage, "远程引用已更新", "Remote references updated")
+                        "push" -> result.second.lineSequence().lastOrNull { it.isNotBlank() }.orEmpty().ifBlank { nativeText(nativeLanguage, "分支已推送", "Branch pushed") }
                         else -> ""
                     }
                 } else {
@@ -1655,8 +1940,40 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val git = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "git")
         if (!git.isFile) return NativeGitWorkflow.unavailable(project, nativeText(nativeLanguage, "尚未安装 Git", "Git is not installed"))
         val result = runGit(project, listOf("-c", "core.quotepath=false", "status", "--porcelain=v1", "--branch", "--untracked-files=all"))
-        return if (result.first == 0) NativeGitWorkflow.parse(project, result.second)
-        else NativeGitWorkflow.unavailable(project, result.second.trim().ifBlank { nativeText(nativeLanguage, "这里不是 Git 仓库", "This is not a Git repository") })
+        if (result.first != 0) return NativeGitWorkflow.unavailable(project, result.second.trim().ifBlank { nativeText(nativeLanguage, "这里不是 Git 仓库", "This is not a Git repository") })
+        val head = runGit(project, listOf("rev-parse", "--verify", "HEAD"))
+        val remotes = runGit(project, listOf("remote", "-v"))
+        val history = if (head.first == 0) runGit(project, listOf(
+            "log", "-n", "30", "--date-order",
+            "--pretty=format:%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1e",
+        )) else 0 to ""
+        return NativeGitRemoteProtocol.enrichSnapshot(
+            NativeGitWorkflow.parse(project, result.second),
+            NativeGitRemoteProtocol.parseRemotes(remotes.second.takeIf { remotes.first == 0 }.orEmpty()),
+            NativeGitRemoteProtocol.parseHistory(history.second.takeIf { history.first == 0 }.orEmpty()),
+            head.first == 0,
+        )
+    }
+
+    private fun pushCurrentBranch(project: String): Pair<Int, String> {
+        val branch = runGit(project, listOf("symbolic-ref", "--quiet", "--short", "HEAD"))
+        val branchName = branch.second.trim()
+        if (branch.first != 0 || branchName.isBlank()) return -1 to nativeText(nativeLanguage, "分离 HEAD 不能直接推送", "A detached HEAD cannot be pushed directly")
+        val remotesResult = runGit(project, listOf("remote", "-v"))
+        val remotes = NativeGitRemoteProtocol.parseRemotes(remotesResult.second.takeIf { remotesResult.first == 0 }.orEmpty())
+        val upstream = runGit(project, listOf("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"))
+        val upstreamName = upstream.second.trim().takeIf { upstream.first == 0 }.orEmpty()
+        val remoteName = upstreamName.substringBefore('/', "").ifBlank {
+            remotes.firstOrNull { it.name == "origin" }?.name ?: remotes.firstOrNull()?.name.orEmpty()
+        }
+        if (remoteName.isBlank()) return -1 to nativeText(nativeLanguage, "仓库没有可推送的远程地址", "The repository has no remote to push to")
+        val arguments = if (upstreamName.isBlank()) {
+            listOf("push", "-u", remoteName, branchName)
+        } else {
+            val remoteBranch = upstreamName.substringAfter('/', branchName)
+            listOf("push", remoteName, "HEAD:refs/heads/$remoteBranch")
+        }
+        return runGit(project, arguments, mapOf("GIT_TERMINAL_PROMPT" to "0"))
     }
 
     private fun runGit(project: String, arguments: List<String>): Pair<Int, String> = runCatching {
@@ -1673,21 +1990,34 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .redirectErrorStream(true)
             .also { builder ->
                 builder.environment()["PATH"] = TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin:/system/xbin"
+                builder.environment()["HOME"] = TermuxConstants.TERMUX_HOME_DIR_PATH
+                builder.environment()["PREFIX"] = TermuxConstants.TERMUX_PREFIX_DIR_PATH
+                builder.environment()["TMPDIR"] = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH
                 builder.environment().putAll(environment)
             }
             .start()
-        val output = process.inputStream.bufferedReader().use { reader ->
-            val collected = StringBuilder()
-            val buffer = CharArray(8_192)
-            while (true) {
-                val count = reader.read(buffer)
-                if (count < 0) break
-                val remaining = 240_000 - collected.length
-                if (remaining > 0) collected.append(buffer, 0, minOf(count, remaining))
+        val collected = StringBuilder()
+        val outputReader = Thread({
+            process.inputStream.bufferedReader().use { reader ->
+                val buffer = CharArray(8_192)
+                while (true) {
+                    val count = reader.read(buffer)
+                    if (count < 0) break
+                    synchronized(collected) {
+                        val remaining = 240_000 - collected.length
+                        if (remaining > 0) collected.append(buffer, 0, minOf(count, remaining))
+                    }
+                }
             }
-            collected.toString()
+        }, "NativeGitOutput").apply { isDaemon = true; start() }
+        val completed = process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)
+        if (!completed) {
+            process.destroyForcibly()
+            outputReader.join(2_000L)
+            return@runCatching -1 to nativeText(nativeLanguage, "Git 操作超时", "Git operation timed out")
         }
-        process.waitFor()
+        outputReader.join(2_000L)
+        val output = synchronized(collected) { collected.toString() }
         process.exitValue() to output
     }.getOrElse { -1 to (it.message ?: it.javaClass.simpleName) }
 
@@ -1696,10 +2026,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val indexFile = File.createTempFile("index-", ".tmp", checkpointDir).apply { delete() }
         val environment = mapOf(
             "GIT_INDEX_FILE" to indexFile.absolutePath,
-            "GIT_AUTHOR_NAME" to "Fcode Checkpoint",
-            "GIT_AUTHOR_EMAIL" to "checkpoint@fcode.local",
-            "GIT_COMMITTER_NAME" to "Fcode Checkpoint",
-            "GIT_COMMITTER_EMAIL" to "checkpoint@fcode.local",
+            "GIT_AUTHOR_NAME" to "Sillage Checkpoint",
+            "GIT_AUTHOR_EMAIL" to "checkpoint@sillage.local",
+            "GIT_COMMITTER_NAME" to "Sillage Checkpoint",
+            "GIT_COMMITTER_EMAIL" to "checkpoint@sillage.local",
         )
         return try {
             val head = runGit(project, listOf("rev-parse", "--verify", "HEAD"))
@@ -1711,7 +2041,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             if (add.first != 0) return "" to add.second
             val tree = runGit(project, listOf("write-tree"), environment)
             if (tree.first != 0) return "" to tree.second
-            val commitArgs = mutableListOf("commit-tree", tree.second.trim(), "-m", "Fcode workspace checkpoint")
+            val commitArgs = mutableListOf("commit-tree", tree.second.trim(), "-m", "Sillage workspace checkpoint")
             if (headCommit.isNotBlank()) commitArgs.addAll(listOf("-p", headCommit))
             val commit = runGit(project, commitArgs, environment)
             if (commit.first != 0) "" to commit.second else commit.second.trim() to ""
@@ -1878,15 +2208,26 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         File(left).canonicalPath == File(right).canonicalPath
     }.getOrDefault(false)
 
+    private fun pathInside(path: String, directory: String): Boolean = runCatching {
+        val child = File(path).canonicalFile
+        val parent = File(directory).canonicalFile
+        child == parent || child.path.startsWith(parent.path.trimEnd(File.separatorChar) + File.separator)
+    }.getOrDefault(false)
+
     private fun performWorktreeAction(action: String, rawValue: String) {
         val project = chatState.projectPath
         val routeThread = currentThreadId
+        val referencedProjects = chatState.conversations.map { it.projectPath }.filter { it.isNotBlank() }
         if (project.isBlank()) {
             chatState.worktreeError = nativeText(nativeLanguage, "\u5f53\u524d\u5bf9\u8bdd\u6ca1\u6709\u7ed1\u5b9a\u9879\u76ee\u76ee\u5f55", "This conversation has no project directory")
             return
         }
         if (action == "clearPreview") {
             chatState.worktreeMergePreview = ""
+            return
+        }
+        if (action == "clearPrHandoff") {
+            chatState.worktreePrHandoff = ""
             return
         }
         if (action == "open") {
@@ -1902,6 +2243,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             var error = ""
             var notice = ""
             var preview = chatState.worktreeMergePreview
+            var prHandoff = chatState.worktreePrHandoff
             var openProject = ""
             val failure = runCatching {
                 val initial = loadWorktrees(project)
@@ -1916,6 +2258,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     "create" -> {
                         if (main == null) { error = nativeText(nativeLanguage, "\u65e0\u6cd5\u786e\u5b9a Git \u4e3b\u5de5\u4f5c\u533a", "Unable to resolve the main Git worktree"); return@runCatching }
                         val branch = NativeWorktreeProtocol.normalizeBranch(rawValue, System.currentTimeMillis())
+                        val validBranch = runGit(main.path, listOf("check-ref-format", "--branch", branch))
+                        if (validBranch.first != 0) { error = validBranch.second; return@runCatching }
                         val repoName = File(main.path).name.ifBlank { "repository" }
                         val base = File(TermuxConstants.TERMUX_HOME_DIR, ".fcode/worktrees/$repoName").apply { mkdirs() }
                         var target = File(base, NativeWorktreeProtocol.pathSlug(branch))
@@ -1932,7 +2276,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     }
                     "previewMerge" -> {
                         val source = entries.firstOrNull { samePath(it.path, rawValue) }
-                        if (main == null || source == null || source === main || source.branch.isBlank() || main.branch.isBlank()) {
+                        if (main == null || source == null || samePath(source.path, main.path) || source.branch.isBlank() || main.branch.isBlank()) {
                             error = nativeText(nativeLanguage, "\u65e0\u6cd5\u9884\u89c8\u8be5 worktree \u7684\u5408\u5e76", "Unable to preview merge for this worktree")
                         } else if (main.dirty || source.dirty) {
                             error = nativeText(nativeLanguage, "\u5408\u5e76\u524d\u4e3b\u5de5\u4f5c\u533a\u548c\u9694\u79bb\u5de5\u4f5c\u533a\u90fd\u5fc5\u987b\u5e72\u51c0", "Both the main and isolated worktrees must be clean before merging")
@@ -1945,6 +2289,42 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                                 .put("commits", commits.second).put("stat", stat.second)
                                 .put("canMerge", commits.first == 0 && commits.second.isNotBlank())
                                 .toString()
+                        }
+                    }
+                    "preparePr" -> {
+                        val source = entries.firstOrNull { samePath(it.path, rawValue) }
+                        if (main == null || source == null || samePath(source.path, main.path) || source.branch.isBlank() || main.branch.isBlank()) {
+                            error = nativeText(nativeLanguage, "无法为该 worktree 生成 PR 交接信息", "Unable to generate a PR handoff for this worktree")
+                        } else {
+                            val delta = runGit(main.path, listOf("rev-list", "--left-right", "--count", "${main.branch}...${source.branch}"))
+                            if (delta.first != 0) {
+                                error = delta.second
+                            } else {
+                                val counts = delta.second.trim().split(Regex("\\s+")).mapNotNull(String::toIntOrNull)
+                                val behind = counts.getOrElse(0) { 0 }
+                                val ahead = counts.getOrElse(1) { 0 }
+                                val commits = runGit(main.path, listOf("log", "--reverse", "--pretty=format:- %h %s", "${main.branch}..${source.branch}", "--"))
+                                val stat = runGit(main.path, listOf("diff", "--stat", "${main.branch}...${source.branch}", "--"))
+                                val files = runGit(main.path, listOf("-c", "core.quotepath=false", "diff", "--name-status", "${main.branch}...${source.branch}", "--"))
+                                val remotesResult = runGit(source.path, listOf("remote", "-v"))
+                                val remotes = NativeGitRemoteProtocol.parseRemotes(remotesResult.second.takeIf { remotesResult.first == 0 }.orEmpty())
+                                val upstream = runGit(source.path, listOf("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"))
+                                val upstreamRemote = upstream.second.trim().takeIf { upstream.first == 0 }.orEmpty().substringBefore('/', "")
+                                val remote = remotes.firstOrNull { it.name == upstreamRemote }
+                                    ?: remotes.firstOrNull { it.name == "origin" }
+                                    ?: remotes.firstOrNull()
+                                prHandoff = NativeGitRemoteProtocol.buildHandoff(
+                                    source.path, source.branch, main.branch,
+                                    remote?.name.orEmpty(), remote?.pushUrl.orEmpty(),
+                                    ahead, behind,
+                                    commits.second.takeIf { commits.first == 0 }.orEmpty(),
+                                    stat.second.takeIf { stat.first == 0 }.orEmpty(),
+                                    files.second.takeIf { files.first == 0 }.orEmpty(),
+                                    source.dirty,
+                                )
+                                preview = ""
+                                notice = nativeText(nativeLanguage, "已生成 ${source.branch} 的 PR 交接信息", "PR handoff generated for ${source.branch}")
+                            }
                         }
                     }
                     "merge" -> {
@@ -1973,8 +2353,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     }
                     "remove" -> {
                         val target = entries.firstOrNull { samePath(it.path, rawValue) }
-                        if (main == null || target == null || target === main || samePath(target.path, project)) {
+                        if (main == null || target == null || samePath(target.path, main.path) || pathInside(project, target.path)) {
                             error = nativeText(nativeLanguage, "\u4e0d\u80fd\u79fb\u9664\u4e3b\u5de5\u4f5c\u533a\u6216\u5f53\u524d\u5bf9\u8bdd\u6b63\u5728\u4f7f\u7528\u7684 worktree", "The main or currently active worktree cannot be removed")
+                        } else if (referencedProjects.any { pathInside(it, target.path) }) {
+                            error = nativeText(nativeLanguage, "\u8fd8\u6709\u5bf9\u8bdd\u7ed1\u5b9a\u5230\u8be5 worktree\uff0c\u8bf7\u5148\u5220\u9664\u6216\u8fc1\u79fb\u8fd9\u4e9b\u5bf9\u8bdd", "Conversations still reference this worktree; remove or migrate them first")
                         } else if (target.dirty || target.locked) {
                             error = nativeText(nativeLanguage, "\u53ea\u80fd\u79fb\u9664\u5e72\u51c0\u4e14\u672a\u9501\u5b9a\u7684 worktree", "Only clean, unlocked worktrees can be removed")
                         } else {
@@ -1994,6 +2376,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.worktreeError = error.trim()
                 chatState.worktreeNotice = notice
                 chatState.worktreeMergePreview = preview
+                chatState.worktreePrHandoff = prHandoff
                 chatState.worktrees.clear()
                 chatState.worktrees.addAll(refreshed.first)
                 if (openProject.isNotBlank() && error.isBlank()) newConversationAtProject(openProject)
@@ -2007,11 +2390,16 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (chatState.activeGoalObjective.isBlank() || chatState.phase.active) return
         val next = if (chatState.activeGoalStatus == "active") "paused" else "active"
         chatState.activeGoalStatus = next
+        if (next != "active") cancelGoalAutoRetry()
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString(goalStatusPreferenceKey(threadId), next).apply()
         bridge?.setThreadGoalStatus(next)
+        if (next == "active" && goalRetryCycleActive) scheduleGoalRetry(300L)
     }
 
     private fun clearGoal() {
+        cancelGoalAutoRetry()
+        goalRetryCycleActive = false
+        goalRetryWaitingForCompletion = false
         currentThreadId?.let(::clearLocalGoal)
         bridge?.clearThreadGoal()
     }
@@ -2034,8 +2422,62 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun stopCurrentTurn() {
         if (!chatState.busy) return
+        cancelGoalAutoRetry()
+        goalRetryWaitingForCompletion = false
+        suppressGoalRetryUntilNewTurn = true
         chatState.connectionLabel = "正在停止…"
         bridge?.interruptCurrentTurn()
+    }
+
+    private fun canAutoRetryGoal(): Boolean =
+        !suppressGoalRetryUntilNewTurn &&
+            currentThreadId?.isNotBlank() == true &&
+            chatState.activeGoalObjective.isNotBlank() &&
+            chatState.activeGoalStatus == "active" &&
+            chatState.ready
+
+    private fun scheduleGoalRetry(delayMs: Long = 1_800L) {
+        if (!canAutoRetryGoal() || goalRetryScheduled) return
+        goalRetryScheduled = true
+        streamHandler.postDelayed(goalRetryRunnable, delayMs)
+    }
+
+    private fun cancelGoalAutoRetry() {
+        goalRetryScheduled = false
+        streamHandler.removeCallbacks(goalRetryRunnable)
+    }
+
+    private fun handleTurnError(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val error = payload.optJSONObject("error")
+        val message = error?.optString("message").orEmpty().ifBlank { payload.optString("message") }
+        val willRetry = payload.optBoolean("willRetry", false)
+        val automaticGoal = canAutoRetryGoal()
+        if (willRetry) {
+            // app-server is still inside the same turn; keep the UI in a waiting state and update
+            // the existing card in place. The retry limit is an internal provider retry, not a
+            // reason to show five visually identical error cards.
+            chatState.updateRetryStatus(message, automaticGoal, terminal = false)
+            return
+        }
+        flushReasoningDeltas(force = true)
+        flushAnswerDeltas(force = true)
+        flushPlanDeltas()
+        flushCommandDeltas()
+        if (automaticGoal) {
+            goalRetryCycleActive = true
+            goalRetryWaitingForCompletion = true
+            chatState.updateRetryStatus(message, automaticGoal = true, terminal = true)
+            // Normally turn/completed arrives first. This fallback also recovers from older
+            // app-server builds that only emit the final error notification.
+            scheduleGoalRetry()
+        } else {
+            chatState.updateRetryStatus(message, automaticGoal = false, terminal = true)
+            stopFrameDiagnostics()
+            currentThreadId?.let { threadId ->
+                NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.FAILED, message.hashCode().toString(), "")
+            }
+        }
     }
 
     private fun refreshConversations() {
@@ -2243,6 +2685,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
+        pendingNativeSteers.clear()
+        cancelGoalAutoRetry()
+        goalRetryCycleActive = false
+        goalRetryWaitingForCompletion = false
+        suppressGoalRetryUntilNewTurn = false
         discardPendingStreamEvents("resume")
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
@@ -2299,6 +2746,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun newConversation() = newConversationAtProject("")
 
     private fun newConversationAtProject(requestedProjectPath: String) {
+        pendingNativeSteers.clear()
+        cancelGoalAutoRetry()
+        goalRetryCycleActive = false
+        goalRetryWaitingForCompletion = false
+        suppressGoalRetryUntilNewTurn = false
         discardPendingStreamEvents("new")
         chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
@@ -2320,12 +2772,21 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun openHomeSettings() {
-        val transition = ActivityOptions.makeCustomAnimation(
-            this,
-            R.anim.codex_settings_enter,
-            R.anim.codex_chat_hold,
-        )
-        startActivity(Intent(this, NativeSettingsActivity::class.java), transition.toBundle())
+        if (Build.VERSION.SDK_INT >= 34) {
+            // Android 14's system transition supplies the live previous-Activity preview for
+            // predictive back. A custom ActivityOptions animation replaces that preview.
+            startActivity(Intent(this, NativeSettingsActivity::class.java))
+        } else {
+            val transition = ActivityOptions.makeCustomAnimation(
+                this,
+                R.anim.codex_settings_enter,
+                R.anim.codex_chat_hold,
+            )
+            startActivity(Intent(this, NativeSettingsActivity::class.java), transition.toBundle())
+        }
+        // Capture after launching so the expensive View draw never blocks the settings entry
+        // click. The paused chat window remains drawable while the new Activity enters.
+        window.decorView.post { NativeSettingsBackPreview.capture(window) }
     }
 
     private fun openLegacyWebUi() {
@@ -2374,8 +2835,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.beginReasoningAfterAnswerIfNeeded()
         if (continuedAfterAnswer) NativeChatDiagnostics.record(this, "reasoning_segment_started", JSONObject()
             .put("messageIndex", chatState.messages.size))
-        chatState.reasoningText += value
-        chatState.revision++
+        chatState.appendReasoning(value)
     }
 
     private fun answerFlushDelayMs(): Long {
@@ -2544,7 +3004,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             "onReasoningComplete" -> {
                 flushReasoningDeltas(force = true)
                 flushCommandDeltas()
-                if (value.length > chatState.reasoningText.length) chatState.reasoningText = value
+                if (value.length > chatState.reasoningText.length) chatState.replaceReasoning(value)
                 chatState.revision++
             }
             "onCommandStarted" -> {
@@ -2664,8 +3124,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (thread.isNotBlank()) loadSubagentHistory(thread)
             }
             "onSubagentHistory" -> handleSubagentHistory(value)
+            "onSteerResult" -> {
+                val payload = runCatching { JSONObject(value) }.getOrNull() ?: return
+                val pending = pendingNativeSteers.remove(payload.optInt("requestId", -1)) ?: return
+                if (!payload.optBoolean("accepted", false)) {
+                    chatState.removeMessage(pending.messageId)
+                    queueFollowUp(pending.followUp, clearComposer = false)
+                    Toast.makeText(
+                        this,
+                        nativeText(nativeLanguage, "当前任务不能接收引导，已自动排队", "This turn cannot be steered; the message was queued"),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    if (!chatState.busy) streamHandler.post(::sendNextQueuedFollowUp)
+                }
+            }
+            "onTurnError" -> handleTurnError(value)
             "onItem" -> chatState.addActivity(value)
             "onTurnComplete" -> {
+                val wasFailed = chatState.phase == NativeTurnPhase.FAILED
+                val waitingForGoalRetry = goalRetryWaitingForCompletion
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
                 flushReasoningDeltas(force = true)
                 flushAnswerDeltas(force = true)
@@ -2675,11 +3152,27 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 currentThreadId?.takeIf { chatState.pendingUserInputRequest.isNotBlank() }
                     ?.let(::clearPendingUserInput)
                 chatState.completeTurn()
+                if (wasFailed) chatState.phase = NativeTurnPhase.FAILED
                 pendingPlanItemId = ""
                 if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
                 stopFrameDiagnostics()
                 refreshConversations()
                 applyPendingProviderConfiguration()
+                val hasQueuedFollowUp = chatState.queuedFollowUps.isNotEmpty()
+                if (hasQueuedFollowUp) {
+                    // Keep the completion barrier observable for one frame, then start exactly one
+                    // queued turn. Remaining follow-ups advance one-per-completion like WebUI.
+                    goalRetryWaitingForCompletion = false
+                    streamHandler.postDelayed(::sendNextQueuedFollowUp, 80L)
+                }
+                if (!hasQueuedFollowUp && waitingForGoalRetry && canAutoRetryGoal()) {
+                    goalRetryWaitingForCompletion = false
+                    cancelGoalAutoRetry()
+                    scheduleGoalRetry(400L)
+                } else if (!wasFailed && !goalRetryWaitingForCompletion) {
+                    goalRetryCycleActive = false
+                    chatState.completeRetryStatus()
+                }
             }
             "onNativeError" -> {
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
@@ -2710,8 +3203,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         // Settings is a separate native Activity. Refresh preferences here so a theme
         // or language change is visible immediately when returning to the chat.
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        nativeAppearanceRevision++
         nativeThemeMode = FcodeAppearancePreferences.normalizeColorMode(prefs.getString(FcodeAppearancePreferences.COLOR_MODE, "system"))
         nativeColorPalette = FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value
+        nativeInterfaceStyle = FcodeInterfaceStyle.from(prefs.getString(FcodeAppearancePreferences.INTERFACE_STYLE, FcodeInterfaceStyle.MATERIAL.value)).value
         nativeChatBackground = FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value
         nativeChatBackgroundImage = prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()
         nativeChatBackgroundDim = prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
@@ -2725,6 +3220,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         showResponseStats = prefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
         showModelSubtitle = prefs.getBoolean(NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE, true)
         showReasoningTitles = prefs.getBoolean(NATIVE_SHOW_REASONING_TITLES_PREFERENCE, true)
+        hideNativeStatusBar = prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)
+        applyNativeStatusBarVisibility(hideNativeStatusBar)
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
         bridge?.loadSkills()
         reloadProviderConfigurationIfChanged()

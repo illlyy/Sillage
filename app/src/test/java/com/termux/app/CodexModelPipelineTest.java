@@ -702,8 +702,10 @@ public class CodexModelPipelineTest {
         assertTrue(text.contains("[features.multi_agent_v2]"));
         assertTrue(text.contains("enabled = false"));
         assertTrue(text.contains("max_concurrent_threads_per_session = 8"));
-        assertTrue(text.contains("[agents]"));
-        assertTrue(text.contains("max_threads = 11"));
+        // Normal-agent concurrency is supplied as a launch override so it cannot conflict with
+        // a stale config.toml when a v2 model is selected later.
+        assertFalse(text.contains("[agents]"));
+        assertFalse(text.contains("max_threads = 11"));
 
         java.util.ArrayList<CodexProviderStore.ModelConfig> v2Models = new java.util.ArrayList<>();
         v2Models.add(CodexProviderStore.ModelConfig.from(new JSONObject()

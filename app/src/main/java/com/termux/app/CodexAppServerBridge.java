@@ -45,6 +45,8 @@ final class CodexAppServerBridge {
     private final Set<String> uiCompletedTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingGoalGetRequests = new ConcurrentHashMap<>();
+    /** Native follow-up requests are handled separately so a rejected steer can fall back to queue. */
+    private final Set<Integer> pendingSteerRequestIds = ConcurrentHashMap.newKeySet();
     private final Set<String> autoClearingCompletedGoalThreads = ConcurrentHashMap.newKeySet();
     private long lastAgentDeltaAt;
     private int agentDeltaCount;
@@ -56,6 +58,8 @@ final class CodexAppServerBridge {
     private final Set<String> primaryThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingPrimaryThreadTitles = new ConcurrentHashMap<>();
     private final AtomicInteger navigationGeneration = new AtomicInteger();
+    /** Invalidates an asynchronous process bootstrap when start/stop is called again. */
+    private final AtomicInteger serverGeneration = new AtomicInteger();
     private final Map<Integer, Integer> pendingNavigationGenerations = new ConcurrentHashMap<>();
     private Process process;
     private BufferedWriter writer;
@@ -173,21 +177,21 @@ final class CodexAppServerBridge {
                             boolean routeThroughMihomo, boolean forwardReasoningContext,
                             int ultraSubagentLimit, int normalSubagentLimit) {
         start(baseUrl, apiKey, model, apiFormat, routeThroughMihomo, forwardReasoningContext,
-            ultraSubagentLimit, normalSubagentLimit, java.util.Collections.emptyMap());
+            ultraSubagentLimit, normalSubagentLimit, java.util.Collections.emptyMap(), false);
     }
 
     synchronized void start(String baseUrl, String apiKey, String model, String apiFormat,
                             boolean routeThroughMihomo, boolean forwardReasoningContext,
                             int ultraSubagentLimit, int normalSubagentLimit,
-                            Map<String, String> ultraTransportEfforts) {
+                            Map<String, String> ultraTransportEfforts, boolean multiAgentV2) {
         start(baseUrl, apiKey, model, apiFormat, routeThroughMihomo, forwardReasoningContext,
-            ultraSubagentLimit, normalSubagentLimit, ultraTransportEfforts, false);
+            ultraSubagentLimit, normalSubagentLimit, ultraTransportEfforts, multiAgentV2, false);
     }
 
     synchronized void start(String baseUrl, String apiKey, String model, String apiFormat,
                             boolean routeThroughMihomo, boolean forwardReasoningContext,
                             int ultraSubagentLimit, int normalSubagentLimit,
-                            Map<String, String> ultraTransportEfforts,
+                            Map<String, String> ultraTransportEfforts, boolean multiAgentV2,
                             boolean preventRecursiveSubagents) {
         final Map<String, String> transportEfforts = ultraTransportEfforts == null
             ? java.util.Collections.emptyMap() : new java.util.LinkedHashMap<>(ultraTransportEfforts);
@@ -197,19 +201,32 @@ final class CodexAppServerBridge {
             normalSubagentLimit, CodexProviderStore.Profile.DEFAULT_NORMAL_SUBAGENT_LIMIT);
         stop();
         nextId.set(1);
+        final int generation = serverGeneration.incrementAndGet();
         new Thread(() -> {
+            LocalApiProxy localProxy = null;
+            Process activeProcess = null;
             try {
+                if (!isServerGenerationActive(generation)) return;
                 File binary = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex");
                 if (!binary.canExecute()) throw new IllegalStateException("Codex CLI is not installed");
                 File home = TermuxConstants.TERMUX_HOME_DIR;
                 File codexHome = new File(home, ".codex");
                 home.mkdirs();
                 codexHome.mkdirs();
+                purgeStaleAgentsMaxThreads(new File(codexHome, "config.toml"));
                 MihomoManager mihomo = MihomoManager.get(activity);
                 if (routeThroughMihomo) mihomo.start();
-                apiProxy = new LocalApiProxy(baseUrl, apiFormat, routeThroughMihomo, mihomo.mixedPort(),
+                if (!isServerGenerationActive(generation)) return;
+                localProxy = new LocalApiProxy(baseUrl, apiFormat, routeThroughMihomo, mihomo.mixedPort(),
                     forwardReasoningContext, transportEfforts, preventRecursiveSubagents);
-                int proxyPort = apiProxy.start();
+                int proxyPort = localProxy.start();
+                synchronized (this) {
+                    if (!isServerGenerationActive(generation)) {
+                        localProxy.stop();
+                        return;
+                    }
+                    apiProxy = localProxy;
+                }
                 String localBaseUrl = "http://127.0.0.1:" + proxyPort;
                 String wireApi = LocalApiProxy.CODEX_WIRE_API;
                 java.util.ArrayList<String> command = new java.util.ArrayList<>();
@@ -219,7 +236,7 @@ final class CodexAppServerBridge {
                 command.add("-c"); command.add("model_providers.ilyop_android.base_url=\"" + localBaseUrl + "\"");
                 command.add("-c"); command.add("model_providers.ilyop_android.env_key=\"OPENAI_API_KEY\"");
                 command.add("-c"); command.add("model_providers.ilyop_android.wire_api=\"" + wireApi + "\"");
-                boolean enableMultiAgentV2 = !transportEfforts.isEmpty();
+                boolean enableMultiAgentV2 = multiAgentV2;
                 for (String override : agentConfigOverrides(
                         normalizedUltraLimit, normalizedNormalLimit, enableMultiAgentV2)) {
                     command.add("-c");
@@ -252,15 +269,37 @@ final class CodexAppServerBridge {
                 if (model != null && !model.isEmpty()) env.put("OPENAI_MODEL", model);
                 env.put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin:/system/xbin");
                 env.put("TMPDIR", TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);
-                Process activeProcess = builder.start();
-                process = activeProcess;
-                writer = new BufferedWriter(new OutputStreamWriter(activeProcess.getOutputStream()));
-                new Thread(() -> readStdout(activeProcess), "CodexAppServerOut").start();
-                new Thread(() -> readStderr(activeProcess), "CodexAppServerErr").start();
-                new Thread(() -> monitorProcess(activeProcess), "CodexAppServerWatch").start();
-                sendInitialize();
+                if (!isServerGenerationActive(generation)) {
+                    localProxy.stop();
+                    return;
+                }
+                activeProcess = builder.start();
+                BufferedWriter activeWriter = new BufferedWriter(new OutputStreamWriter(activeProcess.getOutputStream()));
+                synchronized (this) {
+                    if (!isServerGenerationActive(generation)) {
+                        try { activeWriter.close(); } catch (Exception ignored) {}
+                        activeProcess.destroy();
+                        if (apiProxy == localProxy) apiProxy = null;
+                        localProxy.stop();
+                        return;
+                    }
+                    process = activeProcess;
+                    writer = activeWriter;
+                }
+                final Process processForThreads = activeProcess;
+                new Thread(() -> readStdout(processForThreads, generation), "CodexAppServerOut").start();
+                new Thread(() -> readStderr(processForThreads, generation), "CodexAppServerErr").start();
+                new Thread(() -> monitorProcess(processForThreads, generation), "CodexAppServerWatch").start();
+                sendInitialize(generation);
             } catch (Exception e) {
-                emit("onNativeError", e.getClass().getSimpleName() + ": " + e.getMessage());
+                boolean current = isServerGenerationActive(generation);
+                if (current) {
+                    cleanupFailedBootstrap(generation, localProxy, activeProcess);
+                    emit("onNativeError", e.getClass().getSimpleName() + ": " + e.getMessage());
+                } else {
+                    if (activeProcess != null) activeProcess.destroy();
+                    if (localProxy != null) localProxy.stop();
+                }
             }
         }, "CodexAppServerStart").start();
     }
@@ -634,6 +673,65 @@ final class CodexAppServerBridge {
         return goal != null && "complete".equals(goal.optString("status", ""));
     }
 
+    /**
+     * Adds input to the active turn using the v2 steering precondition. Returns the request id, or
+     * -1 when the server has not published an active turn yet so the caller can queue locally.
+     */
+    int steerMessage(String text, String attachmentsJson, String skillsJson) {
+        if (text == null) text = "";
+        String thread = threadId;
+        String turn = activeTurnId;
+        if (thread == null || thread.isEmpty() || turn == null || turn.isEmpty()) return -1;
+        try {
+            JSONArray attachments;
+            try { attachments = new JSONArray(attachmentsJson == null ? "[]" : attachmentsJson); }
+            catch (Exception ignored) { attachments = new JSONArray(); }
+            JSONArray skills;
+            try { skills = new JSONArray(skillsJson == null ? "[]" : skillsJson); }
+            catch (Exception ignored) { skills = new JSONArray(); }
+            JSONArray input = new JSONArray();
+            if (!text.trim().isEmpty()) input.put(new JSONObject().put("type", "text").put("text", text));
+            for (int i = 0; i < attachments.length(); i++) {
+                JSONObject attachment = attachments.optJSONObject(i);
+                if (attachment == null) continue;
+                String path = attachment.optString("path", "");
+                if (path.isEmpty()) continue;
+                if (attachment.optBoolean("image", false)) {
+                    input.put(new JSONObject().put("type", "localImage").put("path", path));
+                } else {
+                    input.put(new JSONObject().put("type", "text").put("text",
+                        "Attached local file: " + path + " (" + attachment.optString("name", "file") + ")"));
+                }
+            }
+            for (int i = 0; i < skills.length(); i++) {
+                JSONObject skill = skills.optJSONObject(i);
+                if (skill == null) continue;
+                String name = skill.optString("name", "");
+                String path = skill.optString("path", "");
+                if (!name.isEmpty() && !path.isEmpty()) {
+                    input.put(new JSONObject().put("type", "skill").put("name", name).put("path", path));
+                }
+            }
+            if (input.length() == 0) return -1;
+            JSONObject params = new JSONObject()
+                .put("threadId", thread)
+                .put("expectedTurnId", turn)
+                .put("input", input);
+            int requestId = nextId.getAndIncrement();
+            pendingSteerRequestIds.add(requestId);
+            try {
+                sendJson(new JSONObject().put("method", "turn/steer").put("id", requestId).put("params", params));
+            } catch (Exception error) {
+                pendingSteerRequestIds.remove(requestId);
+                throw error;
+            }
+            return requestId;
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to steer active turn", error);
+            return -1;
+        }
+    }
+
     @JavascriptInterface public void interruptCurrentTurn() {
         String thread = threadId;
         String turn = activeTurnId;
@@ -685,7 +783,8 @@ final class CodexAppServerBridge {
         return true;
     }
 
-    private void sendInitialize() throws Exception {
+    private synchronized void sendInitialize(int generation) throws Exception {
+        if (!isServerGenerationActive(generation)) return;
         JSONObject clientInfo = new JSONObject()
             .put("name", "ilyop_codex_android")
             .put("title", "Codex by ilyop")
@@ -762,12 +861,45 @@ final class CodexAppServerBridge {
         writer.flush();
     }
 
-    private void monitorProcess(Process activeProcess) {
+    private boolean isServerGenerationActive(int generation) {
+        return serverGeneration.get() == generation;
+    }
+
+    /** Tear down a partially bootstrapped generation without touching a newer one. */
+    private void cleanupFailedBootstrap(int generation, LocalApiProxy localProxy, Process activeProcess) {
+        BufferedWriter writerToClose = null;
+        Process processToDestroy = null;
+        LocalApiProxy proxyToStop = null;
+        synchronized (this) {
+            if (!isServerGenerationActive(generation)) return;
+            if (activeProcess != null) {
+                processToDestroy = activeProcess;
+                if (process == activeProcess) {
+                    process = null;
+                    writerToClose = writer;
+                    writer = null;
+                }
+            }
+            if (localProxy != null) {
+                if (apiProxy == localProxy) apiProxy = null;
+                proxyToStop = localProxy;
+            }
+        }
+        try { if (writerToClose != null) writerToClose.close(); } catch (Exception ignored) {}
+        if (processToDestroy != null) processToDestroy.destroy();
+        if (proxyToStop != null) proxyToStop.stop();
+    }
+
+    private synchronized boolean isCurrentServerProcess(Process candidate, int generation) {
+        return isServerGenerationActive(generation) && process == candidate;
+    }
+
+    private void monitorProcess(Process activeProcess, int generation) {
         try {
             int exitCode = activeProcess.waitFor();
             boolean unexpected;
             synchronized (this) {
-                unexpected = process == activeProcess;
+                unexpected = isServerGenerationActive(generation) && process == activeProcess;
                 if (unexpected) {
                     process = null;
                     writer = null;
@@ -783,6 +915,34 @@ final class CodexAppServerBridge {
             }
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * agents.max_threads is now supplied only via command-line overrides (agentConfigOverrides),
+     * which set it solely when multi_agent_v2 is disabled. Strip any stale max_threads left in
+     * config.toml by earlier builds so it can never coexist with an enabled multi_agent_v2, even
+     * though the command line would otherwise be overridden by this on-disk value.
+     */
+    static void purgeStaleAgentsMaxThreads(File configFile) {
+        try {
+            if (!configFile.isFile()) return;
+            java.util.List<String> result = new java.util.ArrayList<>();
+            boolean removed = false;
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(configFile), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.trim().startsWith("max_threads")) { removed = true; continue; }
+                    result.add(line);
+                }
+            }
+            if (removed) {
+                try (java.io.FileOutputStream output = new java.io.FileOutputStream(configFile)) {
+                    for (String line : result) output.write((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -812,10 +972,11 @@ final class CodexAppServerBridge {
         };
     }
 
-    private void readStdout(Process activeProcess) {
+    private void readStdout(Process activeProcess, int generation) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(activeProcess.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                if (!isCurrentServerProcess(activeProcess, generation)) return;
                 JSONObject message = new JSONObject(line);
                 if (!isHighFrequencyNotification(message.optString("method", ""))) {
                     android.util.Log.d(TAG, "RECV " + messageSummary(message));
@@ -823,14 +984,15 @@ final class CodexAppServerBridge {
                 handleMessage(message);
             }
         } catch (Exception e) {
-            if (activeProcess == process) emit("onNativeError", "app-server output stopped: " + e.getMessage());
+            if (isCurrentServerProcess(activeProcess, generation)) emit("onNativeError", "app-server output stopped: " + e.getMessage());
         }
     }
 
-    private void readStderr(Process activeProcess) {
+    private void readStderr(Process activeProcess, int generation) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(activeProcess.getErrorStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                if (!isCurrentServerProcess(activeProcess, generation)) return;
                 String safeLine = redactSensitiveLogLine(line);
                 android.util.Log.e(TAG, "STDERR " + safeLine);
                 emit("onLog", safeLine);
@@ -923,6 +1085,18 @@ final class CodexAppServerBridge {
             return;
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
+        int steerResponseId = message.optInt("id", -1);
+        if (steerResponseId >= 0 && pendingSteerRequestIds.remove(steerResponseId)) {
+            JSONObject event = new JSONObject().put("requestId", steerResponseId).put("accepted", !message.has("error"));
+            if (message.has("error")) {
+                JSONObject error = message.optJSONObject("error");
+                event.put("message", error == null ? "Unable to steer the active turn"
+                    : error.optString("message", "Unable to steer the active turn"));
+                if (error != null && error.has("data")) event.put("data", error.opt("data"));
+            }
+            emit("onSteerResult", event.toString());
+            return;
+        }
         if (message.has("error")) {
             String goalThread = pendingGoalGetRequests.remove(message.optInt("id", -1));
             if (goalThread != null) {
@@ -1163,8 +1337,10 @@ final class CodexAppServerBridge {
                 if (!uiAlreadyCompleted || failed) notifyTaskCompleted(completedThread, failed, completedTurnId);
             }
         } else if (primaryEvent && "error".equals(method) && params != null) {
-            JSONObject error = params.optJSONObject("error");
-            emit("onNativeError", error == null ? params.toString() : error.optString("message", error.toString()));
+            // Error notifications with willRetry=true are part of one turn. Keep their protocol
+            // metadata so the native UI can update one retry card in place and, when a goal is
+            // active, continue after the server's bounded internal retry budget is exhausted.
+            emit("onTurnError", params.toString());
         }
     }
 
@@ -1207,7 +1383,7 @@ final class CodexAppServerBridge {
         if (item == null) return false;
         String type = item.optString("type", "");
         return "fileChange".equals(type) || "mcpToolCall".equals(type) || "webSearch".equals(type)
-            || "collabAgentToolCall".equals(type);
+            || "collabAgentToolCall".equals(type) || "imageView".equals(type) || "view_image".equals(type);
     }
 
     private static boolean isPlanItem(JSONObject params) {
@@ -2156,6 +2332,10 @@ final class CodexAppServerBridge {
     }
 
     synchronized void stop() {
+        // Invalidate a bootstrap thread before tearing down its shared handles. Without this,
+        // a slow ProcessBuilder.start() from the previous configuration can publish an old
+        // process after a new start() has already completed.
+        serverGeneration.incrementAndGet();
         threadId = null;
         visibleThreadId = null;
         visibleRouteReady = false;
@@ -2174,6 +2354,7 @@ final class CodexAppServerBridge {
         uiCompletedTurns.clear();
         streamedAgentItemIds.clear();
         pendingGoalGetRequests.clear();
+        pendingSteerRequestIds.clear();
         autoClearingCompletedGoalThreads.clear();
         try { if (writer != null) writer.close(); } catch (Exception ignored) {}
         writer = null;

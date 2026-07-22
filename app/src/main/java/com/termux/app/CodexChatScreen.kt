@@ -5,9 +5,12 @@ package com.termux.app
 import android.util.Base64
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.view.accessibility.AccessibilityManager
 
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,6 +34,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -48,6 +52,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -57,6 +62,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldLineLimits
@@ -66,6 +72,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.expandVertically
@@ -117,6 +124,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -136,6 +144,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -149,7 +158,10 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
@@ -207,7 +219,15 @@ import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.tanh
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberCombinedBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.drawPlainBackdrop
+import com.kyant.backdrop.highlight.Highlight
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.ArrowUp02
@@ -217,8 +237,6 @@ import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.ChartColumn
 import me.rerere.hugeicons.stroke.Code
-import me.rerere.hugeicons.stroke.Bug01
-import me.rerere.hugeicons.stroke.MagicWand01
 import me.rerere.hugeicons.stroke.Files02
 import me.rerere.hugeicons.stroke.Folder01
 import me.rerere.hugeicons.stroke.Image02
@@ -249,6 +267,16 @@ private val LocalInteractiveScrollInProgress = staticCompositionLocalOf { false 
 private val LocalTextSelectionActivityChanged = staticCompositionLocalOf<(Boolean) -> Unit> { { } }
 private val LocalOpenSubagentDrawer = staticCompositionLocalOf<(JSONObject) -> Unit> { { } }
 private const val CHAT_HISTORY_PAGE_SIZE = 24
+
+@Immutable
+private data class PendingSendMotion(
+    val token: Long,
+    val messageId: String,
+    val text: String,
+    val sourceBounds: Rect,
+    val targetBounds: Rect? = null,
+)
+
 val LocalShowReasoning = staticCompositionLocalOf { true }
 val LocalAutoFollowOutput = staticCompositionLocalOf { true }
 val LocalShowResponseStats = staticCompositionLocalOf { true }
@@ -266,6 +294,8 @@ internal fun FcodeChatTheme(
     showReasoning: Boolean = true,
     autoFollow: Boolean = true,
     colorPalette: String = FcodeColorPalette.ROSE.value,
+    interfaceStyle: String = FcodeInterfaceStyle.MATERIAL.value,
+    appearanceRevision: Int = 0,
     chatBackground: String = FcodeChatBackgroundStyle.THEME.value,
     chatBackgroundImage: String = "",
     chatBackgroundDim: Float = 0.32f,
@@ -277,9 +307,10 @@ internal fun FcodeChatTheme(
 ) {
     val dark = currentFcodeDarkMode(themeMode)
     val palette = FcodeColorPalette.from(colorPalette)
+    val style = FcodeInterfaceStyle.from(interfaceStyle)
     val background = FcodeChatBackgroundStyle.from(chatBackground)
-    val colorScheme = fcodeColorScheme(palette, dark)
-    val markdownColors = fcodeMarkdownColors(palette, dark, colorScheme)
+    val colorScheme = if (style == FcodeInterfaceStyle.LIQUID_GLASS) liquidGlassColorScheme(dark) else fcodeColorScheme(palette, dark)
+    val markdownColors = fcodeMarkdownColors(palette, dark, colorScheme, style.value)
     val view = LocalView.current
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
@@ -288,39 +319,48 @@ internal fun FcodeChatTheme(
             isAppearanceLightNavigationBars = !dark
         }
     }
-    MaterialExpressiveTheme(
-        colorScheme = colorScheme,
-        motionScheme = MotionScheme.expressive(),
-        content = {
-            androidx.compose.runtime.CompositionLocalProvider(
-                LocalNativeLanguage provides language,
-                LocalStreamAnimationsEnabled provides streamAnimations,
-                LocalFixedStreamingViewportEnabled provides fixedStreamingViewport,
-                LocalShowReasoning provides showReasoning,
-                LocalAutoFollowOutput provides autoFollow,
-                LocalShowResponseStats provides showResponseStats,
-                LocalShowModelSubtitle provides showModelSubtitle,
-                LocalShowReasoningTitles provides showReasoningTitles,
-                LocalFcodeColorPalette provides palette,
-                LocalFcodeChatBackground provides background,
-                LocalFcodeChatBackgroundImage provides chatBackgroundImage,
-                LocalFcodeChatBackgroundDim provides chatBackgroundDim.coerceIn(0f, 0.72f),
-                LocalFcodeMarkdownColors provides markdownColors,
-                content = content,
-            )
-        },
-    )
+    val themedContent: @Composable () -> Unit = {
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalNativeLanguage provides language,
+            LocalStreamAnimationsEnabled provides streamAnimations,
+            LocalFixedStreamingViewportEnabled provides fixedStreamingViewport,
+            LocalShowReasoning provides showReasoning,
+            LocalAutoFollowOutput provides autoFollow,
+            LocalShowResponseStats provides showResponseStats,
+            LocalShowModelSubtitle provides showModelSubtitle,
+            LocalShowReasoningTitles provides showReasoningTitles,
+            LocalFcodeInterfaceStyle provides style,
+            LocalFcodeAppearanceRevision provides appearanceRevision,
+            LocalFcodeColorPalette provides palette,
+            LocalFcodeChatBackground provides background,
+            LocalFcodeChatBackgroundImage provides chatBackgroundImage,
+            LocalFcodeChatBackgroundDim provides chatBackgroundDim.coerceIn(0f, 0.72f),
+            LocalFcodeMarkdownColors provides markdownColors,
+            content = content,
+        )
+    }
+    if (style == FcodeInterfaceStyle.LIQUID_GLASS) {
+        MaterialTheme(colorScheme = colorScheme, content = themedContent)
+    } else {
+        MaterialExpressiveTheme(
+            colorScheme = colorScheme,
+            motionScheme = MotionScheme.expressive(),
+            content = themedContent,
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun NativeChatScreen(
     state: NativeChatState,
-    onSend: (String) -> Unit,
+    onSend: (String) -> NativeSubmitResult?,
     onInputChange: (String) -> Unit,
     onRetry: (String) -> Unit,
     onEditMessage: (String, String) -> Unit,
     onStop: () -> Unit,
+    onFollowUpActionChange: (NativeFollowUpSubmitAction) -> Unit,
+    onRemoveQueuedFollowUp: (String) -> Unit,
     onNewConversation: () -> Unit,
     onResumeConversation: (String) -> Unit,
     onUiMotionChanged: (Boolean) -> Unit,
@@ -353,6 +393,7 @@ internal fun NativeChatScreen(
 ) {
     val context = LocalContext.current
     val language = LocalNativeLanguage.current
+    val sendAnimationsEnabled = LocalStreamAnimationsEnabled.current
     val autoFollowEnabled = LocalAutoFollowOutput.current
     val drawerState = rememberFcodeInteractiveDrawerState()
     val scope = rememberCoroutineScope()
@@ -406,12 +447,23 @@ internal fun NativeChatScreen(
     }
     var followOutput by remember(conversationListKey) { mutableStateOf(true) }
     var followPausedUntil by remember(conversationListKey) { mutableLongStateOf(0L) }
+    // Capture wallpaper and conversation chrome in separate layers, then composite them for
+    // the glass input. A LayerBackdrop only records its own subtree: sampling the LazyColumn alone
+    // leaves the wallpaper outside the source and degenerates into a translucent white card when
+    // the conversation is empty. Keeping the composer outside both sources also avoids self-sampling.
+    val wallpaperBackdrop = rememberLayerBackdrop()
+    val conversationBackdrop = rememberLayerBackdrop()
+    val chatBackdrop = rememberCombinedBackdrop(wallpaperBackdrop, conversationBackdrop)
+    var pendingSendMotion by remember(conversationListKey) { mutableStateOf<PendingSendMotion?>(null) }
+    var sendMotionRootBounds by remember { mutableStateOf<Rect?>(null) }
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
-    val inputBottomPadding = with(density) { inputHeightPx.toDp() } + 8.dp
-    // Visibility is a stable boolean. Reading the animated IME bottom inset here used to
-    // invalidate the entire chat composition on every keyboard frame.
+    // Keep one owner for each inset: the list handles the IME, while the measured composer
+    // reports only its visible controls. Navigation-bar clearance is added explicitly below.
     val imeVisible = WindowInsets.isImeVisible
+    val navigationBarBottomPadding = if (imeVisible) 0.dp
+        else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val inputBottomPadding = with(density) { inputHeightPx.toDp() } + navigationBarBottomPadding + 8.dp
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     val showScrollToBottom by remember(listState) { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -425,6 +477,7 @@ internal fun NativeChatScreen(
     var restoreSnapshotRequest by remember { mutableStateOf<String?>(null) }
     var mergeWorktreeRequest by remember { mutableStateOf<String?>(null) }
     var removeWorktreePath by remember { mutableStateOf<String?>(null) }
+    var pushGitRequest by remember { mutableStateOf<String?>(null) }
     var previewAttachment by remember { mutableStateOf<NativeAttachment?>(null) }
     var showGoalDialog by remember { mutableStateOf(false) }
     var showWorkPanel by remember { mutableStateOf(false) }
@@ -556,6 +609,17 @@ internal fun NativeChatScreen(
         }
     }
 
+    LaunchedEffect(pendingSendMotion?.token) {
+        val activeMotion = pendingSendMotion ?: return@LaunchedEffect
+        onUiMotionChanged(true)
+        try {
+            delay(1_600L)
+            if (pendingSendMotion?.token == activeMotion.token) pendingSendMotion = null
+        } finally {
+            onUiMotionChanged(false)
+        }
+    }
+
     androidx.compose.runtime.CompositionLocalProvider(
         LocalOpenSubagentDrawer provides openSubagentDrawer,
         LocalTextSelectionActivityChanged provides onTextSelectionActivityChanged,
@@ -606,7 +670,16 @@ internal fun NativeChatScreen(
                             }
                         }
                     },
-                    onBackHome = onBackHome,
+                    onBackHome = {
+                        scope.launch {
+                            // Keep the drawer out of the settings entry snapshot, but do not
+                            // add a second frame of waiting when it is already closed. The
+                            // navigation close keeps the same interruptible motion with a
+                            // shorter Apple-style response.
+                            if (!drawerState.isClosed) drawerState.closeForNavigation()
+                            onBackHome()
+                        }
+                    },
                     onOpenLegacyWebUi = onOpenLegacyWebUi,
                 )
         },
@@ -616,7 +689,14 @@ internal fun NativeChatScreen(
             color = MaterialTheme.colorScheme.background,
         ) {
             Box(Modifier.fillMaxSize()) {
-                AssistantBackdrop()
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .layerBackdrop(wallpaperBackdrop)
+                        .background(MaterialTheme.colorScheme.background),
+                ) {
+                    AssistantBackdrop()
+                }
                 Scaffold(
                 containerColor = Color.Transparent,
                 topBar = {
@@ -635,6 +715,9 @@ internal fun NativeChatScreen(
                         onExport = { shareConversation(context, state.conversationTitle, state.messages) },
                         canExport = state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT },
                         onNewConversation = onNewConversation,
+                        // Sample the wallpaper and conversation chrome. Text itself stays
+                        // below the app-bar safe area so glass never competes with the title.
+                        backdrop = chatBackdrop,
                     )
                 },
                 bottomBar = {},
@@ -642,10 +725,16 @@ internal fun NativeChatScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding),
+                        // Reading content owns a stable safe area. Wallpaper may continue behind
+                        // the app bar, but message text never competes with its title and actions.
+                        .padding(top = innerPadding.calculateTopPadding())
+                        .onGloballyPositioned { sendMotionRootBounds = it.boundsInWindow() },
                 ) {
                     Box(
-                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .layerBackdrop(conversationBackdrop)
+                            .graphicsLayer {
                             val progress = conversationSurfaceProgress
                             alpha = 0.28f + 0.72f * progress
                             translationY = (1f - progress) * 10.dp.toPx()
@@ -657,9 +746,11 @@ internal fun NativeChatScreen(
                     if (state.historyLoading && state.messages.isEmpty() && state.currentThreadId.isNotBlank()) {
                         ConversationHistoryLoading(state.conversationTitle)
                     } else if (state.messages.isEmpty()) {
-                        EmptyChatState(
+                        RikkaEmptyState(
+                            status = state.connectionLabel,
                             ready = state.ready,
-                            onPrompt = onInputChange,
+                            onSuggestion = onInputChange,
+                            modifier = Modifier.padding(bottom = inputBottomPadding),
                         )
                     } else {
                         // Do not cache by list size: streamed deltas replace the current
@@ -710,7 +801,12 @@ internal fun NativeChatScreen(
                             state = listState,
                             userScrollEnabled = !textSelectionActive,
                             modifier = Modifier.fillMaxSize().imePadding(),
-                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = inputBottomPadding),
+                            contentPadding = PaddingValues(
+                                start = 16.dp,
+                                end = 16.dp,
+                                top = 16.dp,
+                                bottom = inputBottomPadding,
+                            ),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
@@ -730,7 +826,25 @@ internal fun NativeChatScreen(
                                 val previousUser = retryPrompts[message.id]
                                 val editCallback = remember(message) { { editItem(message) } }
                                 val retryCallback = remember(message.id, previousUser) {
-                                    previousUser?.let { prompt -> { retryItem(prompt) } }
+                                    previousUser?.let { prompt -> {retryItem(prompt) } }
+                                }
+                                // Per-message reveal animation: bubbles scale in from the left
+                                // edge with a spring, like modern chat apps. State is keyed by
+                                // message id so streaming deltas or scroll recycling never
+                                // re-trigger the animation.
+                                var bubbleAppeared by remember(message.id) { mutableStateOf(false) }
+                                val bubbleReveal by animateFloatAsState(
+                                    targetValue = if (bubbleAppeared) 1f else 0f,
+                                    animationSpec = spring(
+                                        dampingRatio = 0.82f,
+                                        stiffness = 380f,
+                                        visibilityThreshold = 0.001f,
+                                    ),
+                                    label = "bubbleReveal",
+                                )
+                                LaunchedEffect(message.id) {
+                                    withFrameNanos { }
+                                    bubbleAppeared = true
                                 }
                                 // LazyColumn item scopes already isolate recomposition by stable key.
                                 // Avoid a graphicsLayer per message: it adds RenderNodes and GPU
@@ -744,7 +858,19 @@ internal fun NativeChatScreen(
                                     Modifier.clearAndSetSemantics { }
                                 } else Modifier
                                 Box(
-                                    Modifier.fillMaxWidth().then(stableMessageModifier),
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .then(
+                                            if (bubbleReveal < 0.999f) Modifier.graphicsLayer {
+                                                val p = bubbleReveal.coerceIn(0f, 1f)
+                                                scaleX = 0.85f + 0.15f * p
+                                                scaleY = 0.85f + 0.15f * p
+                                                translationX = -(1f - p) * size.width * 0.32f
+                                                alpha = p
+                                                transformOrigin = TransformOrigin(0f, 0.5f)
+                                            } else Modifier
+                                        )
+                                        .then(stableMessageModifier),
                                 ) {
                                     RikkaMessageItem(
                                         message = message,
@@ -757,6 +883,16 @@ internal fun NativeChatScreen(
                                         onQuote = quoteMessage,
                                         onReasoningAutoCollapse = pauseFollowForReasoning,
                                         onPreviewAttachment = previewMessageAttachment,
+                                        wallpaperBackdrop = wallpaperBackdrop,
+                                        sendingMotionActive = pendingSendMotion?.messageId == message.id,
+                                        onUserBubbleBounds = if (pendingSendMotion?.messageId == message.id) {
+                                            { bounds ->
+                                                val current = pendingSendMotion
+                                                if (current != null && current.messageId == message.id && current.targetBounds != bounds) {
+                                                    pendingSendMotion = current.copy(targetBounds = bounds)
+                                                }
+                                            }
+                                        } else null,
                                     )
                                 }
                             }
@@ -807,7 +943,7 @@ internal fun NativeChatScreen(
                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                                 shape = CircleShape,
                             ) {
-                                Icon(HugeIcons.ArrowDown01, "回到底部", modifier = Modifier.size(20.dp))
+                                Icon(HugeIcons.ArrowDown01, nativeText(language, "回到底部", "Scroll to bottom"), modifier = Modifier.size(20.dp))
                             }
                         }
                     }
@@ -831,8 +967,16 @@ internal fun NativeChatScreen(
                     }
                     RikkaChatInput(
                         value = state.input,
-                        enabled = state.ready && !state.phase.active,
+                        enabled = state.ready,
                         loading = state.phase.active,
+                        conversationKey = conversationListKey,
+                        conversationMoving = listDragged,
+                        hasConversation = state.messages.isNotEmpty(),
+                        followUpAction = state.followUpSubmitAction,
+                        queuedFollowUps = state.queuedFollowUps,
+                        onFollowUpActionChange = onFollowUpActionChange,
+                        onRemoveQueuedFollowUp = onRemoveQueuedFollowUp,
+                        onStop = onStop,
                         modelLabel = state.modelLabel,
                         onModelClick = { showModelPicker = true },
                         effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
@@ -855,23 +999,46 @@ internal fun NativeChatScreen(
                         onRemoveAttachment = onRemoveAttachment,
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
-                        onSend = { inputText ->
-                            if (state.phase.active) {
-                                onStop()
-                            } else {
-                                followOutput = true
-                                followPausedUntil = 0L
+                        onSend = { inputText, sourceBounds ->
+                            followOutput = true
+                            followPausedUntil = 0L
+                            // TextFieldState remains focused while a turn is active. The Activity
+                            // chooses same-turn steer or local queue without disabling the IME.
+                            val result = onSend(inputText)
+                            val messageId = result?.messageId
+                            if (messageId != null && inputText.isNotBlank() && sourceBounds != null &&
+                                sendAnimationsEnabled && !touchExplorationEnabled
+                            ) {
+                                pendingSendMotion = PendingSendMotion(
+                                    token = android.os.SystemClock.uptimeMillis(),
+                                    messageId = messageId,
+                                    text = inputText.trim(),
+                                    sourceBounds = sourceBounds,
+                                )
+                            }
+                            if (messageId != null) {
                                 scope.launch {
+                                    withFrameNanos { }
                                     listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
                                 }
-                                // TextFieldState is local to the composer; do not wait for its
-                                // debounced draft mirror before sending the authoritative text.
-                                onSend(inputText)
                             }
+                            result
                         },
                         onHeightChanged = { inputHeightPx = it },
-                        modifier = Modifier.align(Alignment.BottomCenter),
+                        backdrop = chatBackdrop,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter),
                     )
+                    pendingSendMotion?.let { motion ->
+                        SendMessageFlightOverlay(
+                            motion = motion,
+                            rootBounds = sendMotionRootBounds,
+                            wallpaperBackdrop = wallpaperBackdrop,
+                            onFinished = {
+                                if (pendingSendMotion?.token == motion.token) pendingSendMotion = null
+                            },
+                        )
+                    }
                 }
             }
             }
@@ -917,6 +1084,7 @@ internal fun NativeChatScreen(
                 }
             },
             onGitAction = onGitAction,
+            onRequestGitPush = { pushGitRequest = state.gitSnapshot; showWorkPanel = false },
             onSnapshotAction = onSnapshotAction,
             onWorktreeAction = onWorktreeAction,
             onRequestMergeWorktree = { request -> mergeWorktreeRequest = request; showWorkPanel = false },
@@ -988,9 +1156,19 @@ internal fun NativeChatScreen(
         MessageSearchDialog(
             messages = state.messages,
             onDismiss = { showMessageSearch = false },
-            onSelect = { index ->
+            onSelect = { messageId ->
                 showMessageSearch = false
-                scope.launch { listState.animateScrollToItem(index) }
+                scope.launch {
+                    val absoluteIndex = state.messages.indexOfFirst { it.id == messageId }
+                    if (absoluteIndex < 0) return@launch
+                    val requiredLimit = (state.messages.size - absoluteIndex).coerceAtLeast(1)
+                    if (requiredLimit > historyLimit) historyLimit = requiredLimit
+                    withFrameNanos { }
+                    val hiddenCount = (state.messages.size - historyLimit).coerceAtLeast(0)
+                    val loaderOffset = if (hiddenCount > 0) 1 else 0
+                    val lazyIndex = (absoluteIndex - hiddenCount + loaderOffset).coerceAtLeast(0)
+                    listState.animateScrollToItem(lazyIndex)
+                }
             },
         )
     }
@@ -1040,6 +1218,22 @@ internal fun NativeChatScreen(
             onConfirm = { removeWorktreePath = null; onWorktreeAction("remove", path) },
         )
     }
+    pushGitRequest?.let { raw ->
+        val snapshot = remember(raw) { runCatching { JSONObject(raw) }.getOrNull() }
+        val branch = snapshot?.optString("branch").orEmpty()
+        val upstream = snapshot?.optString("upstream").orEmpty()
+        FlClashAnimatedDialog(
+            onDismissRequest = { pushGitRequest = null },
+            title = { Text(nativeText(language, "推送分支", "Push branch")) },
+            text = {
+                Text(if (upstream.isBlank())
+                    nativeText(language, "将把 `$branch` 发布到默认远程并设置 upstream。不会执行强制推送。", "Publish `$branch` to the default remote and set its upstream. Force push will not be used.")
+                else nativeText(language, "将把 `$branch` 推送到 `$upstream`。不会执行强制推送。", "Push `$branch` to `$upstream`. Force push will not be used."))
+            },
+            confirmButton = { TextButton(onClick = { pushGitRequest = null; onGitAction("push", "") }) { Text(nativeText(language, "确认推送", "Push")) } },
+            dismissButton = { TextButton(onClick = { pushGitRequest = null }) { Text(nativeText(language, "取消", "Cancel")) } },
+        )
+    }
     if (showConversationSearch) {
         ConversationSearchDialog(
             conversations = state.conversations,
@@ -1057,10 +1251,10 @@ internal fun NativeChatScreen(
     deleteConversation?.let { conversation ->
         FlClashAnimatedDialog(
             onDismissRequest = { deleteConversation = null },
-            title = { Text("搜索对话") },
-            text = { Text("确定从列表中删除“${conversation.title}”吗？") },
-            confirmButton = { TextButton(onClick = { onDeleteConversation(conversation); deleteConversation = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
-            dismissButton = { TextButton(onClick = { deleteConversation = null }) { Text("取消") } },
+            title = { Text(nativeText(language, "删除对话？", "Delete conversation?")) },
+            text = { Text(nativeText(language, "确定从列表中删除“${conversation.title}”吗？", "Remove “${conversation.title}” from the conversation list?")) },
+            confirmButton = { TextButton(onClick = { onDeleteConversation(conversation); deleteConversation = null }) { Text(nativeText(language, "删除", "Delete"), color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { deleteConversation = null }) { Text(nativeText(language, "取消", "Cancel")) } },
         )
     }
     if (showFilesSheet) {
@@ -1145,15 +1339,13 @@ private fun FlClashAnimatedDialog(
 private fun MessageSearchDialog(
     messages: List<NativeChatMessage>,
     onDismiss: () -> Unit,
-    onSelect: (Int) -> Unit,
+    onSelect: (String) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     val language = LocalNativeLanguage.current
-    val results = remember(query, messages.size) {
-        if (query.isBlank()) emptyList()
-        else messages.mapIndexedNotNull { index, message ->
-            if (message.role != NativeChatRole.ACTIVITY && message.content.contains(query.trim(), ignoreCase = true)) index to message else null
-        }
+    val normalizedQuery = query.trim()
+    val results = if (normalizedQuery.isBlank()) emptyList() else messages.filter { message ->
+        message.role != NativeChatRole.ACTIVITY && message.content.contains(normalizedQuery, ignoreCase = true)
     }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
@@ -1168,23 +1360,32 @@ private fun MessageSearchDialog(
                     leadingIcon = { Icon(HugeIcons.Search01, null) },
                     placeholder = { Text(nativeText(language, "\u641c\u7d22\u6d88\u606f", "Search messages")) },
                 )
-                    if (query.isNotBlank()) {
-                    Text(nativeText(language, "\u627e\u5230 ${results.size} \u6761\u7ed3\u679c", "${results.size} results found"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(results, key = { it.first }) { (index, message) ->
-                            Surface(
-                                modifier = Modifier.fillMaxWidth().clickable { onSelect(index) },
-                                shape = MaterialTheme.shapes.medium,
-                                color = MaterialTheme.colorScheme.surfaceContainer,
-                            ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Text(if (message.role == NativeChatRole.USER) nativeText(language, "\u7528\u6237", "User") else nativeText(language, "\u52a9\u624b", "Assistant"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                                    Text(message.content.replace('\n', ' '), maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                    if (normalizedQuery.isNotBlank()) {
+                        Text(nativeText(language, "\u627e\u5230 ${results.size} \u6761\u7ed3\u679c", "${results.size} results found"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (results.isEmpty()) {
+                            Text(
+                                nativeText(language, "\u6ca1\u6709\u5339\u914d\u7684\u6d88\u606f", "No matching messages"),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(results, key = { it.id }) { message ->
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth().clickable { onSelect(message.id) },
+                                        shape = MaterialTheme.shapes.medium,
+                                        color = MaterialTheme.colorScheme.surfaceContainer,
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp)) {
+                                            Text(if (message.role == NativeChatRole.USER) nativeText(language, "\u7528\u6237", "User") else nativeText(language, "\u52a9\u624b", "Assistant"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                            Text(message.content.replace('\n', ' '), maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5173\u95ed", "Close")) } },
@@ -1550,6 +1751,109 @@ private fun ChoiceDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun Modifier.interactiveLiquidAction(
+    enabled: Boolean,
+    backdrop: Backdrop,
+    glassConfig: LiquidGlassConfig,
+    isLightTheme: Boolean,
+    tint: Color,
+    onClick: () -> Unit,
+): Modifier {
+    var pressed by remember { mutableStateOf(false) }
+    var pointer by remember { mutableStateOf(Offset.Zero) }
+    var startPointer by remember { mutableStateOf(Offset.Zero) }
+    var measuredSize by remember { mutableStateOf(IntSize.Zero) }
+    val pressProgress by animateFloatAsState(
+        targetValue = if (pressed) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.5f, stiffness = 300f, visibilityThreshold = 0.001f),
+        label = "liquidActionPress",
+    )
+    val width = measuredSize.width.coerceAtLeast(1).toFloat()
+    val height = measuredSize.height.coerceAtLeast(1).toFloat()
+    val drag = pointer - startPointer
+    val stretchX = kotlin.math.abs(drag.x / width).coerceIn(0f, 1f) * 0.08f
+    val stretchY = kotlin.math.abs(drag.y / height).coerceIn(0f, 1f) * 0.08f
+    val targetScaleX = 1f + pressProgress * (0.11f + stretchX)
+    val targetScaleY = 1f + pressProgress * (0.11f + stretchY)
+    val scaleXSpring by animateFloatAsState(
+        targetValue = targetScaleX,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 250f, visibilityThreshold = 0.001f),
+        label = "liquidActionScaleX",
+    )
+    val scaleYSpring by animateFloatAsState(
+        targetValue = targetScaleY,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 250f, visibilityThreshold = 0.001f),
+        label = "liquidActionScaleY",
+    )
+    val targetTranslationX = if (pressed) 10f * tanh(drag.x / width * 1.8f) else 0f
+    val targetTranslationY = if (pressed) 10f * tanh(drag.y / height * 1.8f) else 0f
+    val translationX by animateFloatAsState(
+        targetValue = targetTranslationX,
+        animationSpec = spring(dampingRatio = 0.56f, stiffness = 360f),
+        label = "liquidActionTranslationX",
+    )
+    val translationY by animateFloatAsState(
+        targetValue = targetTranslationY,
+        animationSpec = spring(dampingRatio = 0.56f, stiffness = 360f),
+        label = "liquidActionTranslationY",
+    )
+
+    return this
+        .onSizeChanged { measuredSize = it }
+        .drawBackdrop(
+            backdrop = backdrop,
+            shape = { CircleShape },
+            effects = {
+                applyInteractiveLiquidActionEffects(
+                    spec = glassConfig.spec,
+                    isLight = isLightTheme,
+                    pressProgress = pressProgress,
+                )
+            },
+            highlight = { Highlight.Default.copy(alpha = pressProgress) },
+            layerBlock = {
+                scaleX = scaleXSpring
+                scaleY = scaleYSpring
+                this.translationX = translationX
+                this.translationY = translationY
+            },
+            onDrawSurface = {
+                drawRect(tint)
+                drawRect(
+                    if (isLightTheme) Color.Black.copy(alpha = 0.035f * pressProgress)
+                    else Color.White.copy(alpha = 0.045f * pressProgress),
+                )
+            },
+        )
+        .semantics {
+            role = Role.Button
+            onClick { if (enabled) onClick(); enabled }
+        }
+        .pointerInput(enabled) {
+            if (!enabled) return@pointerInput
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                startPointer = down.position
+                pointer = down.position
+                pressed = true
+                var moved = false
+                var canceled = false
+                var active = true
+                while (active) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    pointer = change.position
+                    if ((change.position - startPointer).getDistance() > viewConfiguration.touchSlop) moved = true
+                    if (change.isConsumed && moved) canceled = true
+                    active = change.pressed
+                }
+                pressed = false
+                if (!moved && !canceled) onClick()
+            }
+        }
+}
+
+@Composable
 private fun Modifier.liquidPress(enabled: Boolean = true, onClick: () -> Unit): Modifier {
     var pressed by remember { mutableStateOf(false) }
     var pointer by remember { mutableStateOf(Offset.Zero) }
@@ -1620,12 +1924,10 @@ private fun shareConversation(context: android.content.Context, title: String, m
     }.trim()
     val intent = android.content.Intent(android.content.Intent.ACTION_SEND)
         .setType("text/markdown")
-        .putExtra(android.content.Intent.EXTRA_SUBJECT, "Fcode Codex 对话")
+        .putExtra(android.content.Intent.EXTRA_SUBJECT, "Sillage 对话")
         .putExtra(android.content.Intent.EXTRA_TEXT, body)
     context.startActivity(android.content.Intent.createChooser(intent, "导出对话"))
 }
-
-private data class StarterPrompt(val icon: ImageVector, val title: String, val description: String, val prompt: String)
 
 @Composable
 private fun ConversationHistoryLoading(title: String) {
@@ -1654,61 +1956,6 @@ private fun ConversationHistoryLoading(title: String) {
 }
 
 @Composable
-private fun EmptyChatState(ready: Boolean, onPrompt: (String) -> Unit) {
-    val language = LocalNativeLanguage.current
-    val prompts = remember {
-        listOf(
-            StarterPrompt(HugeIcons.Code, nativeText(language, "\u7406\u89e3\u9879\u76ee", "Understand project"), nativeText(language, "\u5206\u6790\u5f53\u524d\u5de5\u4f5c\u533a\u7ed3\u6784\u548c\u6838\u5fc3\u903b\u8f91", "Analyze workspace structure and core logic"), nativeText(language, "\u8bf7\u5206\u6790\u5f53\u524d\u9879\u76ee\u7684\u76ee\u5f55\u7ed3\u6784\u3002", "Analyze the current project structure.")),
-            StarterPrompt(HugeIcons.Bug01, nativeText(language, "\u68c0\u67e5\u95ee\u9898", "Find problems"), nativeText(language, "\u67e5\u627e\u6f5c\u5728 bug\u3001\u5d29\u6e83\u548c\u5f02\u5e38\u8fb9\u754c", "Find bugs, crashes and edge cases"), nativeText(language, "\u8bf7\u68c0\u67e5\u5f53\u524d\u9879\u76ee\u4e2d\u53ef\u80fd\u7684 bug\u3002", "Check the current project for possible bugs.")),
-            StarterPrompt(HugeIcons.MagicWand01, nativeText(language, "\u6539\u8fdb\u4f53\u9a8c", "Improve experience"), nativeText(language, "\u4f18\u5316 UI\u3001\u6027\u80fd\u548c\u7528\u6237\u4ea4\u4e92", "Improve UI, performance and interaction"), nativeText(language, "\u8bf7\u5ba1\u67e5\u5f53\u524d\u9879\u76ee\u7684\u7528\u6237\u4f53\u9a8c\u3002", "Review and improve the current user experience.")),
-            StarterPrompt(HugeIcons.Files02, nativeText(language, "\u7ee7\u7eed\u5f00\u53d1", "Continue development"), nativeText(language, "\u8bfb\u53d6\u53d8\u66f4\u5e76\u5efa\u8bae\u4e0b\u4e00\u6b65", "Review changes and continue"), nativeText(language, "\u8bf7\u68c0\u67e5 Git \u53d8\u66f4\u548c\u9879\u76ee\u72b6\u6001\uff0c\u7136\u540e\u7ee7\u7eed\u4e0b\u4e00\u6b65\u3002", "Review Git changes and continue with the next step.")),
-        )
-    }
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-            Box(modifier = Modifier.size(64.dp), contentAlignment = Alignment.Center) {
-                Icon(HugeIcons.Sparkles, null, modifier = Modifier.size(30.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
-            }
-        }
-        Spacer(Modifier.height(18.dp))
-        Text(nativeText(language, "\u4eca\u5929\u60f3\u505a\u4ec0\u4e48\uff1f", "What would you like to do today?"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(6.dp))
-        Text(
-            if (ready) nativeText(language, "Codex \u5df2\u51c6\u5907\u597d\uff0c\u53ef\u4ee5\u4e0e\u4f60\u4e00\u8d77\u5904\u7406\u5f53\u524d\u9879\u76ee", "Codex is ready to work on your project") else nativeText(language, "\u6b63\u5728\u8fde\u63a5 Codex\u2026", "Connecting to Codex\u2026"),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(24.dp))
-        Column(modifier = Modifier.fillMaxWidth().widthIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            prompts.forEach { item ->
-                Surface(
-                    modifier = Modifier.fillMaxWidth().liquidPress(enabled = ready) { onPrompt(item.prompt) },
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
-                ) {
-                    Row(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
-                            Box(modifier = Modifier.size(38.dp), contentAlignment = Alignment.Center) { Icon(item.icon, null, modifier = Modifier.size(19.dp)) }
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(item.title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                            Text(item.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Icon(HugeIcons.ArrowRight01, null, modifier = Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun RikkaTopBar(
     title: String,
     modelLabel: String,
@@ -1718,14 +1965,45 @@ private fun RikkaTopBar(
     onExport: () -> Unit,
     canExport: Boolean,
     onNewConversation: () -> Unit,
+    backdrop: Backdrop? = null,
 ) {
     val language = LocalNativeLanguage.current
+    val context = LocalContext.current
+    val appearanceRevision = LocalFcodeAppearanceRevision.current
+    val config = remember(appearanceRevision, context) { readTopBarLiquidGlassConfig(context) }
+    val useProgressiveGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
+        config.enabled && liquidGlassSupported && backdrop != null
+    val isLight = rememberIsLightTheme()
+    val tint = if (isLight) Color.White else Color.Black
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    var menuExpanded by remember { mutableStateOf(false) }
+    val glassModifier = if (useProgressiveGlass) {
+        Modifier.drawPlainBackdrop(
+            backdrop = backdrop,
+            shape = { RectangleShape },
+            effects = { applyTopBarProgressiveGlass(config, tint) },
+        )
+    } else {
+        Modifier.background(
+            Brush.verticalGradient(
+                colors = listOf(
+                    surfaceColor.copy(alpha = if (isLight) 0.98f else 0.94f),
+                    surfaceColor.copy(alpha = if (isLight) 0.88f else 0.82f),
+                    surfaceColor.copy(alpha = if (isLight) 0.58f else 0.52f),
+                ),
+            ),
+        )
+    }
     TopAppBar(
-        modifier = Modifier.statusBarsPadding(),
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+        modifier = Modifier.then(glassModifier).statusBarsPadding(),
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = if (useProgressiveGlass) {
+                surfaceColor.copy(alpha = if (isLight) 0.58f else 0.52f)
+            } else Color.Transparent,
+        ),
         navigationIcon = {
             IconButton(onClick = onOpenDrawer) {
-                Icon(HugeIcons.Menu03, contentDescription = "对话列表")
+                Icon(HugeIcons.Menu03, contentDescription = nativeText(language, "对话列表", "Conversations"))
             }
         },
         title = {
@@ -1745,20 +2023,40 @@ private fun RikkaTopBar(
                     Text(value, maxLines = 1, style = MaterialTheme.typography.bodyMedium, overflow = TextOverflow.Ellipsis)
                 }
                 if (LocalShowModelSubtitle.current) Text(
-                    text = modelLabel.ifBlank { nativeText(language, "\u9ed8\u8ba4\u6a21\u578b", "Default model") },
+                    text = modelLabel.ifBlank { nativeText(language, "默认模型", "Default model") },
                     maxLines = 1,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
                     style = MaterialTheme.typography.labelSmall,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         },
         actions = {
-            IconButton(onClick = onOpenWorkPanel) {
-                Icon(HugeIcons.LeftToRightListBullet, contentDescription = nativeText(language, "\u5de5\u4f5c\u9762\u677f", "Work panel"))
-            }
             IconButton(onClick = onNewConversation) {
-                Icon(HugeIcons.MessageAdd01, contentDescription = "新对话")
+                Icon(HugeIcons.MessageAdd01, contentDescription = nativeText(language, "新对话", "New conversation"))
+            }
+            Box {
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(HugeIcons.MoreVertical, contentDescription = nativeText(language, "更多操作", "More actions"))
+                }
+                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text(nativeText(language, "搜索当前对话", "Search this conversation")) },
+                        leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
+                        onClick = { menuExpanded = false; onSearch() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(nativeText(language, "工作面板", "Work panel")) },
+                        leadingIcon = { Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(18.dp)) },
+                        onClick = { menuExpanded = false; onOpenWorkPanel() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(nativeText(language, "导出对话", "Export conversation")) },
+                        leadingIcon = { Icon(HugeIcons.Share08, null, Modifier.size(18.dp)) },
+                        enabled = canExport,
+                        onClick = { menuExpanded = false; onExport() },
+                    )
+                }
             }
         },
     )
@@ -1774,45 +2072,80 @@ private fun RikkaEmptyState(
     status: String,
     ready: Boolean,
     onSuggestion: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        Spacer(Modifier.weight(1f))
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+    val language = LocalNativeLanguage.current
+    val suggestions = remember(language) {
+        listOf(
+            nativeText(language, "理解项目", "Understand project") to
+                nativeText(language, "请分析当前项目的目录结构和核心逻辑。", "Analyze the current project structure and core logic."),
+            nativeText(language, "检查问题", "Find problems") to
+                nativeText(language, "请检查当前项目中可能的 bug 和异常边界。", "Check the current project for bugs and edge cases."),
+            nativeText(language, "继续开发", "Continue development") to
+                nativeText(language, "请检查 Git 变更和项目状态，然后建议下一步。", "Review Git changes and suggest the next step."),
+        )
+    }
+    Box(
+        modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().widthIn(max = 460.dp),
+            shape = RoundedCornerShape(26.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            border = BorderStroke(0.7.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f)),
+            tonalElevation = 1.dp,
         ) {
-            Surface(
-                modifier = Modifier.size(72.dp),
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer,
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        HugeIcons.Sparkles,
-                        contentDescription = null,
-                        modifier = Modifier.size(34.dp),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            Text("有什么可以帮你？", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(5.dp))
-            Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Spacer(Modifier.weight(1f))
-        LazyRow(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(listOf("检查当前项目", "运行测试", "解释这段代码", "修复一个问题")) { text ->
                 Surface(
-                    modifier = Modifier.clickable(enabled = ready) { onSuggestion(text) },
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier.size(56.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primaryContainer,
                 ) {
-                    Text(text, modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.bodySmall)
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            HugeIcons.Sparkles,
+                            contentDescription = null,
+                            modifier = Modifier.size(27.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+                Text(
+                    nativeText(language, "今天想做什么？", "What would you like to build?"),
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                )
+                if (status.isNotBlank()) Text(
+                    status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    suggestions.forEach { (label, prompt) ->
+                        Surface(
+                            modifier = Modifier.clickable(enabled = ready) { onSuggestion(prompt) },
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                        ) {
+                            Text(
+                                label,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1820,12 +2153,131 @@ private fun RikkaEmptyState(
 }
 
 @Composable
-private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: String?, chatState: NativeChatState, liveState: NativeChatState?, onEdit: () -> Unit, onRetry: (() -> Unit)?, onLoadSubagentHistory: (String) -> Unit, onQuote: (String) -> Unit, onReasoningAutoCollapse: () -> Unit = {}, onPreviewAttachment: (NativeAttachment) -> Unit = {}) {
+private fun SendMessageFlightOverlay(
+    motion: PendingSendMotion,
+    rootBounds: Rect?,
+    wallpaperBackdrop: Backdrop?,
+    onFinished: () -> Unit,
+) {
+    val root = rootBounds ?: return
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val source = motion.sourceBounds.translate(Offset(-root.left, -root.top))
+    val targetWindow = motion.targetBounds
+    val textStyle = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp, letterSpacing = 0.1.sp)
+
+    if (targetWindow == null) {
+        Text(
+            motion.text,
+            modifier = Modifier
+                .offset { IntOffset(source.left.roundToInt(), source.top.roundToInt()) }
+                .width(with(density) { source.width.toDp() })
+                .zIndex(20f)
+                .clearAndSetSemantics { },
+            color = MaterialTheme.colorScheme.onSurface,
+            style = textStyle,
+            maxLines = 5,
+            overflow = TextOverflow.Clip,
+        )
+        return
+    }
+
+    val target = targetWindow.translate(Offset(-root.left, -root.top))
+    val progress = remember(motion.token) { Animatable(0f) }
+    LaunchedEffect(motion.token, targetWindow) {
+        progress.snapTo(0f)
+        withFrameNanos { }
+        progress.animateTo(
+            targetValue = 1f,
+            animationSpec = spring(
+                dampingRatio = 0.72f,
+                stiffness = 430f,
+                visibilityThreshold = 0.001f,
+            ),
+        )
+        onFinished()
+    }
+
+    val p = progress.value
+    val horizontalPaddingPx = with(density) { 16.dp.toPx() }
+    val verticalPaddingPx = with(density) { 12.dp.toPx() }
+    val startX = source.left - horizontalPaddingPx
+    val startY = source.top - verticalPaddingPx
+    val x = startX + (target.left - startX) * p
+    val y = startY + (target.top - startY) * p
+    val backgroundAlpha = ((p - 0.10f) / 0.42f).coerceIn(0f, 1f)
+    val landingPhase = ((p.coerceIn(0f, 1f) - 0.70f) / 0.30f).coerceIn(0f, 1f)
+    val landingScale = 1f + 0.038f * sin(landingPhase * Math.PI.toFloat())
+    val appearanceRevision = LocalFcodeAppearanceRevision.current
+    val bubbleContext = LocalContext.current
+    val bubbleConfig = remember(appearanceRevision, bubbleContext) { readUserBubbleLiquidGlassConfig(bubbleContext) }
+    val isLightTheme = rememberIsLightTheme()
+    val useLiquidGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
+        bubbleConfig.enabled && liquidGlassSupported && wallpaperBackdrop != null
+    val cornerRadius = if (useLiquidGlass) bubbleConfig.spec.cornerRadiusDp.dp else 22.dp
+    val shape = RoundedCornerShape(cornerRadius, cornerRadius, 6.dp, cornerRadius)
+    val tint = (if (isLightTheme) Color.White else Color.Black).copy(alpha = bubbleConfig.tintAlpha)
+
+    Box(
+        Modifier
+            .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+            .size(
+                width = with(density) { target.width.toDp() },
+                height = with(density) { target.height.toDp() },
+            )
+            .graphicsLayer {
+                scaleX = landingScale
+                scaleY = landingScale
+                transformOrigin = TransformOrigin(1f, 1f)
+            }
+            .zIndex(20f)
+            .clearAndSetSemantics { },
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = backgroundAlpha }
+                .then(
+                    if (useLiquidGlass && wallpaperBackdrop != null) Modifier.drawBackdrop(
+                        backdrop = wallpaperBackdrop,
+                        shape = { shape },
+                        effects = { applyLiquidGlassEffects(bubbleConfig.spec, isLightTheme) },
+                        highlight = { Highlight.Plain },
+                        onDrawSurface = { drawRect(tint) },
+                    ) else Modifier.background(MaterialTheme.colorScheme.primaryContainer, shape)
+                ),
+        )
+        Text(
+            motion.text,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            color = if (useLiquidGlass) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimaryContainer,
+            style = textStyle,
+            maxLines = 5,
+            overflow = TextOverflow.Clip,
+        )
+    }
+}
+
+@Composable
+private fun RikkaMessageItem(
+    message: NativeChatMessage,
+    assistantActionText: String?,
+    chatState: NativeChatState,
+    liveState: NativeChatState?,
+    onEdit: () -> Unit,
+    onRetry: (() -> Unit)?,
+    onLoadSubagentHistory: (String) -> Unit,
+    onQuote: (String) -> Unit,
+    onReasoningAutoCollapse: () -> Unit = {},
+    onPreviewAttachment: (NativeAttachment) -> Unit = {},
+    wallpaperBackdrop: Backdrop? = null,
+    sendingMotionActive: Boolean = false,
+    onUserBubbleBounds: ((Rect) -> Unit)? = null,
+) {
     when (message.role) {
         NativeChatRole.USER -> {
             val implementsPlan = message.content.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
             val displayText = if (implementsPlan) nativeText(LocalNativeLanguage.current, "\u662f\uff0c\u6267\u884c\u6b64\u8ba1\u5212", "Yes, implement this plan") else message.content
-            RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan)
+            RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan, backdrop = wallpaperBackdrop, sendingMotionActive = sendingMotionActive, onBubbleBounds = onUserBubbleBounds)
         }
         NativeChatRole.ASSISTANT -> {
             val liveSnapshot = if (message.streaming && chatState.liveAssistantMessageId == message.id) {
@@ -1848,6 +2300,7 @@ private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: St
                 liveState,
                 liveSnapshot,
                 historicalFileChanges + liveFileChanges,
+                chatState.projectPath,
                 onRetry,
                 onLoadSubagentHistory,
                 onQuote,
@@ -1860,9 +2313,32 @@ private fun RikkaMessageItem(message: NativeChatMessage, assistantActionText: St
 }
 
 @Composable
-private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>, onEdit: () -> Unit, onPreviewAttachment: (NativeAttachment) -> Unit, editable: Boolean = true) {
+private fun RikkaUserMessage(
+    text: String,
+    skills: List<NativeSkill>,
+    attachments: List<NativeAttachment>,
+    onEdit: () -> Unit,
+    onPreviewAttachment: (NativeAttachment) -> Unit,
+    editable: Boolean = true,
+    backdrop: Backdrop? = null,
+    sendingMotionActive: Boolean = false,
+    onBubbleBounds: ((Rect) -> Unit)? = null,
+) {
     val language = LocalNativeLanguage.current
     val clipboard = LocalClipboardManager.current
+    val appearanceRevision = LocalFcodeAppearanceRevision.current
+    val bubbleContext = LocalContext.current
+    val bubbleConfig = remember(appearanceRevision, bubbleContext) { readUserBubbleLiquidGlassConfig(bubbleContext) }
+    val isLightTheme = rememberIsLightTheme()
+    val useLiquidGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
+        bubbleConfig.enabled && liquidGlassSupported && backdrop != null
+    val bubbleTint = (if (isLightTheme) Color.White else Color.Black).copy(alpha = bubbleConfig.tintAlpha)
+    val bubbleShape = RoundedCornerShape(
+        topStart = bubbleConfig.spec.cornerRadiusDp.dp,
+        topEnd = bubbleConfig.spec.cornerRadiusDp.dp,
+        bottomEnd = 6.dp,
+        bottomStart = bubbleConfig.spec.cornerRadiusDp.dp,
+    )
     var menuExpanded by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         if (attachments.isNotEmpty()) {
@@ -1918,9 +2394,24 @@ private fun RikkaUserMessage(text: String, skills: List<NativeSkill>, attachment
         }
         if (text.isNotBlank()) Box {
             Surface(
-                modifier = Modifier.widthIn(max = 360.dp).combinedClickable(onClick = {}, onLongClick = { menuExpanded = true }),
-                shape = RoundedCornerShape(22.dp, 22.dp, 6.dp, 22.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier
+                    .widthIn(max = 360.dp)
+                    .combinedClickable(onClick = {}, onLongClick = { menuExpanded = true })
+                    .onGloballyPositioned { onBubbleBounds?.invoke(it.boundsInWindow()) }
+                    .then(
+                        if (useLiquidGlass && backdrop != null) Modifier.drawBackdrop(
+                            backdrop = backdrop,
+                            shape = { bubbleShape },
+                            effects = { applyLiquidGlassEffects(bubbleConfig.spec, isLightTheme) },
+                            highlight = { Highlight.Plain },
+                            onDrawSurface = { drawRect(bubbleTint) },
+                        ) else Modifier
+                    )
+                    .graphicsLayer { alpha = if (sendingMotionActive) 0f else 1f },
+                shape = bubbleShape,
+                color = if (useLiquidGlass) Color.Transparent else MaterialTheme.colorScheme.primaryContainer,
+                contentColor = if (useLiquidGlass) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimaryContainer,
+                border = if (useLiquidGlass) BorderStroke(0.7.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)) else null,
             ) {
                 SelectionContainer {
                     Text(text, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), style = MaterialTheme.typography.bodyLarge, lineHeight = 24.sp, letterSpacing = 0.1.sp)
@@ -2147,6 +2638,7 @@ private fun RikkaAssistantMessage(
     liveState: NativeChatState?,
     liveSnapshot: NativeStreamingMarkdownSnapshot?,
     fileChangeItems: List<JSONObject>,
+    projectPath: String,
     onRetry: (() -> Unit)?,
     onLoadSubagentHistory: (String) -> Unit,
     onQuote: (String) -> Unit,
@@ -2158,6 +2650,8 @@ private fun RikkaAssistantMessage(
     val hasVisibleContent = (liveSnapshot?.sourceChars ?: text.length) > 0
     val actionText = assistantActionText ?: text
     val clipboard = LocalClipboardManager.current
+    val customWallpaper = LocalFcodeChatBackground.current == FcodeChatBackgroundStyle.CUSTOM
+    val isLightTheme = rememberIsLightTheme()
     var menuExpanded by remember { mutableStateOf(false) }
     val markLiveSnapshotPresented: (Int) -> Unit = remember(messageId, liveState) {
         { chars: Int ->
@@ -2165,79 +2659,95 @@ private fun RikkaAssistantMessage(
         }
     }
     Box(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp).combinedClickable(onClick = {}, onLongClick = { if (showChrome) menuExpanded = true }),
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 760.dp)
+                .combinedClickable(onClick = {}, onLongClick = { if (showChrome) menuExpanded = true }),
+            shape = if (customWallpaper) RoundedCornerShape(20.dp) else RectangleShape,
+            color = if (customWallpaper) {
+                MaterialTheme.colorScheme.surface.copy(alpha = if (isLightTheme) 0.94f else 0.90f)
+            } else Color.Transparent,
+            border = if (customWallpaper) {
+                BorderStroke(0.7.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f))
+            } else null,
+            tonalElevation = if (customWallpaper) 1.dp else 0.dp,
         ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                if (liveState != null) {
-                    ActiveProcessingPanel(liveState, hasVisibleContent, onLoadSubagentHistory, onReasoningAutoCollapse)
-                    Spacer(Modifier.height(6.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(if (customWallpaper) Modifier.padding(horizontal = 14.dp, vertical = 12.dp) else Modifier),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    if (liveState != null) {
+                        ActiveProcessingPanel(liveState, hasVisibleContent, onLoadSubagentHistory, onReasoningAutoCollapse)
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    StreamingResponseText(
+                        messageId = messageId,
+                        text = text,
+                        streaming = streaming,
+                        revealStartedAt = revealStartedAt,
+                        finalOnlyReveal = finalOnlyReveal,
+                        liveSnapshot = liveSnapshot,
+                        onQuoteSelection = onQuote,
+                        onLiveSnapshotPresented = markLiveSnapshotPresented,
+                    )
                 }
-                StreamingResponseText(
-                    messageId = messageId,
-                    text = text,
-                    streaming = streaming,
-                    revealStartedAt = revealStartedAt,
-                    finalOnlyReveal = finalOnlyReveal,
-                    liveSnapshot = liveSnapshot,
-                    onQuoteSelection = onQuote,
-                    onLiveSnapshotPresented = markLiveSnapshotPresented,
-                )
-            }
-            // Generating status and final actions share one fixed-height slot. Switching content
-            // uses alpha only, never expand/shrink, so completion cannot change message height.
-            if (streaming || showChrome) Box(Modifier.fillMaxWidth().height(40.dp)) {
-                androidx.compose.animation.Crossfade(
-                    targetState = showChrome && !streaming && text.isNotBlank(),
-                    animationSpec = tween(120, easing = LinearEasing),
-                    label = "assistantChromeSlot",
-                ) { actionsVisible ->
-                    if (actionsVisible) {
-                        MessageActions(text = actionText, onRetry = onRetry, allowShare = true)
-                    } else if (streaming) {
-                        Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(7.dp))
-                            Text(nativeText(language, "\u6b63\u5728\u751f\u6210", "Generating"), style = MaterialTheme.typography.labelSmall)
+                // Generating status and final actions share one fixed-height slot. Switching content
+                // uses alpha only, never expand/shrink, so completion cannot change message height.
+                if (streaming || showChrome) Box(Modifier.fillMaxWidth().height(40.dp)) {
+                    androidx.compose.animation.Crossfade(
+                        targetState = showChrome && !streaming && text.isNotBlank(),
+                        animationSpec = tween(120, easing = LinearEasing),
+                        label = "assistantChromeSlot",
+                    ) { actionsVisible ->
+                        if (actionsVisible) {
+                            MessageActions(text = actionText, onRetry = onRetry, allowShare = true)
+                        } else if (streaming) {
+                            Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(7.dp))
+                                Text(nativeText(language, "正在生成", "Generating"), style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }
-            }
-            if (LocalShowResponseStats.current && (streaming || usage != null)) {
-                Box(Modifier.fillMaxWidth().height(32.dp)) {
-                    if (!streaming && showChrome && usage != null) {
-                        ResponseUsageFooterCompact(usage)
+                if (LocalShowResponseStats.current && (streaming || usage != null)) {
+                    Box(Modifier.fillMaxWidth().heightIn(min = 32.dp)) {
+                        if (!streaming && showChrome && usage != null) {
+                            ResponseUsageFooterCompact(usage)
+                        }
                     }
                 }
-            }
-            val changedFiles = remember(fileChangeItems.map { it.toString() }) { extractChangedFiles(fileChangeItems) }
-            if (!streaming && changedFiles.isNotEmpty()) {
-                FileChangesCapsule(changedFiles)
+                if (!streaming && fileChangeItems.isNotEmpty()) {
+                    FileDiffCard(fileChangeItems, projectPath)
+                }
             }
         }
         DropdownMenu(expanded = showChrome && menuExpanded, onDismissRequest = { menuExpanded = false }) {
             DropdownMenuItem(
-                text = { Text(nativeText(language, "\u590d\u5236\u56de\u7b54", "Copy answer")) },
+                text = { Text(nativeText(language, "复制回答", "Copy answer")) },
                 leadingIcon = { Icon(HugeIcons.Copy01, null, modifier = Modifier.size(18.dp)) },
                 onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(actionText)); menuExpanded = false },
             )
             DropdownMenuItem(
-                text = { Text(nativeText(language, "\u5f15\u7528\u56de\u7b54", "Quote answer")) },
+                text = { Text(nativeText(language, "引用回答", "Quote answer")) },
                 leadingIcon = { Icon(HugeIcons.LeftToRightListBullet, null, modifier = Modifier.size(18.dp)) },
                 onClick = { menuExpanded = false; onQuote(actionText) },
             )
             if (onRetry != null) DropdownMenuItem(
-                text = { Text(nativeText(language, "\u91cd\u65b0\u751f\u6210", "Regenerate")) },
+                text = { Text(nativeText(language, "重新生成", "Regenerate")) },
                 leadingIcon = { Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(18.dp)) },
                 onClick = { menuExpanded = false; onRetry() },
             )
             DropdownMenuItem(
-                text = { Text(nativeText(language, "\u5206\u4eab\u56de\u7b54", "Share answer")) },
+                text = { Text(nativeText(language, "分享回答", "Share answer")) },
                 leadingIcon = { Icon(HugeIcons.Share08, null, modifier = Modifier.size(18.dp)) },
                 onClick = {
                     menuExpanded = false
-                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, actionText)
-                    context.startActivity(android.content.Intent.createChooser(intent, "分享回答"))
+                    val intent = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, actionText)
+                    context.startActivity(Intent.createChooser(intent, nativeText(language, "分享回答", "Share answer")))
                 },
             )
         }
@@ -2245,29 +2755,6 @@ private fun RikkaAssistantMessage(
 }
 
 private data class ChangedFileEntry(val path: String, val operation: String)
-
-@Composable
-private fun FileOperationCapsule(file: ChangedFileEntry) {
-    val language = LocalNativeLanguage.current
-    val name = file.path.substringAfterLast('/').substringAfterLast('\\').ifBlank { file.path }
-    val operation = when (file.operation) {
-        "add" -> nativeText(language, "\u65b0\u5efa", "Added")
-        "delete" -> nativeText(language, "\u5220\u9664", "Deleted")
-        else -> nativeText(language, "\u7f16\u8f91", "Edited")
-    }
-    Surface(
-        modifier = Modifier.widthIn(max = 520.dp),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-    ) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(HugeIcons.Files02, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(7.dp))
-            Text("$operation $name", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
-        }
-    }
-}
 
 private fun associatedFileChangeItems(messages: List<NativeChatMessage>, assistantId: String): List<JSONObject> {
     val assistantIndex = messages.indexOfFirst { it.id == assistantId }
@@ -2334,64 +2821,6 @@ private fun extractChangedFiles(items: List<JSONObject>): List<ChangedFileEntry>
         Regex("(?m)^(?:\\+\\+\\+|---)\\s+(?:[ab]/)?(.+)$").findAll(detail).forEach { match -> add(match.groupValues[1], "edit") }
     }
     return entries.values.toList()
-}
-
-@Composable
-private fun FileChangesCapsule(files: List<ChangedFileEntry>) {
-    val language = LocalNativeLanguage.current
-    var expanded by remember { mutableStateOf(false) }
-    val arrowRotation by animateFloatAsState(
-        if (expanded) 180f else 0f,
-        spring(dampingRatio = 0.88f, stiffness = 320f),
-        label = "fileChangesArrow",
-    )
-    Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Surface(
-            modifier = Modifier.widthIn(max = 420.dp).clickable { expanded = !expanded },
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-        ) {
-            Row(Modifier.padding(horizontal = 11.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(HugeIcons.Files02, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    nativeText(language, "\u66f4\u6539\u4e86 ${files.size} \u4e2a\u6587\u4ef6", "${files.size} files changed"),
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-                Spacer(Modifier.width(6.dp))
-                Icon(HugeIcons.ArrowDown01, null, Modifier.size(14.dp).graphicsLayer { rotationZ = arrowRotation }, tint = MaterialTheme.colorScheme.onSecondaryContainer)
-            }
-        }
-        ReasoningCapsuleExpand(expanded) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.66f),
-            ) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    files.forEach { file ->
-                        val name = file.path.substringAfterLast('/').substringAfterLast('\\').ifBlank { file.path }
-                        val operation = when (file.operation) {
-                            "add" -> nativeText(language, "\u65b0\u5efa", "Added")
-                            "delete" -> nativeText(language, "\u5220\u9664", "Deleted")
-                            else -> nativeText(language, "\u7f16\u8f91", "Edited")
-                        }
-                        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(HugeIcons.Files02, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(8.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("$operation $name", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
-                                if (file.path != name) Text(file.path, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -2796,7 +3225,11 @@ private fun ProcessingPanel(
             runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }
         }
     }
-    val liveChangedFiles = remember(completedFileChanges.map { it.toString() }) { extractChangedFiles(completedFileChanges) }
+    val imageItems = remember(toolDetailCount, latestToolDetail) {
+        state.toolDetails.mapNotNull { raw ->
+            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { isImageToolItem(it.optString("type")) }
+        }
+    }
     val commandRunning = liveCommand != null
     val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
         (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
@@ -2824,7 +3257,8 @@ private fun ProcessingPanel(
         )
         completedCommands.forEach { command -> CommandExecutionCard(command, compact = true) }
         if (liveCommand != null) CommandExecutionCard(liveCommand, running = true, liveOutput = state.commandText, compact = true)
-        liveChangedFiles.forEach { file -> FileOperationCapsule(file) }
+        if (completedFileChanges.isNotEmpty()) FileDiffCard(completedFileChanges, state.projectPath)
+        if (imageItems.isNotEmpty()) ImageGroupCard(imageItems)
         if (state.liveSubagents.isNotEmpty()) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -3227,6 +3661,7 @@ private fun RikkaCodeBlock(
                     text = visibleCode,
                     modifier = Modifier.fillMaxWidth(),
                     onQuoteSelection = onQuoteSelection,
+                    codeLanguage = language,
                 )
             }
             if (collapsible) {
@@ -3250,10 +3685,15 @@ private fun FcodeSelectableCodeText(
     modifier: Modifier = Modifier,
     onQuoteSelection: ((String) -> Unit)? = null,
     textColor: Color? = null,
+    codeLanguage: String = "",
 ) {
     val language = LocalNativeLanguage.current
     val colors = LocalFcodeMarkdownColors.current
     val onSelectionActivityChanged = LocalTextSelectionActivityChanged.current
+    // Syntax coloring is computed off the render path and cached per (text, language, theme).
+    val highlighted = remember(text, codeLanguage, colors.codeBlockBackground) {
+        NativeCodeHighlighter.highlight(text, codeLanguage, colors.codeBlockBackground.toArgb())
+    }
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -3278,9 +3718,12 @@ private fun FcodeSelectableCodeText(
             view.onSelectionActivityChanged = onSelectionActivityChanged
             view.onQuoteSelection = onQuoteSelection
             view.setTextColor((textColor ?: colors.codeBlockText).toArgb())
-            if (view.text.toString() != text) {
+            val display: CharSequence = highlighted ?: text
+            // Re-set only when the source changed or the highlighted spans were rebuilt
+            // (e.g. theme switch), preserving scroll/selection otherwise.
+            if (view.text.toString() != text || view.text !== display) {
                 view.finishSelection()
-                view.text = text
+                view.text = display
             }
         },
     )
@@ -3561,7 +4004,11 @@ private class RoundedInlineCodeSpan(
     ) {
         val oldColor = paint.color
         val oldTypeface = paint.typeface
+        val oldStyle = paint.style
         paint.typeface = android.graphics.Typeface.MONOSPACE
+        // A preceding span can leave the shared paint in STROKE mode, which would render the
+        // code chip as an outline (or a device-specific angular box). Force a filled round rect.
+        paint.style = android.graphics.Paint.Style.FILL
         val width = paint.measureText(text, start, end) + horizontalPadding * 2f
         paint.color = backgroundColor
         canvas.drawRoundRect(
@@ -3577,6 +4024,7 @@ private class RoundedInlineCodeSpan(
         canvas.drawText(text, start, end, x + horizontalPadding, y.toFloat(), paint)
         paint.color = oldColor
         paint.typeface = oldTypeface
+        paint.style = oldStyle
     }
 }
 
@@ -3886,9 +4334,19 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         val hasThreadBackedAgents = tools != null && (0 until tools.length()).any { toolIndex ->
             runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.let(::subagentThreadId).orEmpty().isNotBlank()
         }
+        val historicalFileChangeItems = if (tools == null) emptyList() else (0 until tools.length()).mapNotNull { toolIndex ->
+            runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }
+        }
+        if (historicalFileChangeItems.isNotEmpty()) FileDiffCard(historicalFileChangeItems, state.projectPath)
+        val historicalImageItems = if (tools == null) emptyList() else (0 until tools.length()).mapNotNull { toolIndex ->
+            runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.takeIf { isImageToolItem(it.optString("type")) }
+        }
+        if (historicalImageItems.isNotEmpty()) ImageGroupCard(historicalImageItems)
         if (tools != null) for (index in 0 until tools.length()) {
             val item = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
             val type = item.optString("type")
+            if (type == "fileChange") continue
+            if (isImageToolItem(type)) continue
             if (type in setOf("collabAgentToolCall", "subAgentActivity") && hasThreadBackedAgents && subagentThreadId(item).isBlank()) continue
             val title = when (type) { "fileChange" -> nativeText(language, "\u6587\u4ef6\u4fee\u6539", "File change"); "mcpToolCall" -> "MCP tool"; "webSearch" -> nativeText(language, "\u7f51\u9875\u641c\u7d22", "Web search"); "collabAgentToolCall" -> nativeText(language, "\u5b50\u4ee3\u7406", "Subagent"); else -> type }
             val payloadRef = item.optString(NativeLargePayloadStore.PAYLOAD_REF)
@@ -3968,10 +4426,11 @@ private fun HistoricalProcessCapsules(
         items.filter { it.optString("type") == "commandExecution" }.forEach { item ->
             CommandExecutionCard(item, compact = true)
         }
-        extractChangedFiles(items.filter { it.optString("type") == "fileChange" }).forEach { file ->
-            FileOperationCapsule(file)
-        }
-        items.filter { it.optString("type") !in setOf("commandExecution", "fileChange") }.forEach { item ->
+        val fileChangeItems = items.filter { it.optString("type") == "fileChange" }
+        if (fileChangeItems.isNotEmpty()) FileDiffCard(fileChangeItems, state.projectPath)
+        val imageItems = items.filter { isImageToolItem(it.optString("type")) }
+        if (imageItems.isNotEmpty()) ImageGroupCard(imageItems)
+        items.filter { it.optString("type") !in setOf("commandExecution", "fileChange") && !isImageToolItem(it.optString("type")) }.forEach { item ->
             when (item.optString("type")) {
                 "collabAgentToolCall", "subAgentActivity" -> CollabAgentCapsule(item, state, onLoadSubagentHistory)
                 "mcpToolCall" -> ToolTextCard(
@@ -4203,6 +4662,7 @@ private fun WorkPanelDialog(
     onClearGoal: () -> Unit,
     onExecutePlan: () -> Unit,
     onGitAction: (String, String) -> Unit,
+    onRequestGitPush: () -> Unit,
     onSnapshotAction: (String, String) -> Unit,
     onRequestRestoreFile: (String) -> Unit,
     onWorktreeAction: (String, String) -> Unit,
@@ -4306,7 +4766,7 @@ private fun WorkPanelDialog(
                                     "snapshots" -> WorkSnapshotsView(state, onSnapshotAction, onRequestRestoreFile)
                                     "worktrees" -> WorktreesView(state, onWorktreeAction, onRequestMergeWorktree, onRequestRemoveWorktree)
                                     "changes" -> WorkChangesView(state, changes, changedFiles, gitEntries, onGitAction)
-                                    "git" -> WorkGitView(state, onGitAction)
+                                    "git" -> WorkGitView(state, onGitAction, onRequestGitPush)
                                     else -> WorkPlanView(state.planJson, state.planExplanation, state.activeGoalObjective, state.ready && !state.phase.active, onEditGoal, onClearGoal, onExecutePlan)
                                 }
                             }
@@ -4364,8 +4824,11 @@ private fun WorktreesView(
     onRequestRemove: (String) -> Unit,
 ) {
     val language = LocalNativeLanguage.current
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     var branchName by remember(state.currentThreadId, state.projectPath) { mutableStateOf("") }
     val preview = remember(state.worktreeMergePreview) { runCatching { JSONObject(state.worktreeMergePreview) }.getOrNull() }
+    val handoff = remember(state.worktreePrHandoff) { runCatching { JSONObject(state.worktreePrHandoff) }.getOrNull() }
     val currentPath = state.projectPath.trimEnd('/', '\\')
     val mainPath = state.worktrees.firstOrNull()?.path.orEmpty().trimEnd('/', '\\')
     LazyColumn(
@@ -4373,7 +4836,36 @@ private fun WorktreesView(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
-        if (preview != null) {
+        if (handoff != null) {
+            item(key = "worktree-pr-handoff") {
+                val markdown = handoff.optString("markdown")
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { onAction("clearPrHandoff", "") }) { Icon(HugeIcons.ArrowRight01, null, Modifier.graphicsLayer { rotationZ = 180f }) }
+                            Column(Modifier.weight(1f)) {
+                                Text("${handoff.optString("sourceBranch")} → ${handoff.optString("targetBranch")}", fontWeight = FontWeight.SemiBold)
+                                Text(nativeText(language, "Pull Request 交接信息", "Pull Request handoff"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        if (handoff.optBoolean("dirty")) Text(
+                            nativeText(language, "该隔离任务仍有未提交变更，交接信息只包含已提交内容。", "This isolated task has uncommitted changes; the handoff only includes committed work."),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        SelectionContainer { Text(markdown.take(32_000), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                            TextButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(markdown)) }) { Text(nativeText(language, "复制", "Copy")) }
+                            TextButton(onClick = {
+                                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                                    .putExtra(android.content.Intent.EXTRA_TEXT, markdown)
+                                context.startActivity(android.content.Intent.createChooser(intent, nativeText(language, "分享 PR 交接", "Share PR handoff")))
+                            }) { Text(nativeText(language, "分享", "Share")) }
+                        }
+                    }
+                }
+            }
+        } else if (preview != null) {
             item(key = "worktree-merge-preview") {
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)) {
                     Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -4442,8 +4934,12 @@ private fun WorktreesView(
             }
             itemsIndexed(state.worktrees, key = { _, item -> item.path }) { index, worktree ->
                 val normalizedPath = worktree.path.trimEnd('/', '\\')
-                val current = normalizedPath == currentPath
+                val current = normalizedPath == currentPath || currentPath.startsWith(normalizedPath + "/") || currentPath.startsWith(normalizedPath + "\\")
                 val main = index == 0 || normalizedPath == mainPath
+                val referenced = state.conversations.any {
+                    val conversationPath = it.projectPath.trimEnd('/', '\\')
+                    conversationPath == normalizedPath || conversationPath.startsWith(normalizedPath + "/") || conversationPath.startsWith(normalizedPath + "\\")
+                }
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceContainerLow) {
                     Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -4461,8 +4957,9 @@ private fun WorktreesView(
                         }
                         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.End) {
                             if (!current) TextButton(enabled = !state.worktreeBusy, onClick = { onAction("open", worktree.path) }) { Text(nativeText(language, "\u65b0\u5bf9\u8bdd\u6253\u5f00", "Open task")) }
+                            if (!main && !worktree.detached) TextButton(enabled = !state.worktreeBusy, onClick = { onAction("preparePr", worktree.path) }) { Text(nativeText(language, "PR 交接", "PR handoff")) }
                             if (!main && !worktree.detached) TextButton(enabled = !state.worktreeBusy && !worktree.dirty, onClick = { onAction("previewMerge", worktree.path) }) { Text(nativeText(language, "\u9884\u89c8\u5408\u5e76", "Preview merge")) }
-                            if (!main && !current) TextButton(enabled = !state.worktreeBusy && !worktree.dirty && !worktree.locked, onClick = { onRequestRemove(worktree.path) }) { Text(nativeText(language, "\u79fb\u9664", "Remove")) }
+                            if (!main && !current) TextButton(enabled = !state.worktreeBusy && !worktree.dirty && !worktree.locked && !referenced, onClick = { onRequestRemove(worktree.path) }) { Text(nativeText(language, "\u79fb\u9664", "Remove")) }
                         }
                     }
                 }
@@ -4917,15 +5414,20 @@ private fun GitDiffText(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) -> Unit) {
+private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) -> Unit, onRequestPush: () -> Unit) {
     val language = LocalNativeLanguage.current
     val snapshot = remember(state.gitSnapshot) { runCatching { JSONObject(state.gitSnapshot) }.getOrNull() }
-    val entries = remember(state.gitSnapshot) {
-        val array = snapshot?.optJSONArray("entries")
-        if (array == null) emptyList() else buildList { for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add) }
-    }
+    val entries = remember(state.gitSnapshot) { jsonObjects(snapshot?.optJSONArray("entries")) }
+    val history = remember(state.gitSnapshot) { jsonObjects(snapshot?.optJSONArray("history")) }
     var commitMessage by remember(state.currentThreadId, state.projectPath) { mutableStateOf("") }
     val stagedCount = entries.count { it.optBoolean("staged") }
+    val branch = snapshot?.optString("branch").orEmpty()
+    val upstream = snapshot?.optString("upstream").orEmpty()
+    val remote = snapshot?.optString("remote").orEmpty()
+    val remoteUrl = snapshot?.optString("remoteUrl").orEmpty()
+    val ahead = snapshot?.optInt("ahead") ?: 0
+    val behind = snapshot?.optInt("behind") ?: 0
+    val canPush = snapshot?.optBoolean("hasHead") == true && branch.isNotBlank() && remote.isNotBlank()
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -4937,14 +5439,27 @@ private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) ->
                     Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(9.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(snapshot?.optString("branch").orEmpty().ifBlank { nativeText(language, "Git \u5de5\u4f5c\u533a", "Git workspace") }, fontWeight = FontWeight.SemiBold)
-                        Text(state.projectPath.ifBlank { nativeText(language, "\u672a\u7ed1\u5b9a\u9879\u76ee", "No project selected") }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        val ahead = snapshot?.optInt("ahead") ?: 0
-                        val behind = snapshot?.optInt("behind") ?: 0
-                        if (ahead > 0 || behind > 0) Text("↑$ahead  ↓$behind", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        Text(branch.ifBlank { nativeText(language, "Git 工作区", "Git workspace") }, fontWeight = FontWeight.SemiBold)
+                        Text(state.projectPath.ifBlank { nativeText(language, "未绑定项目", "No project selected") }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (upstream.isNotBlank()) Text("$upstream · ↑$ahead ↓$behind", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        else if (remote.isNotBlank()) Text(nativeText(language, "尚未设置 upstream · 远程 $remote", "No upstream · remote $remote"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (state.gitBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                    else IconButton(onClick = { onGitAction("refresh", "") }) { Icon(HugeIcons.Refresh03, nativeText(language, "\u5237\u65b0", "Refresh"), Modifier.size(19.dp)) }
+                    else IconButton(onClick = { onGitAction("refresh", "") }) { Icon(HugeIcons.Refresh03, nativeText(language, "刷新", "Refresh"), Modifier.size(19.dp)) }
+                }
+            }
+        }
+        if (snapshot?.optBoolean("available", true) != false && remote.isNotBlank()) item(key = "git-remote") {
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(nativeText(language, "远程协作", "Remote collaboration"), fontWeight = FontWeight.SemiBold)
+                    Text("$remote · $remoteUrl", maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                        TextButton(enabled = !state.gitBusy, onClick = { onGitAction("fetch", "") }) { Text("Fetch") }
+                        Button(enabled = canPush && !state.gitBusy, onClick = onRequestPush, shape = RoundedCornerShape(14.dp)) {
+                            Text(if (upstream.isBlank()) nativeText(language, "发布分支", "Publish branch") else "Push")
+                        }
+                    }
                 }
             }
         }
@@ -4955,10 +5470,11 @@ private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) ->
             Text(state.gitNotice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 4.dp))
         }
         if (snapshot?.optBoolean("available", true) == false) item(key = "git-unavailable") {
-            WorkPanelInlineEmpty(snapshot.optString("error", nativeText(language, "Git \u4e0d\u53ef\u7528", "Git unavailable")))
-        } else if (!state.gitBusy && entries.isEmpty()) item(key = "git-clean") {
-            WorkPanelInlineEmpty(nativeText(language, "\u5de5\u4f5c\u533a\u5e72\u51c0\uff0c\u6ca1\u6709\u5f85\u63d0\u4ea4\u53d8\u66f4", "Working tree clean"))
+            WorkPanelInlineEmpty(snapshot.optString("error", nativeText(language, "Git 不可用", "Git unavailable")))
         } else {
+            if (!state.gitBusy && entries.isEmpty()) item(key = "git-clean") {
+                WorkPanelInlineEmpty(nativeText(language, "工作区干净，没有待提交变更", "Working tree clean"))
+            }
             items(entries, key = { it.optString("originalPath", it.optString("path")) }) { entry ->
                 val path = entry.optString("path")
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
@@ -4969,19 +5485,19 @@ private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) ->
                             Text(path.substringAfterLast('/').substringAfterLast('\\'), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
                             Text("${entry.optString("index")}${entry.optString("worktree")} · $path", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        if (entry.optBoolean("unstaged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("stage", path) }) { Text(nativeText(language, "\u6682\u5b58", "Stage")) }
-                        if (entry.optBoolean("staged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("unstage", path) }) { Text(nativeText(language, "\u53d6\u6d88\u6682\u5b58", "Unstage")) }
+                        if (entry.optBoolean("unstaged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("stage", path) }) { Text(nativeText(language, "暂存", "Stage")) }
+                        if (entry.optBoolean("staged")) TextButton(enabled = !state.gitBusy, onClick = { onGitAction("unstage", path) }) { Text(nativeText(language, "取消暂存", "Unstage")) }
                     }
                 }
             }
-            item(key = "git-commit") {
+            if (entries.isNotEmpty()) item(key = "git-commit") {
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
                     Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                         OutlinedTextField(
                             value = commitMessage,
                             onValueChange = { commitMessage = it },
                             modifier = Modifier.fillMaxWidth(),
-                            label = { Text(nativeText(language, "\u63d0\u4ea4\u8bf4\u660e", "Commit message")) },
+                            label = { Text(nativeText(language, "提交说明", "Commit message")) },
                             minLines = 2,
                             maxLines = 4,
                         )
@@ -4990,13 +5506,33 @@ private fun WorkGitView(state: NativeChatState, onGitAction: (String, String) ->
                             enabled = stagedCount > 0 && commitMessage.isNotBlank() && !state.gitBusy,
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
-                        ) { Text(nativeText(language, "\u63d0\u4ea4 $stagedCount \u4e2a\u5df2\u6682\u5b58\u6587\u4ef6", "Commit $stagedCount staged files")) }
+                        ) { Text(nativeText(language, "提交 $stagedCount 个已暂存文件", "Commit $stagedCount staged files")) }
+                    }
+                }
+            }
+            if (history.isNotEmpty()) item(key = "git-history-title") {
+                Text(nativeText(language, "提交历史", "Commit history"), modifier = Modifier.padding(start = 4.dp, top = 8.dp), fontWeight = FontWeight.SemiBold)
+            }
+            items(history, key = { it.optString("hash") }) { commit ->
+                val date = remember(commit.optLong("timestamp")) {
+                    java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                        .format(java.util.Date(commit.optLong("timestamp") * 1000L))
+                }
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(commit.optString("subject"), maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                        Text("${commit.optString("shortHash")} · ${commit.optString("author")} · $date", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (commit.optString("refs").isNotBlank()) Text(commit.optString("refs"), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
         }
         item { Spacer(Modifier.height(20.dp)) }
     }
+}
+
+private fun jsonObjects(array: JSONArray?): List<JSONObject> = if (array == null) emptyList() else buildList {
+    for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add)
 }
 
 @Composable
@@ -5942,15 +6478,299 @@ private fun DiffText(diff: String) {
     }
 }
 
+/**
+ * Expandable capsule that renders per-file unified diffs for one or more `fileChange` tool items.
+ * The heavy diff payload lives in [NativeLargePayloadStore]; it is loaded only when the capsule is
+ * expanded. A lightweight `fileSummary` (path + operation) keeps the collapsed header correct.
+ */
+@Composable
+private fun FileDiffCard(items: List<JSONObject>, projectPath: String = "") {
+    val language = LocalNativeLanguage.current
+    var expanded by remember { mutableStateOf(false) }
+    val itemsKey = items.map { it.toString() }
+    val summaryFiles = remember(itemsKey) { NativeFileChangeParser.summarize(items) }
+    val payloadRefs = remember(itemsKey) {
+        items.mapNotNull { it.optString(NativeLargePayloadStore.PAYLOAD_REF).takeIf(String::isNotBlank) }
+    }
+    var loadedEntries by remember(itemsKey) { mutableStateOf<List<NativeFileChangeEntry>?>(null) }
+    LaunchedEffect(expanded, payloadRefs) {
+        if (expanded && loadedEntries == null && payloadRefs.isNotEmpty()) {
+            loadedEntries = withContext(Dispatchers.Default) {
+                payloadRefs.flatMap { ref ->
+                    NativeLargePayloadStore.get(ref)?.let(NativeFileChangeParser::parsePayload).orEmpty()
+                }
+            }
+        } else if (!expanded && loadedEntries != null) {
+            loadedEntries = null
+        }
+    }
+    val files = remember(summaryFiles, loadedEntries) {
+        NativeFileChangeParser.mergeForDisplay(summaryFiles, loadedEntries)
+    }
+    if (files.isEmpty()) return
+    val arrowRotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        spring(dampingRatio = 0.88f, stiffness = 320f),
+        label = "fileDiffArrow",
+    )
+    Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Surface(
+            modifier = Modifier.widthIn(max = 420.dp).clickable { expanded = !expanded },
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+        ) {
+            Row(Modifier.padding(horizontal = 11.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.Files02, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    nativeText(language, "\u4fee\u6539\u4e86 ${files.size} \u4e2a\u6587\u4ef6", "${files.size} files changed"),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                Spacer(Modifier.width(6.dp))
+                Icon(HugeIcons.ArrowDown01, null, Modifier.size(14.dp).graphicsLayer { rotationZ = arrowRotation }, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+            }
+        }
+        ReasoningCapsuleExpand(expanded) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.66f),
+            ) {
+                Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    files.forEach { file -> FileDiffRow(file, projectPath) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FileDiffRow(file: NativeFileChangeEntry, projectPath: String) {
+    val language = LocalNativeLanguage.current
+    var expanded by remember(file.path) { mutableStateOf(false) }
+    var viewFilePath by remember(file.path) { mutableStateOf<String?>(null) }
+    val resolvedPath = remember(file.path, projectPath) { resolveFilePath(file.path, projectPath) }
+    val operation = when (file.operation) {
+        "add" -> nativeText(language, "\u65b0\u5efa", "Added")
+        "delete" -> nativeText(language, "\u5220\u9664", "Deleted")
+        "move" -> nativeText(language, "\u79fb\u52a8", "Moved")
+        else -> nativeText(language, "\u7f16\u8f91", "Edited")
+    }
+    val operationColor = when (file.operation) {
+        "add" -> Color(0xFF175C2C)
+        "delete" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.primary
+    }
+    val rowArrow by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        spring(dampingRatio = 0.88f, stiffness = 320f),
+        label = "fileDiffRowArrow",
+    )
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 8.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(HugeIcons.Files02, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                if (file.path != file.fileName) Text(file.path, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+            }
+            if (resolvedPath != null) IconButton(onClick = { viewFilePath = resolvedPath }, modifier = Modifier.size(30.dp)) {
+                Icon(HugeIcons.Search01, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(operation, style = MaterialTheme.typography.labelSmall, color = operationColor, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(5.dp))
+            Icon(HugeIcons.ArrowDown01, null, Modifier.size(13.dp).graphicsLayer { rotationZ = rowArrow }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        QElasticExpand(expanded) {
+            SafeExpandableViewport(maxHeight = 360.dp) {
+                when {
+                    file.hasDiff -> DiffText(file.unifiedDiff)
+                    file.fullContent.isNotBlank() -> FileContentViewer(file.fullContent)
+                    else -> Text(
+                        nativeText(language, "\u5c55\u5f00\u540e\u52a0\u8f7d diff", "Expand to load diff"),
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        viewFilePath?.let { path ->
+            FileViewDialog(filePath = path, fileName = file.fileName, onDismiss = { viewFilePath = null })
+        }
+    }
+}
+
+/** Monospace file content viewer with a line-number gutter and progressive loading. */
+@Composable
+private fun FileContentViewer(content: String) {
+    val language = LocalNativeLanguage.current
+    var lineLimit by remember(content) { mutableIntStateOf(300) }
+    val lines = remember(content, lineLimit) { content.split("\n").take(lineLimit + 1) }
+    val hasMore = lines.size > lineLimit
+    val gutterWidth = remember(lines.size) { lines.size.coerceAtLeast(1).toString().length.coerceAtLeast(2) }
+    SelectionContainer {
+        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+            lines.take(lineLimit).forEachIndexed { index, line ->
+                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                    Text(
+                        (index + 1).toString().padStart(gutterWidth),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        line.ifEmpty { " " },
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (hasMore) {
+                TextButton(onClick = { lineLimit += 300 }) {
+                    Text(nativeText(language, "\u52a0\u8f7d\u66f4\u591a", "Load more"))
+                }
+            }
+        }
+    }
+}
+
+/** Resolves a changed-file path to an existing disk file, joining [projectPath] when relative. */
+private fun resolveFilePath(path: String, projectPath: String): String? {
+    val trimmed = path.trim().trim('"', '\'', '`')
+    if (trimmed.isBlank()) return null
+    val direct = java.io.File(trimmed)
+    if (direct.isAbsolute && direct.exists()) return direct.absolutePath
+    if (projectPath.isNotBlank()) {
+        val joined = java.io.File(projectPath, trimmed)
+        if (joined.exists()) return joined.absolutePath
+    }
+    if (direct.exists()) return direct.absolutePath
+    return null
+}
+
+/** Full-screen viewer that reads a file from disk on a background thread and shows its content. */
+@Composable
+private fun FileViewDialog(filePath: String, fileName: String, onDismiss: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    var content by remember(filePath) { mutableStateOf<String?>(null) }
+    var failed by remember(filePath) { mutableStateOf(false) }
+    LaunchedEffect(filePath) {
+        val loaded = withContext(Dispatchers.IO) {
+            runCatching { java.io.File(filePath).readText(Charsets.UTF_8) }.getOrNull()
+        }
+        if (loaded == null) failed = true else content = loaded
+    }
+    val sizeLabel = remember(filePath) { formatFileSize(java.io.File(filePath).length()) }
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(fileName, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(sizeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+                    when {
+                        failed -> Text(
+                            nativeText(language, "\u65e0\u6cd5\u8bfb\u53d6\u6587\u4ef6", "Cannot read file"),
+                            modifier = Modifier.padding(16.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        content == null -> Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text(nativeText(language, "\u6b63\u5728\u8bfb\u53d6\u2026", "Loading\u2026"), style = MaterialTheme.typography.bodySmall)
+                        }
+                        else -> SafeExpandableViewport(maxHeight = 420.dp) { FileContentViewer(content!!) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "\u5173\u95ed", "Close")) } },
+    )
+}
+
+/** Inline preview of one or more model-produced images; multiple images in a turn are grouped. */
+@Composable
+private fun ImageGroupCard(items: List<JSONObject>) {
+    val language = LocalNativeLanguage.current
+    val imagesKey = items.map { it.toString() }
+    val images = remember(imagesKey) {
+        items.mapNotNull { item ->
+            listOf("path", "imagePath", "url", "file")
+                .firstNotNullOfOrNull { key -> item.optString(key).takeIf(String::isNotBlank) }
+        }.distinct()
+    }
+    if (images.isEmpty()) return
+    var previewPath by remember { mutableStateOf<String?>(null) }
+    val single = images.size == 1
+    Surface(
+        modifier = Modifier.widthIn(max = if (single) 320.dp else 300.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                images.forEach { path ->
+                    AttachmentThumbnail(
+                        path,
+                        (if (single) Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 240.dp) else Modifier.size(88.dp))
+                            .clip(RoundedCornerShape(11.dp)).clickable { previewPath = path },
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(HugeIcons.Image02, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (single) java.io.File(images.first()).name.ifBlank { nativeText(language, "\u56fe\u7247", "Image") }
+                    else nativeText(language, "${images.size} \u5f20\u56fe\u7247", "${images.size} images"),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+    previewPath?.let { path ->
+        AttachmentPreviewDialog(
+            attachment = NativeAttachment(java.io.File(path).name.ifBlank { "image" }, path, true),
+            onDismiss = { previewPath = null },
+        )
+    }
+}
+
+private fun isImageToolItem(type: String): Boolean = type in setOf("imageView", "view_image", "image")
+
 @Composable
 private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
     val language = LocalNativeLanguage.current
     val displayText = remember(text) { NativeUiRenderSafety.errorSummary(text) }
+    val retrying = text.startsWith("正在重试") || text.startsWith("目标自动重试")
     Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.errorContainer) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Text(nativeText(language, "\u53d1\u751f\u9519\u8bef", "Error"), fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (retrying) {
+                    CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    if (retrying) nativeText(language, "\u6b63\u5728\u91cd\u8bd5", "Retrying")
+                    else nativeText(language, "\u53d1\u751f\u9519\u8bef", "Error"),
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             Spacer(Modifier.height(4.dp)); SelectionContainer { Text(displayText, style = MaterialTheme.typography.bodySmall) }
-            if (onRetry != null) TextButton(onClick = onRetry, modifier = Modifier.align(Alignment.End)) {
+            if (!retrying && onRetry != null) TextButton(onClick = onRetry, modifier = Modifier.align(Alignment.End)) {
                 Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text(nativeText(language, "\u91cd\u8bd5", "Retry"))
             }
         }
@@ -6113,6 +6933,14 @@ private fun RikkaChatInput(
     value: String,
     enabled: Boolean,
     loading: Boolean,
+    conversationKey: String,
+    conversationMoving: Boolean,
+    hasConversation: Boolean,
+    followUpAction: NativeFollowUpSubmitAction,
+    queuedFollowUps: List<NativeQueuedFollowUp>,
+    onFollowUpActionChange: (NativeFollowUpSubmitAction) -> Unit,
+    onRemoveQueuedFollowUp: (String) -> Unit,
+    onStop: () -> Unit,
     modelLabel: String,
     onModelClick: () -> Unit,
     effortOptions: List<String>,
@@ -6135,26 +6963,71 @@ private fun RikkaChatInput(
     onRemoveAttachment: (NativeAttachment) -> Unit,
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String, Rect?) -> NativeSubmitResult?,
     onHeightChanged: (Int) -> Unit,
+    backdrop: Backdrop? = null,
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
-    val textState = remember { TextFieldState(initialText = value) }
+    val appearanceRevision = LocalFcodeAppearanceRevision.current
+    val inputContext = LocalContext.current
+    val glassConfig = remember(appearanceRevision, inputContext) { readLiquidGlassConfig(inputContext) }
+    val compactOnScrollEnabled = remember(appearanceRevision, inputContext) {
+        inputContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE)
+            .getBoolean(FcodeAppearancePreferences.COMPACT_COMPOSER_ON_SCROLL, true)
+    }
+    val useLiquidGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
+        glassConfig.enabled && liquidGlassSupported && backdrop != null
+    val isLightTheme = rememberIsLightTheme()
+    val liquidGlassTint = rememberLiquidGlassTint()
+    val textState = remember(conversationKey) { TextFieldState(initialText = value) }
+    val composerFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val latestExternalValue by rememberUpdatedState(value)
     val latestOnValueChange by rememberUpdatedState(onValueChange)
     var toolsExpanded by remember { mutableStateOf(false) }
+    var composerTextBounds by remember { mutableStateOf<Rect?>(null) }
     var permissionExpanded by remember { mutableStateOf(false) }
+
+    // System speech recognition. The recognized phrase is appended to the current draft so
+    // voice can be mixed with typed text; the draft mirror picks it up via the text watcher.
+    val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val recognized = result.data
+                ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull().orEmpty().trim()
+            if (recognized.isNotEmpty()) {
+                val current = textState.text.toString()
+                val merged = if (current.isBlank()) recognized else "${current.trimEnd()} $recognized"
+                textState.setTextAndPlaceCursorAtEnd(merged)
+                onValueChange(merged)
+            }
+        }
+    }
+    val startVoiceInput: () -> Unit = {
+        val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, if (language == "en") "en-US" else "zh-CN")
+            putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, nativeText(language, "请说话…", "Speak now…"))
+        }
+        runCatching { speechLauncher.launch(intent) }
+    }
 
     // Do not read textState.text in this parent restart scope. The TextField and send button
     // below observe it in their own small scopes, so an IME edit cannot recompose attachments,
     // mode capsules, animated surfaces and the rest of the composer.
     LaunchedEffect(textState) {
         snapshotFlow { textState.text.toString() }.collectLatest { localText ->
-            if (localText.trimStart().startsWith("/")) toolsExpanded = true
-            delay(1000L)
+            // Keep the large composer subtree isolated from every IME edit, but persist drafts
+            // quickly enough that an immediate route change does not lose the last sentence.
+            delay(250L)
             if (localText != latestExternalValue) latestOnValueChange(localText)
         }
+    }
+    DisposableEffect(conversationKey, textState) {
+        val flushDraft = onValueChange
+        onDispose { flushDraft(textState.text.toString()) }
     }
     LaunchedEffect(value) {
         if (value != textState.text.toString()) textState.setTextAndPlaceCursorAtEnd(value)
@@ -6194,6 +7067,95 @@ private fun RikkaChatInput(
         }
     }
     val imeVisible = WindowInsets.isImeVisible
+    var collapsedAfterScroll by remember(conversationKey) { mutableStateOf(false) }
+    var focusAfterExpand by remember(conversationKey) { mutableStateOf(false) }
+    LaunchedEffect(compactOnScrollEnabled, hasConversation, conversationMoving, imeVisible) {
+        when {
+            !compactOnScrollEnabled || !hasConversation -> collapsedAfterScroll = false
+            conversationMoving && !imeVisible -> collapsedAfterScroll = true
+        }
+    }
+    val compactComposer = compactOnScrollEnabled && hasConversation && collapsedAfterScroll && !imeVisible
+    LaunchedEffect(compactComposer, focusAfterExpand) {
+        if (!compactComposer && focusAfterExpand) {
+            withFrameNanos { }
+            composerFocusRequester.requestFocus()
+            keyboardController?.show()
+            focusAfterExpand = false
+        }
+    }
+    val expandCompactComposer = {
+        collapsedAfterScroll = false
+        focusAfterExpand = true
+    }
+    val compactProgress by animateFloatAsState(
+        targetValue = if (compactComposer) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.64f, stiffness = 390f, visibilityThreshold = 0.001f),
+        label = "compactComposerMorph",
+    )
+    val boundedCompactProgress = compactProgress.coerceIn(0f, 1f)
+    val compactHorizontalInset by animateDpAsState(
+        targetValue = if (compactComposer) 12.dp else 0.dp,
+        animationSpec = spring(dampingRatio = 0.68f, stiffness = 420f),
+        label = "compactComposerInset",
+    )
+    val fieldMinHeight by animateDpAsState(
+        targetValue = if (compactComposer) 52.dp else 58.dp,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 460f),
+        label = "compactComposerFieldHeight",
+    )
+    val fieldVerticalPadding by animateDpAsState(
+        targetValue = if (compactComposer) 12.dp else 15.dp,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 480f),
+        label = "compactComposerFieldPadding",
+    )
+    val composerSurfaceVerticalPadding by animateDpAsState(
+        targetValue = if (compactComposer) 0.dp else 7.dp,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 440f),
+        label = "compactComposerSurfacePadding",
+    )
+    val sendButtonSize by animateDpAsState(
+        targetValue = if (compactComposer) 52.dp else 42.dp,
+        animationSpec = spring(dampingRatio = 0.66f, stiffness = 420f),
+        label = "compactComposerSendSize",
+    )
+    // The action is visually outside only in the exclamation-mark compact state. At full size
+    // the same action overlays the lower-right corner of the composer and reads as part of it.
+    val compactActionReservation by animateDpAsState(
+        targetValue = if (compactComposer) 60.dp else 0.dp,
+        animationSpec = spring(dampingRatio = 0.68f, stiffness = 390f),
+        label = "compactComposerActionReservation",
+    )
+    val actionEndInset by animateDpAsState(
+        targetValue = if (compactComposer) 0.dp else 10.dp,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 420f),
+        label = "composerActionEndInset",
+    )
+    val actionBottomInset by animateDpAsState(
+        targetValue = if (compactComposer) 0.dp else 7.dp,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 420f),
+        label = "composerActionBottomInset",
+    )
+    val fieldEndPadding = 12.dp
+    val compactInteraction = remember { MutableInteractionSource() }
+    val compactPressed by compactInteraction.collectIsPressedAsState()
+    val compactPressProgress by animateFloatAsState(
+        targetValue = if (compactPressed && compactComposer) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.5f, stiffness = 300f, visibilityThreshold = 0.001f),
+        label = "compactComposerLiquidPress",
+    )
+    val compactPressScale by animateFloatAsState(
+        targetValue = if (compactPressed && compactComposer) 1.06f else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 250f, visibilityThreshold = 0.001f),
+        label = "compactComposerPressScale",
+    )
+    val submitCurrentText: (String) -> Unit = { currentText ->
+        val result = onSend(currentText, composerTextBounds)
+        if (result?.accepted == true && enabled && (currentText.isNotBlank() || attachments.isNotEmpty())) {
+            textState.setTextAndPlaceCursorAtEnd("")
+            onValueChange("")
+        }
+    }
     // Apple-style spring: interruptible, slightly under-damped and transform-only. The input
     // keeps a stable layout width while the GPU scales it from the resting inset to full width,
     // so opening the IME does not remeasure the complete composer on every animation frame.
@@ -6207,22 +7169,33 @@ private fun RikkaChatInput(
         label = "inputKeyboardSpring",
     )
     val boundedKeyboardMorph = keyboardMorph.coerceIn(0f, 1f)
-    val composerScaleX = 0.958f + 0.042f * keyboardMorph
-    val composerScaleY = 0.988f + 0.012f * keyboardMorph
-    val bottomCorner = 28.dp * (1f - boundedKeyboardMorph)
-    val bottomPadding = if (imeVisible) 0.dp else 8.dp
+    val composerScaleX = 0.958f + 0.042f * boundedKeyboardMorph
+    val composerScaleY = 0.988f + 0.012f * boundedKeyboardMorph
+    val restingCornerRadius = glassConfig.spec.cornerRadiusDp.dp
+    val cornerRadius = restingCornerRadius + (30.dp - restingCornerRadius) * boundedCompactProgress
+    // Always drive the bottom corner from the animated keyboard morph so the corners
+    // smoothly round back when the IME dismisses. A boolean imeVisible switch could
+    // strand square corners for frames while the spring settles.
+    val bottomCorner = cornerRadius * (1f - boundedKeyboardMorph)
+    val bottomPadding = if (imeVisible) 0.dp else 10.dp
     val keyboardOverlap = 3.dp * boundedKeyboardMorph
     val inputBorderColor = androidx.compose.ui.graphics.lerp(
         MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
         MaterialTheme.colorScheme.surfaceContainerLow,
         boundedKeyboardMorph,
     )
-    val inputShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp, bottomEnd = bottomCorner, bottomStart = bottomCorner)
-    val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier
+    val inputShape = RoundedCornerShape(topStart = cornerRadius, topEnd = cornerRadius, bottomEnd = bottomCorner, bottomStart = bottomCorner)
+    // Apply exactly one bottom inset. The old layout stacked an always-on navigationBarsPadding()
+    // on the outside AND an imePadding() here, which doubled the offset on devices that keep
+    // reporting a navigation-bar inset while the IME is up, leaving a gap under the composer.
+    val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
     Surface(modifier = modifier, color = Color.Transparent) {
         Column(
             modifier = insetModifier
-                .padding(top = 8.dp, bottom = bottomPadding)
+                // Measure the entire visible composer (queue strip, padding and card), but not
+                // the IME/navigation inset owned by insetModifier.
+                .onSizeChanged { onHeightChanged(it.height) }
+                .padding(start = maxOf(0.dp, compactHorizontalInset), end = maxOf(0.dp, compactHorizontalInset), top = 8.dp, bottom = bottomPadding)
                 .offset(y = keyboardOverlap)
                 .graphicsLayer {
                     scaleX = composerScaleX
@@ -6230,111 +7203,297 @@ private fun RikkaChatInput(
                     transformOrigin = TransformOrigin(0.5f, 1f)
                 },
         ) {
-            Surface(
-                // Text entry is a high-frequency interaction. Animating container size makes
-                // non-empty/multiline text remeasure throughout the IME transition.
-                modifier = Modifier.fillMaxWidth().onSizeChanged { onHeightChanged(it.height) },
+            AnimatedVisibility(
+                visible = queuedFollowUps.isNotEmpty() && !compactComposer,
+                enter = fadeIn(tween(140)) + expandVertically(tween(180)),
+                exit = fadeOut(tween(100)) + shrinkVertically(tween(140)),
+            ) {
+                QueuedFollowUpStrip(queuedFollowUps, onRemoveQueuedFollowUp)
+            }
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(end = maxOf(0.dp, compactActionReservation))
+                    .animateContentSize(
+                        animationSpec = spring(dampingRatio = 0.66f, stiffness = 360f),
+                        alignment = Alignment.BottomCenter,
+                    )
+                    .graphicsLayer {
+                        scaleX = compactPressScale
+                        scaleY = compactPressScale
+                        transformOrigin = TransformOrigin(0.5f, 1f)
+                    }
+                    .then(
+                        if (useLiquidGlass && backdrop != null) Modifier.drawBackdrop(
+                            backdrop = backdrop,
+                            shape = { inputShape },
+                            effects = {
+                                if (compactPressProgress > 0.001f) {
+                                    applyInteractiveLiquidActionEffects(
+                                        spec = glassConfig.spec,
+                                        isLight = isLightTheme,
+                                        pressProgress = compactPressProgress,
+                                    )
+                                } else {
+                                    applyLiquidGlassEffects(glassConfig.spec, isLightTheme)
+                                }
+                            },
+                            highlight = {
+                                if (compactPressProgress > 0.001f) Highlight.Default.copy(alpha = compactPressProgress)
+                                else Highlight.Plain
+                            },
+                            onDrawSurface = { drawRect(liquidGlassTint) },
+                        ) else Modifier
+                    ),
                 shape = inputShape,
                 tonalElevation = 0.dp,
-                border = BorderStroke(1.dp, inputBorderColor),
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = if (useLiquidGlass) null else BorderStroke(1.dp, inputBorderColor),
+                color = if (useLiquidGlass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLow,
             ) {
-                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-                    if (attachments.isNotEmpty()) {
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
-                            items(attachments, key = { it.path }) { attachment ->
-                                Surface(
-                                    modifier = Modifier.clickable { onPreviewAttachment(attachment) },
-                                    shape = MaterialTheme.shapes.medium,
-                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = maxOf(0.dp, composerSurfaceVerticalPadding))) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        AnimatedVisibility(
+                            visible = attachments.isNotEmpty() && !compactComposer,
+                            enter = fadeIn(tween(130)) + expandVertically(
+                                animationSpec = spring(dampingRatio = 0.72f, stiffness = 430f),
+                                expandFrom = Alignment.Bottom,
+                            ),
+                            exit = fadeOut(tween(90)) + shrinkVertically(
+                                animationSpec = spring(dampingRatio = 0.78f, stiffness = 500f),
+                                shrinkTowards = Alignment.Bottom,
+                            ),
+                        ) {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
+                                items(attachments, key = { it.path }) { attachment ->
+                                    Surface(
+                                        modifier = Modifier.clickable { onPreviewAttachment(attachment) },
+                                        shape = MaterialTheme.shapes.medium,
+                                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    ) {
+                                        Row(modifier = Modifier.padding(start = 6.dp, top = 5.dp, bottom = 5.dp, end = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            if (attachment.image) AttachmentThumbnail(attachment.path, Modifier.size(34.dp).clip(MaterialTheme.shapes.small))
+                                            else Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.secondaryContainer) {
+                                                Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) { Icon(HugeIcons.Files02, null, modifier = Modifier.size(17.dp)) }
+                                            }
+                                            Spacer(Modifier.width(7.dp))
+                                            Column(modifier = Modifier.widthIn(max = 140.dp)) {
+                                                Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                                                Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                            IconButton(onClick = { onRemoveAttachment(attachment) }, modifier = Modifier.size(28.dp)) { Icon(HugeIcons.Cancel01, "移除", modifier = Modifier.size(14.dp)) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        AnimatedVisibility(
+                            visible = !compactComposer,
+                            enter = fadeIn(tween(145)) + expandVertically(
+                                animationSpec = spring(dampingRatio = 0.68f, stiffness = 390f),
+                                expandFrom = Alignment.Bottom,
+                            ),
+                            exit = fadeOut(tween(90)) + shrinkVertically(
+                                animationSpec = spring(dampingRatio = 0.74f, stiffness = 470f),
+                                shrinkTowards = Alignment.Bottom,
+                            ),
+                        ) {
+                            ComposerModeCapsules(
+                                selectedMode = selectedMode,
+                                activeGoal = activeGoal,
+                                onModeSelected = onModeSelected,
+                                onRequestGoal = onRequestGoal,
+                                onClearGoal = onClearGoal,
+                                selectedSkills = selectedSkills,
+                                onRemoveSkill = onRemoveSkill,
+                            )
+                        }
+                        BasicTextField(
+                            state = textState,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = fieldMinHeight)
+                                .padding(start = 12.dp, end = fieldEndPadding, top = fieldVerticalPadding, bottom = fieldVerticalPadding)
+                                .focusRequester(composerFocusRequester)
+                                .onGloballyPositioned { composerTextBounds = it.boundsInWindow() }
+                                .onPreviewKeyEvent { event ->
+                                    val currentText = textState.text.toString()
+                                    if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && currentText.isNotBlank()) {
+                                        val result = onSend(currentText, composerTextBounds)
+                                        if (result?.accepted == true) {
+                                            textState.setTextAndPlaceCursorAtEnd("")
+                                            onValueChange("")
+                                        }
+                                        result?.accepted == true
+                                    } else false
+                                },
+                            enabled = enabled && !compactComposer,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                                lineHeight = 24.sp,
+                            ),
+                            lineLimits = TextFieldLineLimits.MultiLine(
+                                minHeightInLines = 1,
+                                maxHeightInLines = if (compactComposer) 1 else 5,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            decorator = { innerTextField ->
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                                    if (textState.text.isEmpty()) {
+                                        Text(
+                                            nativeText(language, "输入消息", "Type a message"),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    innerTextField()
+                                }
+                            },
+                        )
+                        AnimatedVisibility(
+                            visible = !compactComposer,
+                            enter = fadeIn(tween(145)) + expandVertically(
+                                animationSpec = spring(dampingRatio = 0.66f, stiffness = 400f),
+                                expandFrom = Alignment.Bottom,
+                            ),
+                            exit = fadeOut(tween(85)) + shrinkVertically(
+                                animationSpec = spring(dampingRatio = 0.76f, stiffness = 500f),
+                                shrinkTowards = Alignment.Bottom,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 52.dp, top = 2.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
-                                    Row(modifier = Modifier.padding(start = 6.dp, top = 5.dp, bottom = 5.dp, end = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        if (attachment.image) AttachmentThumbnail(attachment.path, Modifier.size(34.dp).clip(MaterialTheme.shapes.small))
-                                        else Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.secondaryContainer) {
-                                            Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) { Icon(HugeIcons.Files02, null, modifier = Modifier.size(17.dp)) }
-                                        }
-                                        Spacer(Modifier.width(7.dp))
-                                        Column(modifier = Modifier.widthIn(max = 140.dp)) {
-                                            Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
-                                            Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                        IconButton(onClick = { onRemoveAttachment(attachment) }, modifier = Modifier.size(28.dp)) { Icon(HugeIcons.Cancel01, "移除", modifier = Modifier.size(14.dp)) }
+                                    InputTool(HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick)
+                                    LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected)
+                                    InputTool(
+                                        HugeIcons.Settings03,
+                                        NativePermissionMode.label(permissionMode, language != "en"),
+                                        { permissionExpanded = true },
+                                    )
+                                    InputTool(HugeIcons.Add01, "工具", { toolsExpanded = true })
+                                    if (loading) {
+                                        InputTool(
+                                            if (followUpAction == NativeFollowUpSubmitAction.STEER) HugeIcons.Zap else HugeIcons.TransactionHistory,
+                                            if (followUpAction == NativeFollowUpSubmitAction.STEER)
+                                                nativeText(language, "引导当前", "Steer")
+                                            else nativeText(language, "排队下一条", "Queue"),
+                                            {
+                                                onFollowUpActionChange(
+                                                    if (followUpAction == NativeFollowUpSubmitAction.STEER) NativeFollowUpSubmitAction.QUEUE
+                                                    else NativeFollowUpSubmitAction.STEER,
+                                                )
+                                            },
+                                        )
                                     }
                                 }
                             }
                         }
                     }
-                    ComposerModeCapsules(
-                        selectedMode = selectedMode,
-                        activeGoal = activeGoal,
-                        onModeSelected = onModeSelected,
-                        onRequestGoal = onRequestGoal,
-                        onClearGoal = onClearGoal,
-                        selectedSkills = selectedSkills,
-                        onRemoveSkill = onRemoveSkill,
-                    )
-                    BasicTextField(
-                        state = textState,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 58.dp).padding(horizontal = 12.dp, vertical = 15.dp).onPreviewKeyEvent { event ->
-                            val currentText = textState.text.toString()
-                            if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && currentText.isNotBlank()) {
-                                onSend(currentText)
-                                textState.setTextAndPlaceCursorAtEnd("")
-                                onValueChange("")
-                                true
-                            } else false
-                        },
-                        enabled = !loading,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(
-                            color = if (loading) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f) else MaterialTheme.colorScheme.onSurface,
-                            lineHeight = 24.sp,
-                        ),
-                        lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 5),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        decorator = { innerTextField ->
-                            Box(Modifier.fillMaxWidth()) {
-                                if (textState.text.isEmpty()) {
-                                    Text(
-                                        nativeText(language, "\u8f93\u5165\u6d88\u606f", "Type a message"),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                    )
-                                }
-                                innerTextField()
-                            }
-                        },
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            InputTool(HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick)
-                            LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected)
-                            InputTool(
-                                HugeIcons.Settings03,
-                                NativePermissionMode.label(permissionMode, language != "en"),
-                                { permissionExpanded = true },
-                            )
-                            InputTool(HugeIcons.Add01, "\u5de5\u5177", { toolsExpanded = true })
-                        }
-                        ComposerSendButton(
-                            textState = textState,
-                            enabled = enabled,
-                            loading = loading,
-                            hasAttachments = attachments.isNotEmpty(),
-                            onSend = { currentText ->
-                                onSend(currentText)
-                                if (!loading && enabled && (currentText.isNotBlank() || attachments.isNotEmpty())) {
-                                    textState.setTextAndPlaceCursorAtEnd("")
-                                    onValueChange("")
-                                }
-                            },
+                    // The disabled BasicTextField still owns pointer input on some Compose/OEM
+                    // combinations. Keep a top-most hit target in compact mode so every point of
+                    // the glass pill expands it, while sharing the interaction source that drives
+                    // the press spring on the whole pill.
+                    if (compactComposer) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(fieldMinHeight)
+                                .align(Alignment.Center)
+                                .zIndex(1f)
+                                .clickable(
+                                    interactionSource = compactInteraction,
+                                    indication = null,
+                                    onClick = expandCompactComposer,
+                                ),
                         )
+                    }
+                }
+            }
+                ComposerActionButton(
+                    textState = textState,
+                    enabled = enabled,
+                    loading = loading,
+                    hasAttachments = attachments.isNotEmpty(),
+                    onStop = onStop,
+                    onSend = submitCurrentText,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(
+                            end = maxOf(0.dp, actionEndInset),
+                            bottom = maxOf(0.dp, actionBottomInset),
+                        )
+                        .size(sendButtonSize),
+                    liquidGlass = useLiquidGlass,
+                    backdrop = backdrop,
+                    glassConfig = glassConfig,
+                    isLightTheme = isLightTheme,
+                    liquidGlassTint = liquidGlassTint,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueuedFollowUpStrip(
+    queuedFollowUps: List<NativeQueuedFollowUp>,
+    onRemove: (String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        item(key = "queue-count") {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.88f),
+            ) {
+                Row(
+                    Modifier.height(34.dp).padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(HugeIcons.TransactionHistory, null, Modifier.size(15.dp))
+                    Text(
+                        nativeText(language, "排队 ${queuedFollowUps.size}", "Queued ${queuedFollowUps.size}"),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        }
+        items(queuedFollowUps, key = { it.id }) { followUp ->
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
+            ) {
+                Row(
+                    Modifier.height(34.dp).padding(start = 10.dp, end = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        followUp.text.ifBlank { nativeText(language, "附件消息", "Attachment message") },
+                        modifier = Modifier.widthIn(max = 150.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    IconButton(
+                        onClick = { onRemove(followUp.id) },
+                        modifier = Modifier.size(30.dp),
+                    ) {
+                        Icon(HugeIcons.Cancel01, nativeText(language, "移出队列", "Remove from queue"), Modifier.size(13.dp))
                     }
                 }
             }
@@ -6343,32 +7502,60 @@ private fun RikkaChatInput(
 }
 
 @Composable
-private fun ComposerSendButton(
+private fun ComposerActionButton(
     textState: TextFieldState,
     enabled: Boolean,
     loading: Boolean,
     hasAttachments: Boolean,
+    onStop: () -> Unit,
     onSend: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    liquidGlass: Boolean = false,
+    backdrop: Backdrop? = null,
+    glassConfig: LiquidGlassConfig? = null,
+    isLightTheme: Boolean = true,
+    liquidGlassTint: Color = Color.Transparent,
 ) {
     val inputText = textState.text.toString()
-    val canSend = enabled && (inputText.isNotBlank() || hasAttachments)
+    val hasDraft = inputText.isNotBlank() || hasAttachments
+    val stopMode = loading && !hasDraft
+    val canActivate = stopMode || (enabled && hasDraft)
+    val activate = if (stopMode) onStop else ({ onSend(inputText) })
+    val actionModifier = if (liquidGlass && backdrop != null && glassConfig != null) {
+        modifier.interactiveLiquidAction(
+            enabled = canActivate,
+            backdrop = backdrop,
+            glassConfig = glassConfig,
+            isLightTheme = isLightTheme,
+            tint = liquidGlassTint,
+            onClick = activate,
+        )
+    } else {
+        modifier.clickable(enabled = canActivate, onClick = activate)
+    }
     Surface(
-        modifier = Modifier.size(42.dp).clickable(enabled = loading || canSend) { onSend(inputText) },
+        modifier = actionModifier,
         shape = CircleShape,
         color = when {
-            loading -> MaterialTheme.colorScheme.errorContainer
-            !canSend -> MaterialTheme.colorScheme.surfaceContainerHigh
-            else -> MaterialTheme.colorScheme.primary
+            liquidGlass -> Color.Transparent
+            stopMode -> MaterialTheme.colorScheme.errorContainer
+            canActivate -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.surfaceContainerHigh
         },
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
-                if (loading) HugeIcons.Cancel01 else HugeIcons.ArrowUp02,
-                contentDescription = if (loading) "\u505c\u6b62" else "\u53d1\u9001",
-                modifier = Modifier.size(21.dp),
+                if (stopMode) HugeIcons.Cancel01 else HugeIcons.ArrowUp02,
+                contentDescription = if (stopMode) {
+                    nativeText(LocalNativeLanguage.current, "停止生成", "Stop generating")
+                } else {
+                    nativeText(LocalNativeLanguage.current, "发送", "Send")
+                },
+                modifier = Modifier.size(if (stopMode) 18.dp else 21.dp),
                 tint = when {
-                    loading -> MaterialTheme.colorScheme.onErrorContainer
-                    !canSend -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    !canActivate -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    liquidGlass -> MaterialTheme.colorScheme.onSurface
+                    stopMode -> MaterialTheme.colorScheme.onErrorContainer
                     else -> MaterialTheme.colorScheme.onPrimary
                 },
             )
@@ -6873,9 +8060,63 @@ private fun RikkaDrawerV2(
     var projectRevision by remember { mutableIntStateOf(0) }
     var newMenuExpanded by remember { mutableStateOf(false) }
     var showNewProjectDialog by remember { mutableStateOf(false) }
+    var newProjectName by remember { mutableStateOf("") }
+    var projectDialogError by remember { mutableStateOf("") }
     var renameProject by remember { mutableStateOf<NativeDrawerProject?>(null) }
+    var renameProjectError by remember { mutableStateOf("") }
     var deleteProject by remember { mutableStateOf<NativeDrawerProject?>(null) }
     var expandedProjects by remember { mutableStateOf(emptySet<String>()) }
+    // System folder picker (SAF). Keep the URI grant alongside the resolved path so a
+    // restart does not silently lose access to a user-selected folder.
+    val pickProjectFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        projectDialogError = ""
+        // Some document providers expose a persistable read grant but reject the
+        // optional write bit. Keep the usable read grant instead of turning a valid
+        // folder selection into a silent failure.
+        val persistError = persistDocumentTreePermission(context, uri)
+        if (persistError != null) {
+            projectDialogError = nativeText(
+                language,
+                "系统没有授予该文件夹持久权限，请选择设备本地文件夹后重试。",
+                "Android did not grant a persistent folder permission. Choose a local folder and try again.",
+            )
+        } else {
+            val path = documentTreeUriToPath(uri)
+            if (path == null) {
+                projectDialogError = nativeText(
+                    language,
+                    "无法解析该文件夹。请从设备本地存储中选择目录。",
+                    "This folder provider is not supported. Choose a directory from local storage.",
+                )
+            } else {
+                runCatching {
+                    NativeDrawerProjectStore.register(
+                        context,
+                        path,
+                        requestedName = newProjectName,
+                        treeUri = uri.toString(),
+                    )
+                }
+                    .onSuccess { project ->
+                        context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE).edit()
+                            .putBoolean("custom_project_root_enabled", true)
+                            .putString("custom_project_root", project.path)
+                            .putString("custom_project_root_uri", project.treeUri)
+                            .commit()
+                        projectRevision++
+                        expandedProjects = expandedProjects + project.path
+                        showNewProjectDialog = false
+                        projectDialogError = ""
+                        newProjectName = ""
+                        onNewConversation()
+                    }
+                    .onFailure { error ->
+                        projectDialogError = error.message ?: nativeText(language, "无法访问所选文件夹。", "Unable to access the selected folder.")
+                    }
+            }
+        }
+    }
     val conversationRevision = conversations.fold(1) { value, conversation ->
         var result = 31 * value + conversation.threadId.hashCode()
         result = 31 * result + conversation.title.hashCode()
@@ -6918,7 +8159,11 @@ private fun RikkaDrawerV2(
         shadowElevation = 0.dp,
     ) {
         Column(
-            modifier = Modifier.fillMaxHeight().padding(horizontal = 10.dp, vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxHeight()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -6938,7 +8183,12 @@ private fun RikkaDrawerV2(
                         DropdownMenuItem(
                             text = { Text(nativeText(language, "\u65b0\u5efa\u9879\u76ee\u6587\u4ef6\u5939", "New project folder")) },
                             leadingIcon = { Icon(HugeIcons.Folder01, null) },
-                            onClick = { newMenuExpanded = false; showNewProjectDialog = true },
+                            onClick = {
+                                newMenuExpanded = false
+                                newProjectName = ""
+                                projectDialogError = ""
+                                showNewProjectDialog = true
+                            },
                         )
                     }
                 }
@@ -6997,7 +8247,7 @@ private fun RikkaDrawerV2(
                                 onToggle = {
                                     expandedProjects = if (project.path in expandedProjects) expandedProjects - project.path else expandedProjects + project.path
                                 },
-                                onRename = { renameProject = project },
+                                onRename = { renameProjectError = ""; renameProject = project },
                                 onDelete = { deleteProject = project },
                             )
                         }
@@ -7039,16 +8289,20 @@ private fun RikkaDrawerV2(
     }
 
     if (showNewProjectDialog) {
-        var name by remember { mutableStateOf("") }
-        var error by remember { mutableStateOf("") }
+        val name = newProjectName
         FlClashAnimatedDialog(
-            onDismissRequest = { showNewProjectDialog = false },
+            onDismissRequest = { showNewProjectDialog = false; newProjectName = ""; projectDialogError = "" },
             title = { Text(nativeText(language, "\u65b0\u5efa\u9879\u76ee", "New project")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(nativeText(language, "\u9879\u76ee\u4f1a\u7ec4\u7ec7\u4efb\u52a1\uff0c\u5e76\u5c06\u8be5\u6587\u4ef6\u5939\u8bbe\u4e3a AI \u7684\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\u3002", "Projects organize tasks and set a default folder the AI can work in."))
-                    OutlinedTextField(name, { name = it; error = "" }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text(nativeText(language, "\u9879\u76ee\u540d\u79f0", "Project name")) })
-                    if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Text(nativeText(language, "项目会组织任务，并将该文件夹设为 AI 的默认工作目录。", "Projects organize tasks and set a default folder the AI can work in."))
+                    OutlinedTextField(newProjectName, { newProjectName = it; projectDialogError = "" }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text(nativeText(language, "项目名称", "Project name")) })
+                    TextButton(onClick = { projectDialogError = ""; pickProjectFolder.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(HugeIcons.Folder01, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(nativeText(language, "或选择已有的本地文件夹", "Or pick an existing local folder"))
+                    }
+                    if (projectDialogError.isNotBlank()) Text(projectDialogError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             },
             confirmButton = {
@@ -7062,23 +8316,41 @@ private fun RikkaDrawerV2(
                             projectRevision++
                             expandedProjects = expandedProjects + project.path
                             showNewProjectDialog = false
+                            projectDialogError = ""
+                            newProjectName = ""
                             onNewConversation()
                         }
-                        .onFailure { error = it.message.orEmpty() }
+                        .onFailure { error -> projectDialogError = error.message.orEmpty() }
                 }) { Text(nativeText(language, "\u521b\u5efa", "Create")) }
             },
-            dismissButton = { TextButton(onClick = { showNewProjectDialog = false }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+            dismissButton = { TextButton(onClick = { showNewProjectDialog = false; newProjectName = ""; projectDialogError = "" }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
         )
     }
 
     renameProject?.let { project ->
         var name by remember(project.path) { mutableStateOf(project.name) }
         FlClashAnimatedDialog(
-            onDismissRequest = { renameProject = null },
+            onDismissRequest = { renameProject = null; renameProjectError = "" },
             title = { Text(nativeText(language, "\u91cd\u547d\u540d\u9879\u76ee", "Rename project")) },
-            text = { OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(), singleLine = true) },
-            confirmButton = { TextButton(onClick = { NativeDrawerProjectStore.rename(context, project.path, name); projectRevision++; renameProject = null }) { Text(nativeText(language, "\u4fdd\u5b58", "Save")) } },
-            dismissButton = { TextButton(onClick = { renameProject = null }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(name, { name = it; renameProjectError = "" }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    if (renameProjectError.isNotBlank()) Text(renameProjectError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = name.trim().isNotEmpty(),
+                    onClick = {
+                        runCatching { NativeDrawerProjectStore.rename(context, project.path, name) }
+                            .onSuccess { projectRevision++; renameProject = null; renameProjectError = "" }
+                            .onFailure { error ->
+                                renameProjectError = error.message ?: nativeText(language, "无法重命名项目。", "Unable to rename project.")
+                            }
+                    },
+                ) { Text(nativeText(language, "\u4fdd\u5b58", "Save")) }
+            },
+            dismissButton = { TextButton(onClick = { renameProject = null; renameProjectError = "" }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
         )
     }
 
@@ -7091,6 +8363,37 @@ private fun RikkaDrawerV2(
             dismissButton = { TextButton(onClick = { deleteProject = null }) { Text(nativeText(language, "\u53d6\u6d88", "Cancel")) } },
         )
     }
+}
+
+/**
+ * Persist the strongest grant the provider accepts. A few OEM document providers advertise
+ * persistable access but reject FLAG_GRANT_WRITE_URI_PERMISSION; read-only access is still useful
+ * for resolving and reopening the selected workspace, and is preferable to losing the selection.
+ */
+private fun persistDocumentTreePermission(context: Context, uri: android.net.Uri): Throwable? {
+    val resolver = context.contentResolver
+    val readWriteFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    val readWriteError = runCatching {
+        resolver.takePersistableUriPermission(uri, readWriteFlags)
+    }.exceptionOrNull()
+    if (readWriteError == null) return null
+    return runCatching {
+        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }.exceptionOrNull()
+}
+
+/** Resolve a SAF document-tree URI to a concrete filesystem path (primary/SD volumes). */
+private fun documentTreeUriToPath(uri: android.net.Uri): String? {
+    if (uri.scheme != "content") return null
+    val treeId = runCatching { android.provider.DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return null
+    val separator = treeId.indexOf(':')
+    if (separator < 0) return null
+    val volume = treeId.substring(0, separator).takeIf { it.isNotBlank() } ?: return null
+    val rest = android.net.Uri.decode(treeId.substring(separator + 1))
+    val base = java.io.File(if (volume == "primary") "/storage/emulated/0" else "/storage/$volume").canonicalFile
+    val selected = if (rest.isBlank()) base else java.io.File(base, rest).canonicalFile
+    val basePath = base.path.trimEnd(java.io.File.separatorChar) + java.io.File.separator
+    return if (selected == base || selected.path.startsWith(basePath)) selected.path else null
 }
 
 @Composable
@@ -7279,7 +8582,7 @@ private fun RikkaDrawer(
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Fcode 用户", style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                        Text("Sillage 用户", style = MaterialTheme.typography.titleMedium, maxLines = 1)
                         Icon(HugeIcons.PencilEdit01, "编辑昵称", modifier = Modifier.padding(start = 6.dp).size(16.dp))
                     }
                     Text("今天想聊点什么？", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

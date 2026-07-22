@@ -27,12 +27,13 @@ final class CodexNativeRuntime {
             int ultraSubagentLimit,
             int normalSubagentLimit,
             Map<String, String> transportEfforts,
+            boolean multiAgentV2,
             boolean preventRecursiveSubagents) {
         String requestedFingerprint = String.join("\n",
             value(configurationFingerprint), value(baseUrl), value(apiKey), value(model), value(apiFormat),
             String.valueOf(routeThroughMihomo), String.valueOf(forwardReasoningContext),
             String.valueOf(ultraSubagentLimit), String.valueOf(normalSubagentLimit),
-            String.valueOf(transportEfforts), String.valueOf(preventRecursiveSubagents));
+            String.valueOf(transportEfforts), String.valueOf(multiAgentV2), String.valueOf(preventRecursiveSubagents));
         if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
         appContext = activity.getApplicationContext();
         lastAttachRecreatedBridge = bridge == null;
@@ -42,7 +43,7 @@ final class CodexNativeRuntime {
             fingerprint = requestedFingerprint;
             bridge.start(baseUrl, apiKey, model, apiFormat, routeThroughMihomo,
                 forwardReasoningContext, ultraSubagentLimit, normalSubagentLimit,
-                transportEfforts, preventRecursiveSubagents);
+                transportEfforts, multiAgentV2, preventRecursiveSubagents);
         } else {
             bridge.rebind(activity, listener);
         }

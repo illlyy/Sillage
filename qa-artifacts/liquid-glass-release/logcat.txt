@@ -1,0 +1,149 @@
+--------- beginning of main
+07-22 03:34:08.953 E/Zygote  (22351): process_name_ptr:22351 com.ilyop.codex
+07-22 03:34:08.953 E/Zygote  (22351): SetMemoryProtected process_name_ptr:22351 com.ilyop.codex
+07-22 03:34:08.954 I/libc    (22351): SetHeapTaggingLevel: tag level set to 0
+07-22 03:34:08.960 I/com.ilyop.codex(22351): Using CollectorTypeCC GC.
+07-22 03:34:08.962 E/com.ilyop.codex(22351): Not starting debugger since process cannot load the jdwp agent.
+07-22 03:34:08.968 D/nativeloader(22351): Load libframework-connectivity-tiramisu-jni.so using APEX ns com_android_tethering for caller /apex/com.android.tethering/javalib/framework-connectivity-t.jar: ok
+07-22 03:34:08.969 I/MessageMonitor(22351): Load libmiui_runtime
+--------- beginning of system
+07-22 03:34:09.211 D/MiuiDownscaleImpl(22351): set override inverted scale : 1.0
+07-22 03:34:09.212 D/AppScoutStateMachine(22351): 22351-ScoutStateMachinecreated
+07-22 03:34:09.214 W/BpBinder(22351): Slow Binder: BpBinder transact took 244 ms, interface=android.app.IActivityManager, code=25 oneway=false
+07-22 03:34:09.215 I/JavaheapMonitor(22351): Java heap monitor start.
+07-22 03:34:09.215 D/MiuiMonitorThread(22351): Shared singleton Thread for stability monitor start
+07-22 03:34:09.223 D/ActivityThread(22351): setEmbeddedParam packageName=com.ilyop.codex processName=com.ilyop.codex isEmbedded=false isIsolated=false
+07-22 03:34:09.225 D/ApplicationLoaders(22351): Returning zygote-cached class loader: /system/framework/android.test.base.jar
+07-22 03:34:09.225 D/ApplicationLoaders(22351): Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar
+07-22 03:34:09.225 D/ApplicationLoaders(22351): Returning zygote-cached class loader: /system_ext/framework/androidx.window.sidecar.jar
+07-22 03:34:09.234 D/nativeloader(22351): Configuring clns-7 for other apk /data/app/~~Z6gcnjcO83IGQXdHxaq8Mg==/com.ilyop.codex-vSvy9BoMPn8RvwtWlLIu9w==/base.apk. target_sdk_version=28, uses_libraries=, library_path=/data/app/~~Z6gcnjcO83IGQXdHxaq8Mg==/com.ilyop.codex-vSvy9BoMPn8RvwtWlLIu9w==/lib/arm64:/data/app/~~Z6gcnjcO83IGQXdHxaq8Mg==/com.ilyop.codex-vSvy9BoMPn8RvwtWlLIu9w==/base.apk!/lib/arm64-v8a, permitted_path=/data:/mnt/expand:/data/user/0/com.ilyop.codex
+07-22 03:34:09.234 D/nativeloader(22351): Extending system_exposed_libraries: libapuwareapusys.mtk.so:libapuwareapusys_v2.mtk.so:libapuwarexrp.mtk.so:libapuwarexrp_v2.mtk.so:libapuwareutils.mtk.so:libapuwareutils_v2.mtk.so:libapuwarehmp.mtk.so:libneuron_graph_delegate.mtk.so:libneuronusdk_adapter.mtk.so:libtflite_mtk.mtk.so:libarmnn_ndk.mtk.so:libcmdl_ndk.mtk.so:libnir_neon_driver_ndk.mtk.so:libmvpu_runtime.mtk.so:libmvpu_runtime_pub.mtk.so:libmvpu_engine_pub.mtk.so:libmvpu_pattern_pub.mtk.so:libmvpuop_mtk_cv.mtk.so:libmvpuop_mtk_nn.mtk.so:libmvpu_runtime_25.mtk.so:libmvpu_runtime_25_pub.mtk.so:libmvpu_engine_25_pub.mtk.so:libmvpu_pattern_25_pub.mtk.so:libmvpuop25_mtk_cv.mtk.so:libmvpuop25_mtk_nn.mtk.so:libmvpu_config.mtk.so:libteeservice_client.trustonic.so:libmisys_jni.xiaomi.so:libpag.hyperos.so:libffavc.hyperos.so
+07-22 03:34:09.238 V/GraphicsEnvironment(22351): Currently set values for:
+07-22 03:34:09.238 V/GraphicsEnvironment(22351):   angle_gl_driver_selection_pkgs=[]
+07-22 03:34:09.238 V/GraphicsEnvironment(22351):   angle_gl_driver_selection_values=[]
+07-22 03:34:09.238 V/GraphicsEnvironment(22351): Global.Settings values are invalid: number of packages: 0, number of values: 0
+07-22 03:34:09.238 V/GraphicsEnvironment(22351): App is not on the allowlist for updatable production driver.
+07-22 03:34:09.240 I/ActivityThread(22351): TrafficStats init done
+07-22 03:34:09.241 I/ForceDarkHelperStubImpl(22351): initialize for com.ilyop.codex , ForceDarkOrigin
+07-22 03:34:09.242 D/nativeloader(22351): Load libforcedarkimpl.so using system ns (caller=/system_ext/framework/miui-framework.jar): ok
+07-22 03:34:09.242 D/HWUI    (22351): JNI_OnLoad success
+07-22 03:34:09.243 I/MiuiForceDarkConfig(22351): setConfig density:3.500000, mainRule:0, secondaryRule:0, tertiaryRule:0
+07-22 03:34:09.243 I/ActivityThread(22351): Miui Feature Init done
+07-22 03:34:09.246 D/MbrainDebugManagerImpl(22351): getService failed
+07-22 03:34:09.303 E/FileUtils(22351): err open mi_exception_log errno=2
+07-22 03:34:09.303 E/FileUtils(22351): err write to mi_exception_log
+07-22 03:34:09.303 W/libc    (22351): Access denied finding property "ro.vendor.perf.scroll_opt"
+07-22 03:34:09.308 D/nativeloader(22351): Load libpowerhalwrap_jni.so using system ns (caller=/system_ext/framework/mediatek-framework.jar): ok
+07-22 03:34:09.308 I/PowerHalWrapper(22351): PowerHalWrapper.getInstance 
+07-22 03:34:09.309 I/M-ProMotion(22351): M-ProMotion is disabled
+07-22 03:34:09.310 D/UnionPowerNotifier(22351): check_union_power_ioctl -1
+07-22 03:34:09.327 W/libc    (22351): Access denied finding property "vendor.migl.debug"
+07-22 03:34:09.327 I/libMiGL (22351): EnableDR: 0
+07-22 03:34:09.327 D/libMEOW (22351): meow new tls: 0x7c3cfcb0c0
+07-22 03:34:09.327 D/libMEOW (22351): meow reload base cfg path: na
+07-22 03:34:09.327 D/libMEOW (22351): meow reload overlay cfg path: na
+07-22 03:34:09.327 W/QT      (22351): qt_process_init() called
+07-22 03:34:09.327 E/QT      (22351): [QT]file does not exist
+07-22 03:34:09.327 W/QT      (22351): Support!!
+07-22 03:34:09.328 E/QT      (22351): [QT]file does not exist
+07-22 03:34:09.328 D/libMEOW (22351): applied 1 plugins for [com.ilyop.codex]:
+07-22 03:34:09.328 D/libMEOW (22351):   plugin 1: [libMEOW_gift.so]:
+07-22 03:34:09.328 D/nativeloader(22351): Configuring clns-8 for other apk /system_ext/app/miuisystem/miuisystem.apk. target_sdk_version=34, uses_libraries=ALL, library_path=/product/app/ContentCatcherOS2/lib/arm64:/product/app/ContentCatcherOS2/ContentCatcherOS2.apk!/lib/arm64-v8a:/system_ext/priv-app/RtMiCloudSDK/RtMiCloudSDK.apk!/lib/arm64-v8a:/system_ext/app/miuisystem/miuisystem.apk!/lib/arm64-v8a, permitted_path=/data:/mnt/expand
+07-22 03:34:09.328 D/nativeloader(22351): Extending system_exposed_libraries: libapuwareapusys.mtk.so:libapuwareapusys_v2.mtk.so:libapuwarexrp.mtk.so:libapuwarexrp_v2.mtk.so:libapuwareutils.mtk.so:libapuwareutils_v2.mtk.so:libapuwarehmp.mtk.so:libneuron_graph_delegate.mtk.so:libneuronusdk_adapter.mtk.so:libtflite_mtk.mtk.so:libarmnn_ndk.mtk.so:libcmdl_ndk.mtk.so:libnir_neon_driver_ndk.mtk.so:libmvpu_runtime.mtk.so:libmvpu_runtime_pub.mtk.so:libmvpu_engine_pub.mtk.so:libmvpu_pattern_pub.mtk.so:libmvpuop_mtk_cv.mtk.so:libmvpuop_mtk_nn.mtk.so:libmvpu_runtime_25.mtk.so:libmvpu_runtime_25_pub.mtk.so:libmvpu_engine_25_pub.mtk.so:libmvpu_pattern_25_pub.mtk.so:libmvpuop25_mtk_cv.mtk.so:libmvpuop25_mtk_nn.mtk.so:libmvpu_config.mtk.so:libteeservice_client.trustonic.so:libmisys_jni.xiaomi.so:libpag.hyperos.so:libffavc.hyperos.so
+07-22 03:34:09.329 D/nativeloader(22351): Configuring clns-9 for other apk /system_ext/priv-app/RtMiCloudSDK/RtMiCloudSDK.apk. target_sdk_version=34, uses_libraries=ALL, library_path=/product/app/ContentCatcherOS2/lib/arm64:/product/app/ContentCatcherOS2/ContentCatcherOS2.apk!/lib/arm64-v8a:/system_ext/priv-app/RtMiCloudSDK/RtMiCloudSDK.apk!/lib/arm64-v8a:/system_ext/app/miuisystem/miuisystem.apk!/lib/arm64-v8a, permitted_path=/data:/mnt/expand
+07-22 03:34:09.329 D/nativeloader(22351): Extending system_exposed_libraries: libapuwareapusys.mtk.so:libapuwareapusys_v2.mtk.so:libapuwarexrp.mtk.so:libapuwarexrp_v2.mtk.so:libapuwareutils.mtk.so:libapuwareutils_v2.mtk.so:libapuwarehmp.mtk.so:libneuron_graph_delegate.mtk.so:libneuronusdk_adapter.mtk.so:libtflite_mtk.mtk.so:libarmnn_ndk.mtk.so:libcmdl_ndk.mtk.so:libnir_neon_driver_ndk.mtk.so:libmvpu_runtime.mtk.so:libmvpu_runtime_pub.mtk.so:libmvpu_engine_pub.mtk.so:libmvpu_pattern_pub.mtk.so:libmvpuop_mtk_cv.mtk.so:libmvpuop_mtk_nn.mtk.so:libmvpu_runtime_25.mtk.so:libmvpu_runtime_25_pub.mtk.so:libmvpu_engine_25_pub.mtk.so:libmvpu_pattern_25_pub.mtk.so:libmvpuop25_mtk_cv.mtk.so:libmvpuop25_mtk_nn.mtk.so:libmvpu_config.mtk.so:libteeservice_client.trustonic.so:libmisys_jni.xiaomi.so:libpag.hyperos.so:libffavc.hyperos.so
+07-22 03:34:09.330 D/ApplicationLoaders(22351): Returning zygote-cached class loader: /system/framework/org.apache.http.legacy.jar
+07-22 03:34:09.330 D/ApplicationLoaders(22351): Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar
+07-22 03:34:09.330 D/ApplicationLoaders(22351): Returning zygote-cached class loader: /system_ext/framework/androidx.window.sidecar.jar
+07-22 03:34:09.331 D/nativeloader(22351): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-aarch64-android.so:libclang_rt.asan-arm-android.so:libclang_rt.hwasan-aarch64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+07-22 03:34:09.331 D/nativeloader(22351): Configuring product-clns-10 for unbundled product apk /product/app/ContentCatcherOS2/ContentCatcherOS2.apk. target_sdk_version=34, uses_libraries=, library_path=/product/app/ContentCatcherOS2/lib/arm64:/product/app/ContentCatcherOS2/ContentCatcherOS2.apk!/lib/arm64-v8a:/system_ext/priv-app/RtMiCloudSDK/RtMiCloudSDK.apk!/lib/arm64-v8a:/system_ext/app/miuisystem/miuisystem.apk!/lib/arm64-v8a:/product/lib64:/system/product/lib64, permitted_path=/data:/mnt/expand:/product/lib64:/system/product/lib64
+07-22 03:34:09.331 D/nativeloader(22351): InitVndkspLibrariesProduct: VNDK is deprecated with product
+07-22 03:34:09.333 D/ViewContentFactory(22351): initViewContentFetcherClass
+07-22 03:34:09.333 D/ViewContentFactory(22351): getInterceptorPackageInfo
+07-22 03:34:09.333 D/ViewContentFactory(22351): getInitialApplication took 0ms
+07-22 03:34:09.333 D/ViewContentFactory(22351): packageInfo.packageName: com.miui.contentcatcher
+07-22 03:34:09.334 D/ViewContentFactory(22351): initViewContentFetcherClass took 1ms
+07-22 03:34:09.334 I/ContentCatcher(22351): ViewContentFetcher : ViewContentFetcher
+07-22 03:34:09.334 D/ViewContentFactory(22351): createInterceptor took 1ms
+07-22 03:34:09.336 I/ContentCatcher(22351): Interceptor_Catcher : Catcher list invalid for com.ilyop.codex@com.termux.app.CodexChatActivity@10552569
+07-22 03:34:09.336 I/ContentCatcher(22351): Interceptor_Catcher : Get featureInfo from config image_pick_mode
+07-22 03:34:09.337 I/ContentCatcher(22351): Interceptor_Catcher : Get featureInfo from config pick_mode
+07-22 03:34:09.621 W/BpBinder(22351): Slow Binder: BpBinder transact took 295 ms, interface=android.app.IActivityClientController, code=47 oneway=false
+07-22 03:34:09.627 W/libc    (22351): Access denied finding property "ro.vendor.df.effect.conflict"
+07-22 03:34:09.628 D/SecurityManager(22351): checkAccessControl flag1
+07-22 03:34:09.628 I/ContentCatcher(22351): SettingTrigger : register screen QA status observer com.termux.app.CodexChatActivity
+07-22 03:34:09.628 I/PowerHalWrapper(22351): PowerHalWrapper.getInstance 
+07-22 03:34:09.630 I/ContentCatcher(22351): SettingTrigger : register global collect status observer com.termux.app.CodexChatActivity
+07-22 03:34:09.631 I/SurfaceFactory(22351): [static] sSurfaceFactory = com.mediatek.view.impl.SurfaceFactoryImpl@34e2477
+07-22 03:34:09.634 E/MI-PreRender(22351): init cloud whiteList failed
+07-22 03:34:09.637 I/ContentCatcher_TaplusBlackListHelper(22351):  mActivities isEmpty
+07-22 03:34:09.638 I/ContentCatcher_TaplusBlackListHelper(22351):  blackList size: 13 package is com.ilyop.codex isInTaplusWhiteList: true
+07-22 03:34:09.640 W/libc    (22351): Access denied finding property "ro.vendor.display.iris_x7.support"
+07-22 03:34:09.647 D/VRI[CodexChatActivity](22351): hardware acceleration = true, forceHwAccelerated = false
+07-22 03:34:09.650 D/InputEventReceiver(22351): Input log is disabled in InputEventReceiver.
+07-22 03:34:09.652 E/FileUtils(22351): err write to mi_exception_log
+07-22 03:34:09.652 E/FileUtils(22351): err write to mi_exception_log
+07-22 03:34:09.652 I/Choreographer(22351): Skipped 48 frames!  The application may be doing too much work on its main thread.
+07-22 03:34:09.718 D/BufferQueueConsumer(22351): [](id:574f00000000,api:0,p:-1,c:22351) connect: controlledByApp=false
+07-22 03:34:09.719 D/BLASTBufferQueue(22351): [VRI[CodexChatActivity]#0](f:0,a:0) constructor()
+07-22 03:34:09.719 D/BLASTBufferQueue(22351): [VRI[CodexChatActivity]#0](f:0,a:0) update width=1440 height=3200 format=-1 mTransformHint=0
+07-22 03:34:09.724 D/VRI[CodexChatActivity](22351): vri.reportNextDraw android.view.ViewRootImpl.performTraversals:4953 android.view.ViewRootImpl.doTraversal:3540 android.view.ViewRootImpl$TraversalRunnable.run:11664 android.view.Choreographer$CallbackRecord.run:1819 android.view.Choreographer$CallbackRecord.run:1828 
+07-22 03:34:09.724 D/VRI[CodexChatActivity](22351): Setup new sync=wmsSync-VRI[CodexChatActivity]#0
+07-22 03:34:09.738 D/HWUI    (22351): makeCurrent grContext:0x7d5cf1bb90 reset mTextureAvailable
+07-22 03:34:09.739 D/com.ilyop.codex(22351): MiuiProcessManagerServiceStub setSchedFifo
+07-22 03:34:09.739 I/MiuiProcessManagerImpl(22351): setSchedFifo pid:22351, mode:3
+07-22 03:34:09.739 W/libc    (22351): Access denied finding property "ro.vendor.magt.mtk_magt_support"
+07-22 03:34:09.739 D/MAGT_SYNC_FRAME(22351): MAGT Sync: MAGT is not supported. Disabling Sync.
+07-22 03:34:09.743 W/libc    (22351): Access denied finding property "ro.vendor.display.iris_x7.support"
+07-22 03:34:09.745 W/libc    (22351): Access denied finding property "ro.vendor.display.iris_x7.support"
+07-22 03:34:09.784 E/LB      (22351): fail to open file: No such file or directory
+07-22 03:34:09.784 E/LB      (22351): fail to open node: No such file or directory
+07-22 03:34:09.784 W/libc    (22351): Access denied finding property "ro.vendor.mtk.gpu.sw3d"
+07-22 03:34:09.784 I/GrallocExtra(22351): gralloc_extra_query:is_SW3D 0
+07-22 03:34:09.784 W/libc    (22351): Access denied finding property "ro.vendor.display.iris_x7.support"
+07-22 03:34:09.784 D/BLASTBufferQueue(22351): [VRI[CodexChatActivity]#0](f:0,a:1) acquireNextBufferLocked size=1440x3200 mFrameNumber=1 applyTransaction=true mTimestamp=393891153300630(auto) mPendingTransactions.size=0 graphicBufferId=95996814032899 transform=0
+07-22 03:34:09.785 D/VRI[CodexChatActivity](22351): vri.reportDrawFinished
+07-22 03:34:09.786 E/FileUtils(22351): err write to mi_exception_log
+07-22 03:34:09.786 E/FileUtils(22351): err write to mi_exception_log
+07-22 03:34:09.788 D/LibMBrainProxy(22351): Init Paramters
+07-22 03:34:09.789 D/skia    (22351): SkJpegCodec::onGetPixels + (489, 1060)
+07-22 03:34:09.789 I/DMABUFHEAPS(22351): Using DMA-BUF heap named: mtk_mm
+07-22 03:34:09.789 D/skia    (22351): stream getLength() supported, buffer addr 0x7b96b94000 length 1465984
+07-22 03:34:09.790 D/skia    (22351): LoadInputStreamToMem va 0x7b96b94000  size 1465984
+07-22 03:34:09.790 D/libjpeg-alpha(22351): Huffman Builder run in subthread
+07-22 03:34:09.790 D/libjpeg-alpha(22351): Tile Decoder (#thread:4, size:512 512 512 420x1072, alignment:256x16)
+07-22 03:34:09.791 D/libjpeg-alpha(22351): [Hybrid] Wait IRQ thread (25751)
+07-22 03:34:09.795 D/IlyopCodexTasks(22351): refresh generation=1
+07-22 03:34:09.796 D/IlyopCodexTasks(22351): apply generation=1 count=9 first=通过子代理来探索我的目录
+07-22 03:34:09.797 D/libjpeg-alpha(22351): [Hybrid] Wait IRQ thread terminated
+07-22 03:34:09.804 I/IlyopApiProxy(22351): Proxy 37055 -> https://api.deepseek.com
+07-22 03:34:09.804 I/IlyopCodexBridge(22351): AGENT_LIMITS v2Enabled=false preventRecursiveSubagents=false ultraV2Children=3 ultraV2Slots=4 normalV1Children=6
+07-22 03:34:09.806 D/IlyopCodexBridge(22351): SEND method=initialize id=1
+07-22 03:34:09.815 D/skia    (22351): SkJpegCodec::onGetPixels -
+07-22 03:34:09.821 W/libc    (22351): Access denied finding property "ro.vendor.display.iris_x7.support"
+07-22 03:34:09.822 I/HandWritingStubImpl(22351): refreshLastKeyboardType: 1
+07-22 03:34:09.822 I/HandWritingStubImpl(22351): getCurrentKeyboardType: 1
+07-22 03:34:09.824 D/IlyopCodexTasks(22351): apply generation=1 count=8 first=通过子代理来探索我的目录
+07-22 03:34:09.841 I/HandWritingStubImpl(22351): getCurrentKeyboardType: 1
+07-22 03:34:09.938 D/IlyopCodexBridge(22351): RECV id=1 result=true
+07-22 03:34:09.938 D/IlyopCodexBridge(22351): SEND method=initialized
+07-22 03:34:09.938 D/IlyopCodexBridge(22351): SEND method=collaborationMode/list id=2
+07-22 03:34:09.938 D/IlyopCodexBridge(22351): SEND method=mcpServerStatus/list id=3
+07-22 03:34:09.939 I/IlyopCodexBridge(22351): THREAD_PERMISSIONS mode=full-access approval=never sandbox=danger-full-access
+07-22 03:34:09.939 D/IlyopCodexBridge(22351): SEND method=thread/start id=4
+07-22 03:34:09.939 D/IlyopCodexBridge(22351): RECV method=remoteControl/status/changed
+07-22 03:34:09.939 D/IlyopCodexBridge(22351): RECV id=2 result=true
+07-22 03:34:09.939 I/IlyopCodexBridge(22351): COLLAB_MODES {"data":[{"name":"Plan","mode":"plan","model":null,"reasoning_effort":"medium"},{"name":"Default","mode":"default","model":null,"reasoning_effort":null}]}
+07-22 03:34:09.943 D/IlyopCodexBridge(22351): RECV id=3 result=true
+07-22 03:34:09.943 I/IlyopCodexBridge(22351): MCP_STATUS servers=1 tools=0 names=mt
+07-22 03:34:09.943 D/IlyopCodexBridge(22351): EMIT function=onMcpStatus length=26
+07-22 03:34:10.006 D/IlyopCodexBridge(22351): RECV id=4 result=true
+07-22 03:34:10.006 D/IlyopCodexBridge(22351): EMIT function=onReady length=36
+07-22 03:34:10.006 D/IlyopCodexBridge(22351): RECV method=thread/started
+07-22 03:34:10.012 D/IlyopCodexBridge(22351): SEND method=thread/goal/get id=5
+07-22 03:34:10.015 D/IlyopCodexBridge(22351): RECV id=5 result=true
+07-22 03:34:10.015 D/IlyopCodexBridge(22351): EMIT function=onGoalCleared length=51
+07-22 03:34:10.016 D/IlyopCodexBridge(22351): EMIT function=onSkills length=2628
+07-22 03:34:10.037 W/RenderInspector(22351): QueueBuffer time out on com.ilyop.codex/com.termux.app.CodexChatActivity, count=1, avg=22 ms, max=22 ms.
+07-22 03:34:10.128 W/RenderInspector(22351): QueueBuffer time out on com.ilyop.codex/com.termux.app.CodexChatActivity, count=1, avg=16 ms, max=16 ms.
+07-22 03:34:15.502 D/ProfileInstaller(22351): Skipping profile installation for com.ilyop.codex

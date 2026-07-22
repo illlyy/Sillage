@@ -27,11 +27,22 @@ import kotlinx.coroutines.withContext
 internal object FcodeAppearancePreferences {
     const val COLOR_MODE = "native_theme_mode_v1"
     const val COLOR_PALETTE = "native_color_palette_v1"
+    const val INTERFACE_STYLE = "native_interface_style_v1"
     const val CHAT_BACKGROUND = "native_chat_background_v1"
     const val CHAT_BACKGROUND_IMAGE = "native_chat_background_image_v1"
     const val CHAT_BACKGROUND_DIM = "native_chat_background_dim_v1"
+    const val COMPACT_COMPOSER_ON_SCROLL = "native_compact_composer_on_scroll_v1"
 
     fun normalizeColorMode(value: String?): String = value?.takeIf { it in setOf("system", "light", "dark") } ?: "system"
+}
+
+internal enum class FcodeInterfaceStyle(val value: String) {
+    MATERIAL("material"),
+    LIQUID_GLASS("liquid_glass");
+
+    companion object {
+        fun from(value: String?): FcodeInterfaceStyle = entries.firstOrNull { it.value == value } ?: MATERIAL
+    }
 }
 
 internal enum class FcodeColorPalette(val value: String) {
@@ -77,6 +88,8 @@ internal data class FcodeMarkdownColors(
     val diffRemovedText: Color,
 )
 
+internal val LocalFcodeInterfaceStyle = staticCompositionLocalOf { FcodeInterfaceStyle.MATERIAL }
+internal val LocalFcodeAppearanceRevision = staticCompositionLocalOf { 0 }
 internal val LocalFcodeColorPalette = staticCompositionLocalOf { FcodeColorPalette.ROSE }
 internal val LocalFcodeChatBackground = staticCompositionLocalOf { FcodeChatBackgroundStyle.THEME }
 internal val LocalFcodeChatBackgroundImage = staticCompositionLocalOf { "" }
@@ -224,16 +237,63 @@ internal fun fcodeColorScheme(palette: FcodeColorPalette, dark: Boolean): ColorS
     }
 }
 
+
+/** Neutral Apple-style system palette used by the Liquid Glass interface style. */
+internal fun liquidGlassColorScheme(dark: Boolean): ColorScheme = if (dark) {
+    darkColorScheme(
+        // iOS semantic accent: keep the material monochrome, reserve blue for actions/focus.
+        primary = Color(0xFF0A84FF), onPrimary = Color.White,
+        primaryContainer = Color(0xFF0B355F), onPrimaryContainer = Color(0xFFD6EAFF),
+        secondary = Color(0xFFD1D1D6), onSecondary = Color(0xFF111113),
+        secondaryContainer = Color(0xFF252527), onSecondaryContainer = Color(0xFFE5E5EA),
+        tertiary = Color(0xFFE5E5EA), onTertiary = Color(0xFF111113),
+        tertiaryContainer = Color(0xFF303033), onTertiaryContainer = Color(0xFFF2F2F7),
+        error = Color(0xFFFF453A), onError = Color.Black,
+        errorContainer = Color(0xFF5A1A18), onErrorContainer = Color(0xFFFFDAD6),
+        background = Color(0xFF000000), onBackground = Color(0xFFF5F5F7),
+        surface = Color(0xFF080808), onSurface = Color(0xFFF5F5F7),
+        surfaceVariant = Color(0xFF2C2C2E), onSurfaceVariant = Color(0xFFC7C7CC),
+        outline = Color(0xFF8E8E93), outlineVariant = Color(0xFF38383A),
+        scrim = Color.Black, inverseSurface = Color(0xFFF2F2F7), inverseOnSurface = Color(0xFF1C1C1E),
+        inversePrimary = Color(0xFF007AFF), surfaceDim = Color(0xFF000000), surfaceBright = Color(0xFF323234),
+        surfaceContainerLowest = Color(0xFF000000), surfaceContainerLow = Color(0xFF111113),
+        surfaceContainer = Color(0xFF1C1C1E), surfaceContainerHigh = Color(0xFF252527),
+        surfaceContainerHighest = Color(0xFF2C2C2E),
+    )
+} else {
+    lightColorScheme(
+        // Black/white remains the visual base; system blue only communicates interactivity.
+        primary = Color(0xFF007AFF), onPrimary = Color.White,
+        primaryContainer = Color(0xFFE1F0FF), onPrimaryContainer = Color(0xFF003A70),
+        secondary = Color(0xFF3A3A3C), onSecondary = Color.White,
+        secondaryContainer = Color(0xFFECECEF), onSecondaryContainer = Color(0xFF2C2C2E),
+        tertiary = Color(0xFF48484A), onTertiary = Color.White,
+        tertiaryContainer = Color(0xFFF0F0F2), onTertiaryContainer = Color(0xFF2C2C2E),
+        error = Color(0xFFFF3B30), onError = Color.White,
+        errorContainer = Color(0xFFFFDAD6), onErrorContainer = Color(0xFF8C1D18),
+        background = Color(0xFFF5F5F7), onBackground = Color(0xFF111111),
+        surface = Color(0xFFF9F9FB), onSurface = Color(0xFF111111),
+        surfaceVariant = Color(0xFFE5E5EA), onSurfaceVariant = Color(0xFF5C5C62),
+        outline = Color(0xFF8E8E93), outlineVariant = Color(0xFFD1D1D6),
+        scrim = Color.Black, inverseSurface = Color(0xFF1C1C1E), inverseOnSurface = Color(0xFFF5F5F7),
+        inversePrimary = Color(0xFF0A84FF), surfaceDim = Color(0xFFE1E1E5), surfaceBright = Color.White,
+        surfaceContainerLowest = Color.White, surfaceContainerLow = Color(0xFFF2F2F5),
+        surfaceContainer = Color(0xFFEDEDF0), surfaceContainerHigh = Color(0xFFE8E8EB),
+        surfaceContainerHighest = Color(0xFFE1E1E5),
+    )
+}
+
 internal fun fcodeMarkdownColors(
     palette: FcodeColorPalette,
     dark: Boolean,
     scheme: ColorScheme,
+    styleKey: String = FcodeInterfaceStyle.MATERIAL.value,
 ): FcodeMarkdownColors {
     // Code blocks should inherit the active theme surface. The previous light-mode
     // palette used near-black colors, so both inline code and recycled TextViews could flash black.
     val codeBackground = scheme.surfaceContainerHigh
     return FcodeMarkdownColors(
-        cacheKey = "${palette.value}-${if (dark) "dark" else "light"}",
+        cacheKey = "$styleKey-${palette.value}-${if (dark) "dark" else "light"}",
         text = scheme.onSurface,
         secondaryText = scheme.onSurfaceVariant,
         link = scheme.primary,
