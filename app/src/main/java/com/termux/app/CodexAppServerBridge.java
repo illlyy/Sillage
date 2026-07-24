@@ -1,6 +1,7 @@
 package com.termux.app;
 
 import android.app.Activity;
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.webkit.JavascriptInterface;
@@ -18,6 +19,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.lang.ref.WeakReference;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,7 +36,10 @@ final class CodexAppServerBridge {
     }
 
     private static final String TAG = "IlyopCodexBridge";
-    private volatile Activity activity;
+    private static final java.util.regex.Pattern RECORD_TIMESTAMP_PATTERN = java.util.regex.Pattern.compile(
+        "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?:\\.(\\d+))?(Z|[+-]\\d{2}:?\\d{2})$");
+    private final Context appContext;
+    private volatile WeakReference<Activity> activityRef;
     private final WebView webView;
     private volatile EventListener eventListener;
     private final AtomicInteger nextId = new AtomicInteger(1);
@@ -89,13 +94,15 @@ final class CodexAppServerBridge {
     private final Runnable nativeStreamDrain = this::drainNativeStreamEvents;
 
     CodexAppServerBridge(Activity activity, WebView webView) {
-        this.activity = activity;
+        this.appContext = activity.getApplicationContext();
+        this.activityRef = new WeakReference<>(activity);
         this.webView = webView;
         this.eventListener = null;
     }
 
     CodexAppServerBridge(Activity activity, EventListener eventListener) {
-        this.activity = activity;
+        this.appContext = activity.getApplicationContext();
+        this.activityRef = new WeakReference<>(activity);
         this.webView = null;
         this.eventListener = eventListener;
     }
@@ -103,12 +110,20 @@ final class CodexAppServerBridge {
     void setDesktopBridge(CodexDesktopBridge bridge) { this.desktopBridge = bridge; }
 
     void rebind(Activity activity, EventListener listener) {
-        if (activity != null) this.activity = activity;
+        if (activity != null) this.activityRef = new WeakReference<>(activity);
         this.eventListener = listener;
     }
 
     void detach(EventListener listener) {
-        if (this.eventListener == listener) this.eventListener = null;
+        if (this.eventListener != listener) return;
+        this.eventListener = null;
+        Activity boundActivity = boundActivity();
+        if (boundActivity == listener) this.activityRef.clear();
+    }
+
+    private Activity boundActivity() {
+        WeakReference<Activity> reference = activityRef;
+        return reference == null ? null : reference.get();
     }
 
     String currentVisibleThreadId() { return visibleThreadId; }
@@ -155,7 +170,7 @@ final class CodexAppServerBridge {
     }
 
     synchronized void start(String baseUrl, String apiKey, String model, String apiFormat) {
-        android.content.SharedPreferences mobile = activity.getSharedPreferences("codex_mobile", Activity.MODE_PRIVATE);
+        android.content.SharedPreferences mobile = appContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
         start(baseUrl, apiKey, model, apiFormat, mobile.getBoolean("mihomo_route_api", false), false);
     }
 
@@ -214,7 +229,7 @@ final class CodexAppServerBridge {
                 home.mkdirs();
                 codexHome.mkdirs();
                 purgeStaleAgentsMaxThreads(new File(codexHome, "config.toml"));
-                MihomoManager mihomo = MihomoManager.get(activity);
+                MihomoManager mihomo = MihomoManager.get(appContext);
                 if (routeThroughMihomo) mihomo.start();
                 if (!isServerGenerationActive(generation)) return;
                 localProxy = new LocalApiProxy(baseUrl, apiFormat, routeThroughMihomo, mihomo.mixedPort(),
@@ -269,6 +284,10 @@ final class CodexAppServerBridge {
                 if (model != null && !model.isEmpty()) env.put("OPENAI_MODEL", model);
                 env.put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin:/system/xbin");
                 env.put("TMPDIR", TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);
+                // Critical for MCP stdio servers: without LD_LIBRARY_PATH, child processes
+                // (npx/node/python) cannot find their shared libraries and fail to start.
+                env.put("LD_LIBRARY_PATH", TermuxConstants.TERMUX_LIB_PREFIX_DIR_PATH);
+                env.put("PREFIX", TermuxConstants.TERMUX_PREFIX_DIR_PATH);
                 if (!isServerGenerationActive(generation)) {
                     localProxy.stop();
                     return;
@@ -422,7 +441,7 @@ final class CodexAppServerBridge {
         visibleThreadId = null;
         visibleRouteReady = false;
         activeTurnId = null;
-        NativeChatDiagnostics.record(activity, "conversation_route", navigationDetails(generation, "new"));
+        NativeChatDiagnostics.record(appContext, "conversation_route", navigationDetails(generation, "new"));
         try { sendThreadStart(requestedCwd); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
 
@@ -446,7 +465,7 @@ final class CodexAppServerBridge {
         visibleRouteReady = false;
         primaryThreadIds.add(requestedThread);
         activeTurnId = null;
-        NativeChatDiagnostics.record(activity, "conversation_route", navigationDetails(generation, shortId(requestedThread)));
+        NativeChatDiagnostics.record(appContext, "conversation_route", navigationDetails(generation, shortId(requestedThread)));
         new Thread(() -> {
             final long historyStartedAt = android.os.SystemClock.uptimeMillis();
             try {
@@ -454,13 +473,13 @@ final class CodexAppServerBridge {
                 File sessionFile = findSessionFile(sessionsRoot, requestedThread);
                 JSONArray history = sessionFile == null ? new JSONArray() : readConversationHistory(sessionFile);
                 NativeHistorySnapshot historySnapshot = NativeHistoryParser.parse(history);
-                NativeChatDiagnostics.record(activity, "history_prepared", navigationDetails(generation, shortId(requestedThread))
+                NativeChatDiagnostics.record(appContext, "history_prepared", navigationDetails(generation, shortId(requestedThread))
                     .put("messages", historySnapshot.getMessages().size())
                     .put("estimatedChars", historySnapshot.getEstimatedChars())
                     .put("durationMs", android.os.SystemClock.uptimeMillis() - historyStartedAt));
                 if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
                 final boolean retainInMemoryThread = allowMissingRollout && sessionFile == null;
-                activity.runOnUiThread(() -> {
+                mainHandler.post(() -> {
                     if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
                     // JSON, Base64 and message DTO parsing completed on the resume worker.
                     // Main only swaps one immutable snapshot before opening the event gate.
@@ -469,7 +488,7 @@ final class CodexAppServerBridge {
                     }
                     visibleRouteReady = true;
                     if (retainInMemoryThread) {
-                        NativeChatDiagnostics.record(activity, "retained_empty_thread_restored",
+                        NativeChatDiagnostics.record(appContext, "retained_empty_thread_restored",
                             navigationDetails(generation, shortId(requestedThread)));
                         emit("onReady", requestedThread);
                         return;
@@ -507,7 +526,7 @@ final class CodexAppServerBridge {
                 result.put("messages", messages);
                 result.put("found", sessionFile != null);
                 result.put("status", subagentSessionStatus(sessionFile));
-                NativeChatDiagnostics.record(activity, "subagent_history", new JSONObject()
+                NativeChatDiagnostics.record(appContext, "subagent_history", new JSONObject()
                     .put("thread", shortId(subagentThreadId))
                     .put("threadTail", subagentThreadId.length() > 8 ? subagentThreadId.substring(subagentThreadId.length() - 8) : subagentThreadId)
                     .put("found", sessionFile != null).put("messages", messages.length()));
@@ -793,9 +812,20 @@ final class CodexAppServerBridge {
             .put("capabilities", new JSONObject().put("experimentalApi", true)));
     }
 
+    /** Re-probe MCP server status on demand (called from settings page). */
+    void refreshMcpStatus() {
+        if (desktopBridge != null) return; // Only native mode probes MCP status directly.
+        try {
+            mcpStatusRequestId = sendRequest("mcpServerStatus/list", new JSONObject()
+                .put("cursor", JSONObject.NULL).put("limit", 100).put("detail", "full"));
+        } catch (Exception error) {
+            android.util.Log.w(TAG, "Unable to inspect MCP server status", error);
+        }
+    }
+
     private String configuredCwd() {
         String cwd = TermuxConstants.TERMUX_HOME_DIR_PATH;
-        android.content.SharedPreferences mobile = activity.getSharedPreferences("codex_mobile", Activity.MODE_PRIVATE);
+        android.content.SharedPreferences mobile = appContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
         if (mobile.getBoolean("custom_project_root_enabled", true)) {
             String configured = mobile.getString("custom_project_root", "/storage/emulated/0/");
             if (configured != null && new File(configured).isDirectory()) cwd = configured;
@@ -804,7 +834,7 @@ final class CodexAppServerBridge {
     }
 
     private String configuredPermissionMode() {
-        android.content.SharedPreferences mobile = activity.getSharedPreferences("codex_mobile", Activity.MODE_PRIVATE);
+        android.content.SharedPreferences mobile = appContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
         return NativePermissionMode.normalize(mobile.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS));
     }
 
@@ -909,8 +939,9 @@ final class CodexAppServerBridge {
             }
             if (unexpected) {
                 android.util.Log.w(TAG, "app-server exited with code " + exitCode);
-                if (activity instanceof CodexHomeActivity) {
-                    activity.runOnUiThread(() -> ((CodexHomeActivity) activity).onCodexAppServerExited(exitCode));
+                Activity boundActivity = boundActivity();
+                if (boundActivity instanceof CodexHomeActivity) {
+                    mainHandler.post(() -> ((CodexHomeActivity) boundActivity).onCodexAppServerExited(exitCode));
                 }
             }
         } catch (InterruptedException ignored) {
@@ -1009,7 +1040,7 @@ final class CodexAppServerBridge {
                 JSONObject inboundParams = message.optJSONObject("params");
                 String requestedThread = inboundParams == null ? "" : inboundParams.optString("threadId", "");
                 if (requestedThread.isEmpty()) requestedThread = threadId;
-                NativeTaskNotificationManager.notifyEvent(activity, requestedThread,
+                NativeTaskNotificationManager.notifyEvent(appContext, requestedThread,
                     NativeTaskNotificationPolicy.APPROVAL, String.valueOf(message.opt("id")), "");
                 emit("onApprovalRequest", new JSONObject()
                     .put("requestId", message.opt("id"))
@@ -1029,7 +1060,7 @@ final class CodexAppServerBridge {
                     if (firstQuestion != null) questionDetail = firstQuestion.optString("header",
                         firstQuestion.optString("question", ""));
                 }
-                NativeTaskNotificationManager.notifyEvent(activity, requestedThread,
+                NativeTaskNotificationManager.notifyEvent(appContext, requestedThread,
                     NativeTaskNotificationPolicy.ANSWER, String.valueOf(message.opt("id")), questionDetail);
                 emit("onUserInputRequest", new JSONObject()
                     .put("requestId", message.opt("id"))
@@ -1046,7 +1077,7 @@ final class CodexAppServerBridge {
             catch (Exception error) { android.util.Log.w(TAG, "Unable to list collaboration modes", error); }
             if (desktopBridge == null) try {
                 mcpStatusRequestId = sendRequest("mcpServerStatus/list", new JSONObject()
-                    .put("cursor", JSONObject.NULL).put("limit", 100).put("detail", "toolsAndAuthOnly"));
+                    .put("cursor", JSONObject.NULL).put("limit", 100).put("detail", "full"));
             } catch (Exception error) {
                 android.util.Log.w(TAG, "Unable to inspect MCP server status", error);
             }
@@ -1079,7 +1110,7 @@ final class CodexAppServerBridge {
         if (mcpStatusRequestId >= 0 && message.optInt("id", -1) == mcpStatusRequestId) {
             mcpStatusRequestId = -1;
             String summary = mcpStatusSummary(message);
-            if (activity != null) NativeMcpRuntimeStatusStore.record(activity, message.toString());
+            NativeMcpRuntimeStatusStore.record(appContext, message.toString());
             Log.i(TAG, "MCP_STATUS " + summary);
             emit("onMcpStatus", summary);
             return;
@@ -1106,7 +1137,7 @@ final class CodexAppServerBridge {
             }
             if (isMcpAvailabilityError(message)) {
                 String detail = message.optJSONObject("error").optString("message", "MCP server unavailable");
-                if (activity != null) NativeMcpRuntimeStatusStore.recordFailure(activity, detail);
+                NativeMcpRuntimeStatusStore.recordFailure(appContext, detail);
                 Log.w(TAG, "MCP unavailable; continuing native chat without the failed server: " + detail);
                 emit("onMcpStatus", "error=" + detail);
                 return;
@@ -1165,7 +1196,7 @@ final class CodexAppServerBridge {
                 primaryThreadIds.add(resultThreadId);
                 Integer responseId = message.has("id") ? message.optInt("id", -1) : -1;
                 String pendingTitle = pendingPrimaryThreadTitles.remove(responseId);
-                if (pendingTitle != null && desktopBridge != null) CodexTaskStore.markRunning(activity, resultThreadId, pendingTitle);
+                if (pendingTitle != null && desktopBridge != null) CodexTaskStore.markRunning(appContext, resultThreadId, pendingTitle);
                 Integer responseGeneration = pendingNavigationGenerations.remove(responseId);
                 boolean acceptForNative = eventListener == null || (responseGeneration != null
                     && responseGeneration == navigationGeneration.get()
@@ -1176,7 +1207,7 @@ final class CodexAppServerBridge {
                     visibleRouteReady = true;
                     emit("onReady", resultThreadId);
                 } else {
-                    NativeChatDiagnostics.record(activity, "ignored_navigation_result", new JSONObject()
+                    NativeChatDiagnostics.record(appContext, "ignored_navigation_result", new JSONObject()
                         .put("thread", shortId(resultThreadId)).put("generation", responseGeneration));
                 }
             }
@@ -1206,7 +1237,7 @@ final class CodexAppServerBridge {
             JSONObject ignoredItem = params.optJSONObject("item");
             String ignoredThread = params.optString("threadId", "");
             String ignoredEvent = primaryThreadIds.contains(ignoredThread) ? "ignored_background_item" : "ignored_child_item";
-            NativeChatDiagnostics.record(activity, ignoredEvent, new JSONObject()
+            NativeChatDiagnostics.record(appContext, ignoredEvent, new JSONObject()
                 .put("thread", shortId(ignoredThread))
                 .put("visibleThread", shortId(visibleThreadId))
                 .put("routeReady", visibleRouteReady)
@@ -1216,7 +1247,7 @@ final class CodexAppServerBridge {
             JSONObject eventPayload = params.optJSONObject("payload");
             if (eventPayload == null) eventPayload = params.optJSONObject("msg");
             if (eventPayload != null && "plan_update".equals(eventPayload.optString("type"))) {
-                NativeChatDiagnostics.record(activity, "live_plan_event_msg", eventPayload);
+                NativeChatDiagnostics.record(appContext, "live_plan_event_msg", eventPayload);
                 emit("onPlanUpdated", eventPayload.toString());
             }
         }
@@ -1225,7 +1256,7 @@ final class CodexAppServerBridge {
         if (planLikeMethod && !"item/plan/delta".equals(method)) {
             // Plan deltas can arrive a few characters at a time. Persisting every one
             // floods the diagnostics executor and disk while the UI is streaming.
-            NativeChatDiagnostics.record(activity, "plan_signal", new JSONObject()
+            NativeChatDiagnostics.record(appContext, "plan_signal", new JSONObject()
                 .put("method", method).put("primary", primaryEvent)
                 .put("params", params == null ? JSONObject.NULL : params));
         }
@@ -1234,7 +1265,7 @@ final class CodexAppServerBridge {
                 || "item/planUpdated".equals(method)) && params != null && primaryEvent) {
             // Keep the raw payload: native normalizes params.plan, turn.plan and
             // payload.plan because app-server versions differ in nesting.
-            NativeChatDiagnostics.record(activity, "plan_updated", new JSONObject()
+            NativeChatDiagnostics.record(appContext, "plan_updated", new JSONObject()
                 .put("method", method).put("thread", shortId(params.optString("threadId", ""))));
             emit("onPlanUpdated", params.toString());
         }
@@ -1250,7 +1281,7 @@ final class CodexAppServerBridge {
                     presentationItem.put("status", "working");
                 }
                 emit("onSubagentEvent", NativeLargePayloadStore.compactToolItem(presentationItem));
-                NativeChatDiagnostics.record(activity, "subagent_capsule", new JSONObject()
+                NativeChatDiagnostics.record(appContext, "subagent_capsule", new JSONObject()
                     .put("method", method).put("type", liveType)
                     .put("thread", shortId(params.optString("threadId", ""))));
             }
@@ -1331,8 +1362,8 @@ final class CodexAppServerBridge {
                 boolean failed = turnFailed(params);
                 JSONObject completedTurnObject = params == null ? null : params.optJSONObject("turn");
                 String completedTurnId = completedTurnObject == null ? "" : completedTurnObject.optString("id", "");
-                CodexTaskStore.markCompleted(activity, completedThread, failed);
-                NativeChatDiagnostics.record(activity, primaryEvent ? "turn_complete" : "background_turn_complete", new JSONObject()
+                CodexTaskStore.markCompleted(appContext, completedThread, failed);
+                NativeChatDiagnostics.record(appContext, primaryEvent ? "turn_complete" : "background_turn_complete", new JSONObject()
                     .put("thread", shortId(completedThread)).put("failed", failed));
                 if (!uiAlreadyCompleted || failed) notifyTaskCompleted(completedThread, failed, completedTurnId);
             }
@@ -1480,7 +1511,7 @@ final class CodexAppServerBridge {
     private void scheduleTurnStallDiagnostics(String thread, String turn) {
         final String key = turnKey(thread, turn);
         for (long thresholdMs : new long[]{60_000L, 180_000L}) {
-            activity.getWindow().getDecorView().postDelayed(() -> {
+            mainHandler.postDelayed(() -> {
                 Long started = turnStartedAtMs.get(key);
                 if (started == null) return;
                 long elapsed = Math.max(0L, System.currentTimeMillis() - started);
@@ -1627,10 +1658,24 @@ final class CodexAppServerBridge {
         return Math.max(1L, (finishedAtMs - startedAtMs) / 1000L);
     }
 
-    private static long parseRecordTimestampMs(String value) {
+    static long parseRecordTimestampMs(String value) {
         if (value == null || value.isEmpty()) return 0L;
-        try { return java.time.Instant.parse(value).toEpochMilli(); }
-        catch (Exception ignored) { return 0L; }
+        java.util.regex.Matcher match = RECORD_TIMESTAMP_PATTERN.matcher(value.trim());
+        if (!match.matches()) return 0L;
+        try {
+            String fraction = match.group(2);
+            String millis = fraction == null ? "000" : (fraction + "000").substring(0, 3);
+            String zone = match.group(3);
+            if ("Z".equals(zone)) zone = "+0000";
+            else zone = zone.replace(":", "");
+            java.text.SimpleDateFormat parser = new java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss.SSSZ", java.util.Locale.US);
+            parser.setLenient(false);
+            java.util.Date parsed = parser.parse(match.group(1) + "." + millis + zone);
+            return parsed == null ? 0L : parsed.getTime();
+        } catch (Exception ignored) {
+            return 0L;
+        }
     }
 
     static JSONArray readConversationHistory(File sessionFile) throws Exception {
@@ -1951,8 +1996,7 @@ final class CodexAppServerBridge {
         String text = value == null ? "" : value.trim();
         if (!text.startsWith(IMPLEMENT_PLAN_PROMPT_PREFIX)) return text;
         String plan = text.substring(IMPLEMENT_PLAN_PROMPT_PREFIX.length()).trim();
-        String encoded = java.util.Base64.getEncoder().encodeToString(
-            plan.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String encoded = NativeBase64.encode(plan.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         return IMPLEMENT_PLAN_DISPLAY_PREFIX + encoded;
     }
 
@@ -2080,7 +2124,7 @@ final class CodexAppServerBridge {
         emit("onTurnComplete", "");
         // Keep drawer/task state consistent even when the provider never emits the trailing
         // turn/completed. A real completion may still correct this to failed milliseconds later.
-        CodexTaskStore.markCompleted(activity, statusThread, false);
+        CodexTaskStore.markCompleted(appContext, statusThread, false);
         notifyTaskCompleted(statusThread, false, turn);
     }
 
@@ -2139,7 +2183,7 @@ final class CodexAppServerBridge {
                     JSONObject syntheticParams = completed.optJSONObject("params");
                     if (isPrimaryEvent(syntheticParams)) emit("onTurnComplete", "");
                     if (isPrimaryTurn(syntheticParams)) {
-                        CodexTaskStore.markCompleted(activity, thread, false);
+                        CodexTaskStore.markCompleted(appContext, thread, false);
                         notifyTaskCompleted(thread, false, turnId);
                     }
                     sendRequest("turn/interrupt", new JSONObject().put("threadId", thread).put("turnId", turnId));
@@ -2205,7 +2249,7 @@ final class CodexAppServerBridge {
         if (!requestedThread.isEmpty()) primaryThreadIds.add(requestedThread);
         String title = extractTaskTitle(params);
         if ("turn/start".equals(method) && !requestedThread.isEmpty()) {
-            CodexTaskStore.markRunning(activity, requestedThread, title);
+            CodexTaskStore.markRunning(appContext, requestedThread, title);
         } else if ("thread/start".equals(method) && desktopBridge != null) {
             int requestId = request.optInt("id", -1);
             if (requestId >= 0) pendingPrimaryThreadTitles.put(requestId, title);
@@ -2262,13 +2306,14 @@ final class CodexAppServerBridge {
     }
 
     private void notifyTaskCompleted(String completedThread, boolean failed, String token) {
-        NativeTaskNotificationManager.notifyEvent(activity, completedThread,
+        NativeTaskNotificationManager.notifyEvent(appContext, completedThread,
             failed ? NativeTaskNotificationPolicy.FAILED : NativeTaskNotificationPolicy.COMPLETED,
             token, "");
-        if (activity instanceof CodexHomeActivity) {
-            activity.runOnUiThread(((CodexHomeActivity) activity)::onCodexTaskCompleted);
+        Activity boundActivity = boundActivity();
+        if (boundActivity instanceof CodexHomeActivity) {
+            mainHandler.post(((CodexHomeActivity) boundActivity)::onCodexTaskCompleted);
         } else {
-            activity.runOnUiThread(() -> CodexOverlayService.notifyTaskCompleted(activity));
+            mainHandler.post(() -> CodexOverlayService.notifyTaskCompleted(appContext));
         }
     }
 
@@ -2324,7 +2369,7 @@ final class CodexAppServerBridge {
         }
 
         final String quoted = JSONObject.quote(safeValue);
-        activity.runOnUiThread(() -> {
+        mainHandler.post(() -> {
             if (eventListener != null) eventListener.onEvent(function, safeValue);
             webView.evaluateJavascript(
                 "window.codex && window.codex." + function + "(" + quoted + ")", null);

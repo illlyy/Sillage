@@ -103,4 +103,14 @@ class NativeLiveAssistantStateTest {
         assertEquals(10, usage.outputTokens)
         assertTrue(usage.estimated)
     }
+    @Test
+    fun protocolTagsAreRemovedWithThePrecompiledStreamMatcher() {
+        val state = NativeChatState()
+        state.addUser("prompt")
+
+        state.appendAssistant("<final>Hello</final><plan> world</plan><proposed_plan mode=\"x\">!</proposed_plan>")
+
+        assertEquals("Hello world!", state.liveAssistantText)
+    }
+
 }

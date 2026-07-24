@@ -7,6 +7,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -86,7 +87,11 @@ final class CodexModelCatalog {
         return entry;
     }
 
-    static File writeAtomic(File catalogFile, List<CodexProviderStore.ModelConfig> models) {
+    /**
+     * Serializes catalog replacement across chat/home entry points and avoids an fsync when the
+     * generated catalog is byte-for-byte identical to the file already consumed by Codex.
+     */
+    static synchronized File writeAtomic(File catalogFile, List<CodexProviderStore.ModelConfig> models) {
         File temporary = new File(catalogFile.getParentFile(), catalogFile.getName() + ".tmp");
         try {
             JSONObject root = build(models);
@@ -94,10 +99,12 @@ final class CodexModelCatalog {
                 if (catalogFile.isFile() && !catalogFile.delete()) Log.w(TAG, "Unable to remove empty model catalog");
                 return null;
             }
+            byte[] content = root.toString(2).getBytes(StandardCharsets.UTF_8);
             File parent = catalogFile.getParentFile();
             if (parent != null) parent.mkdirs();
+            if (hasSameContent(catalogFile, content)) return catalogFile;
             try (FileOutputStream output = new FileOutputStream(temporary)) {
-                output.write(root.toString(2).getBytes(StandardCharsets.UTF_8));
+                output.write(content);
                 output.getFD().sync();
             }
             Os.rename(temporary.getAbsolutePath(), catalogFile.getAbsolutePath());
@@ -106,6 +113,24 @@ final class CodexModelCatalog {
             Log.e(TAG, "Failed to write model catalog", error);
             if (temporary.isFile() && !temporary.delete()) Log.w(TAG, "Unable to remove temporary model catalog");
             return null;
+        }
+    }
+
+    static boolean hasSameContent(File file, byte[] expected) throws Exception {
+        if (!file.isFile() || file.length() != expected.length) return false;
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[Math.min(8192, Math.max(1, expected.length))];
+            int offset = 0;
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                if (count == 0) continue;
+                if (offset + count > expected.length) return false;
+                for (int index = 0; index < count; index++) {
+                    if (buffer[index] != expected[offset + index]) return false;
+                }
+                offset += count;
+            }
+            return offset == expected.length;
         }
     }
 

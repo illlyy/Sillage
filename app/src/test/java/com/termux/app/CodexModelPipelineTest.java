@@ -90,6 +90,22 @@ public class CodexModelPipelineTest {
     }
 
     @Test
+    public void catalogContentComparisonSkipsOnlyIdenticalBytes() throws Exception {
+        File catalog = File.createTempFile("codex-model-catalog", ".json");
+        try {
+            try (FileWriter writer = new FileWriter(catalog)) {
+                writer.write("{\"models\":[]}");
+            }
+            assertTrue(CodexModelCatalog.hasSameContent(
+                catalog, "{\"models\":[]}".getBytes(StandardCharsets.UTF_8)));
+            assertFalse(CodexModelCatalog.hasSameContent(
+                catalog, "{\"models\":[{}]}".getBytes(StandardCharsets.UTF_8)));
+        } finally {
+            assertTrue(catalog.delete() || !catalog.exists());
+        }
+    }
+
+    @Test
     public void responsesTransportMapsUltraButPreservesContext() throws Exception {
         JSONObject source = new JSONObject()
             .put("model", "gpt-5.6-sol")
@@ -319,6 +335,87 @@ public class CodexModelPipelineTest {
         JSONObject rewrittenEvent = new JSONObject(data);
         assertEquals("collaboration", rewrittenEvent.getJSONObject("item").getString("namespace"));
         assertEquals("spawn_agent", rewrittenEvent.getJSONObject("item").getString("name"));
+    }
+
+    @Test
+    public void thirdPartyResponsesFlattensMcpToolsAndRestoresTheirNamespace() throws Exception {
+        JSONObject request = new JSONObject().put("model", "deepseek-v4-pro")
+            .put("input", new JSONArray().put(new JSONObject()
+                .put("type", "function_call").put("call_id", "previous-call")
+                .put("namespace", "mcp__mt").put("name", "mt_apk_list")
+                .put("arguments", "{}")))
+            .put("tool_choice", new JSONObject().put("type", "function")
+                .put("namespace", "mcp__mt").put("name", "mt_apk_list"))
+            .put("tools", new JSONArray().put(new JSONObject()
+                .put("type", "namespace").put("name", "mcp__mt")
+                .put("tools", new JSONArray().put(new JSONObject()
+                    .put("type", "function").put("name", "mt_apk_list")
+                    .put("description", "List APK projects")
+                    .put("parameters", new JSONObject().put("type", "object"))))));
+        byte[] requestBytes = request.toString().getBytes(StandardCharsets.UTF_8);
+        ChatCompletionsAdapter.NamespacedTools mappings = ChatCompletionsAdapter.namespacedTools(requestBytes);
+        byte[] flattenedBytes = LocalApiProxy.flattenNamespacedResponsesRequest(requestBytes, mappings);
+        JSONObject flattened = new JSONObject(new String(flattenedBytes, StandardCharsets.UTF_8));
+
+        JSONObject tool = flattened.getJSONArray("tools").getJSONObject(0);
+        assertEquals("function", tool.getString("type"));
+        assertEquals("mcp__mt__mt_apk_list", tool.getString("name"));
+        JSONObject previousCall = flattened.getJSONArray("input").getJSONObject(0);
+        assertEquals("mcp__mt__mt_apk_list", previousCall.getString("name"));
+        assertFalse(previousCall.has("namespace"));
+        assertEquals("mcp__mt__mt_apk_list",
+            flattened.getJSONObject("tool_choice").getString("name"));
+        assertFalse(flattened.getJSONObject("tool_choice").has("namespace"));
+
+        JSONObject event = new JSONObject().put("type", "response.output_item.done")
+            .put("item", new JSONObject().put("type", "function_call")
+                .put("call_id", "call-mcp").put("name", "mcp__mt__mt_apk_list")
+                .put("arguments", "{}"));
+        String sse = "event: response.output_item.done\n" + "data: " + event + "\n\n";
+        String rewritten = new String(LocalApiProxy.rewriteNamespacedToolCalls(
+            sse.getBytes(StandardCharsets.UTF_8), "text/event-stream", mappings), StandardCharsets.UTF_8);
+        JSONObject rewrittenEvent = new JSONObject(rewritten.split("\n")[1].substring("data: ".length()));
+        JSONObject restoredCall = rewrittenEvent.getJSONObject("item");
+        assertEquals("mcp__mt", restoredCall.getString("namespace"));
+        assertEquals("mt_apk_list", restoredCall.getString("name"));
+    }
+
+    @Test
+    public void mcpFlatteningIsIndependentOfModelMetadataAndPreservesOtherNamespaces() throws Exception {
+        JSONObject request = new JSONObject().put("model", "agnes-2.0-flash")
+            .put("input", new JSONArray()
+                .put(new JSONObject().put("type", "function_call").put("call_id", "collab-call")
+                    .put("namespace", "collaboration").put("name", "spawn_agent")
+                    .put("arguments", "{}"))
+                .put(new JSONObject().put("type", "function_call").put("call_id", "mcp-call")
+                    .put("namespace", "mcp__mt").put("name", "mt_apk_list")
+                    .put("arguments", "{}")))
+            .put("tools", new JSONArray()
+                .put(new JSONObject().put("type", "namespace").put("name", "collaboration")
+                    .put("tools", new JSONArray().put(new JSONObject()
+                        .put("type", "function").put("name", "spawn_agent")
+                        .put("parameters", new JSONObject().put("type", "object")))))
+                .put(new JSONObject().put("type", "namespace").put("name", "mcp__mt")
+                    .put("tools", new JSONArray().put(new JSONObject()
+                        .put("type", "function").put("name", "mt_apk_list")
+                        .put("parameters", new JSONObject().put("type", "object"))))));
+        byte[] requestBytes = request.toString().getBytes(StandardCharsets.UTF_8);
+        ChatCompletionsAdapter.NamespacedTools allMappings = ChatCompletionsAdapter.namespacedTools(requestBytes);
+        ChatCompletionsAdapter.NamespacedTools mcpMappings = LocalApiProxy.mcpNamespacedTools(allMappings);
+        assertEquals(1, mcpMappings.byFlat.size());
+
+        JSONObject flattened = new JSONObject(new String(
+            LocalApiProxy.flattenNamespacedResponsesRequest(requestBytes, mcpMappings), StandardCharsets.UTF_8));
+        JSONArray tools = flattened.getJSONArray("tools");
+        assertEquals(2, tools.length());
+        assertEquals("namespace", tools.getJSONObject(0).getString("type"));
+        assertEquals("collaboration", tools.getJSONObject(0).getString("name"));
+        assertEquals("mcp__mt__mt_apk_list", tools.getJSONObject(1).getString("name"));
+        assertEquals("collaboration", flattened.getJSONArray("input").getJSONObject(0)
+            .getString("namespace"));
+        assertEquals("mcp__mt__mt_apk_list", flattened.getJSONArray("input").getJSONObject(1)
+            .getString("name"));
+        assertFalse(flattened.getJSONArray("input").getJSONObject(1).has("namespace"));
     }
 
     @Test
@@ -1025,6 +1122,15 @@ public class CodexModelPipelineTest {
         assertEquals(2L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, true));
         assertEquals(1L, CodexAppServerBridge.historyReasoningDurationSeconds(0L, 0L, true));
         assertEquals(0L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, false));
+    }
+
+    @Test
+    public void recordTimestampParserSupportsApi24CompatibleIsoForms() {
+        assertEquals(java.time.Instant.parse("2026-07-22T10:20:30.123Z").toEpochMilli(),
+            CodexAppServerBridge.parseRecordTimestampMs("2026-07-22T10:20:30.123456Z"));
+        assertEquals(java.time.Instant.parse("2026-07-22T10:20:30.000+08:00").toEpochMilli(),
+            CodexAppServerBridge.parseRecordTimestampMs("2026-07-22T10:20:30+0800"));
+        assertEquals(0L, CodexAppServerBridge.parseRecordTimestampMs("not-a-timestamp"));
     }
 
     @Test

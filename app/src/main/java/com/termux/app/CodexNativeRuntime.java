@@ -63,6 +63,11 @@ final class CodexNativeRuntime {
         return bridge != null && bridge.isRunning();
     }
 
+    /** Re-probe MCP server status on demand (called from settings page). */
+    static synchronized void refreshMcpStatus() {
+        if (bridge != null) bridge.refreshMcpStatus();
+    }
+
     static synchronized String currentThreadId() {
         return bridge == null ? null : bridge.currentVisibleThreadId();
     }

@@ -47,6 +47,7 @@ import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -159,6 +160,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
@@ -191,6 +193,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -267,6 +270,12 @@ private val LocalInteractiveScrollInProgress = staticCompositionLocalOf { false 
 private val LocalTextSelectionActivityChanged = staticCompositionLocalOf<(Boolean) -> Unit> { { } }
 private val LocalOpenSubagentDrawer = staticCompositionLocalOf<(JSONObject) -> Unit> { { } }
 private const val CHAT_HISTORY_PAGE_SIZE = 24
+
+private val NativeTurnPhase.showsProcessingPanel: Boolean
+    get() = when (this) {
+        NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING -> true
+        else -> false
+    }
 
 @Immutable
 private data class PendingSendMotion(
@@ -463,9 +472,16 @@ internal fun NativeChatScreen(
     val imeVisible = WindowInsets.isImeVisible
     val navigationBarBottomPadding = if (imeVisible) 0.dp
         else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    // The progressive material may be taller than the interactive app bar. Keep the resting
+    // conversation inset tied to Material's real bar height plus the visible status bar.
+    val topBarContentPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() +
+        TopAppBarDefaults.TopAppBarExpandedHeight
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + navigationBarBottomPadding + 8.dp
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     val showScrollToBottom by remember(listState) { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
+    val canExportConversation by remember(state.messages) {
+        derivedStateOf { state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT } }
+    }
     var showModelPicker by remember { mutableStateOf(false) }
     var showFilesSheet by remember { mutableStateOf(false) }
     var showConversationSearch by remember { mutableStateOf(false) }
@@ -698,36 +714,16 @@ internal fun NativeChatScreen(
                     AssistantBackdrop()
                 }
                 Scaffold(
-                containerColor = Color.Transparent,
-                topBar = {
-                    RikkaTopBar(
-                        title = state.conversationTitle,
-                        modelLabel = state.modelLabel,
-                        onOpenDrawer = {
-                            if (!textSelectionActive) {
-                                scope.launch {
-                                    if (!drawerState.targetOpen) drawerState.open()
-                                }
-                            }
-                        },
-                        onOpenWorkPanel = { showWorkPanel = true },
-                        onSearch = { showMessageSearch = true },
-                        onExport = { shareConversation(context, state.conversationTitle, state.messages) },
-                        canExport = state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT },
-                        onNewConversation = onNewConversation,
-                        // Sample the wallpaper and conversation chrome. Text itself stays
-                        // below the app-bar safe area so glass never competes with the title.
-                        backdrop = chatBackdrop,
-                    )
-                },
-                bottomBar = {},
-            ) { innerPadding ->
+                    containerColor = Color.Transparent,
+                    topBar = {},
+                    bottomBar = {},
+                ) { _ ->
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        // Reading content owns a stable safe area. Wallpaper may continue behind
-                        // the app bar, but message text never competes with its title and actions.
-                        .padding(top = innerPadding.calculateTopPadding())
+                        // Keep the capture layer full-height. A permanent layout offset here clips
+                        // the conversation below the app bar, so the glass can only ever sample the
+                        // wallpaper. Scrollable content owns the top inset instead (see below).
                         .onGloballyPositioned { sendMotionRootBounds = it.boundsInWindow() },
                 ) {
                     Box(
@@ -744,19 +740,26 @@ internal fun NativeChatScreen(
                         },
                     ) {
                     if (state.historyLoading && state.messages.isEmpty() && state.currentThreadId.isNotBlank()) {
-                        ConversationHistoryLoading(state.conversationTitle)
+                        Box(Modifier.fillMaxSize().padding(top = topBarContentPadding)) {
+                            ConversationHistoryLoading(state.conversationTitle)
+                        }
                     } else if (state.messages.isEmpty()) {
                         RikkaEmptyState(
                             status = state.connectionLabel,
                             ready = state.ready,
                             onSuggestion = onInputChange,
-                            modifier = Modifier.padding(bottom = inputBottomPadding),
+                            modifier = Modifier.padding(
+                                top = topBarContentPadding,
+                                bottom = inputBottomPadding,
+                            ),
                         )
                     } else {
                         // Do not cache by list size: streamed deltas replace the current
                         // message without changing size. A size-keyed snapshot permanently
                         // retained the first tiny delta and its streaming=true flag.
-                        val visibleMessages = state.messages.takeLast(historyLimit)
+                        val visibleMessages by remember(conversationListKey, historyLimit) {
+                            derivedStateOf { state.messages.takeLast(historyLimit) }
+                        }
                         val hiddenMessageCount = state.messages.size - visibleMessages.size
                         LaunchedEffect(conversationListKey, hiddenMessageCount) {
                             if (hiddenMessageCount <= 0) return@LaunchedEffect
@@ -772,13 +775,16 @@ internal fun NativeChatScreen(
                         // Assistant content changes on every stream batch, but retry targets only
                         // depend on message identity/role and user prompts. Keep a cheap structural
                         // fingerprint so a growing answer does not rebuild this map dozens of times/s.
-                        var retryStructureKey = 1
-                        visibleMessages.forEach { message ->
-                            retryStructureKey = 31 * retryStructureKey + message.id.hashCode()
-                            retryStructureKey = 31 * retryStructureKey + message.role.hashCode()
-                            if (message.role == NativeChatRole.USER) {
-                                retryStructureKey = 31 * retryStructureKey + message.content.hashCode()
+                        val retryStructureKey = remember(visibleMessages) {
+                            var fingerprint = 1
+                            visibleMessages.forEach { message ->
+                                fingerprint = 31 * fingerprint + message.id.hashCode()
+                                fingerprint = 31 * fingerprint + message.role.hashCode()
+                                if (message.role == NativeChatRole.USER) {
+                                    fingerprint = 31 * fingerprint + message.content.hashCode()
+                                }
                             }
+                            fingerprint
                         }
                         val retryPrompts = remember(retryStructureKey, state.conversationAnimationKey) {
                             buildMap<String, String> {
@@ -804,7 +810,9 @@ internal fun NativeChatScreen(
                             contentPadding = PaddingValues(
                                 start = 16.dp,
                                 end = 16.dp,
-                                top = 16.dp,
+                                // Content begins below the app bar, but this padding scrolls away.
+                                // Messages can therefore enter the bar's backdrop capture and blur.
+                                top = topBarContentPadding + 16.dp,
                                 bottom = inputBottomPadding,
                             ),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -896,7 +904,7 @@ internal fun NativeChatScreen(
                                     )
                                 }
                             }
-                            if (state.phase in setOf(NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING) && liveAssistantId == null) {
+                            if (state.phase.showsProcessingPanel && liveAssistantId == null) {
                                 item("processing") { ActiveProcessingPanel(state, false, loadSubagentHistory, noOp) }
                             }
                             // A temporary runway lets streamed lines grow upward instead of
@@ -1041,6 +1049,29 @@ internal fun NativeChatScreen(
                     }
                 }
             }
+                // Keep the progressive material in the same full-screen stacking context as the
+                // captured conversation. Scaffold's dedicated top-bar layer clips or occludes the
+                // portion below the interactive bar, which prevents a 128dp AlphaMask tail.
+                RikkaTopBar(
+                    title = state.conversationTitle,
+                    modelLabel = state.modelLabel,
+                    onOpenDrawer = {
+                        if (!textSelectionActive) {
+                            scope.launch {
+                                if (!drawerState.targetOpen) drawerState.open()
+                            }
+                        }
+                    },
+                    onOpenWorkPanel = { showWorkPanel = true },
+                    onSearch = { showMessageSearch = true },
+                    onExport = { shareConversation(context, state.conversationTitle, state.messages) },
+                    canExport = canExportConversation,
+                    onNewConversation = onNewConversation,
+                    // Sample both the wallpaper and scrolling conversation; title/actions remain
+                    // separate and crisp above the material layer.
+                    backdrop = chatBackdrop,
+                    modifier = Modifier.align(Alignment.TopCenter).zIndex(2f),
+                )
             }
         }
     }
@@ -1966,23 +1997,28 @@ private fun RikkaTopBar(
     canExport: Boolean,
     onNewConversation: () -> Unit,
     backdrop: Backdrop? = null,
+    modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
     val context = LocalContext.current
     val appearanceRevision = LocalFcodeAppearanceRevision.current
     val config = remember(appearanceRevision, context) { readTopBarLiquidGlassConfig(context) }
-    val useProgressiveGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
-        config.enabled && liquidGlassSupported && backdrop != null
+    // The top-bar mask is an independent chat material, not the global component style.
+    // Developer options therefore behave the same in Material and Liquid Glass themes.
+    val useProgressiveGlass = config.enabled && liquidGlassSupported && backdrop != null
     val isLight = rememberIsLightTheme()
     val tint = if (isLight) Color.White else Color.Black
     val surfaceColor = MaterialTheme.colorScheme.surface
     var menuExpanded by remember { mutableStateOf(false) }
-    val glassModifier = if (useProgressiveGlass) {
+    val glassMaterialModifier = if (useProgressiveGlass) {
         Modifier.drawPlainBackdrop(
             backdrop = backdrop,
             shape = { RectangleShape },
             effects = { applyTopBarProgressiveGlass(config, tint) },
         )
+    } else Modifier
+    val topBarModifier = if (useProgressiveGlass) {
+        Modifier
     } else {
         Modifier.background(
             Brush.verticalGradient(
@@ -1994,72 +2030,95 @@ private fun RikkaTopBar(
             ),
         )
     }
-    TopAppBar(
-        modifier = Modifier.then(glassModifier).statusBarsPadding(),
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = if (useProgressiveGlass) {
-                surfaceColor.copy(alpha = if (isLight) 0.58f else 0.52f)
-            } else Color.Transparent,
-        ),
-        navigationIcon = {
-            IconButton(onClick = onOpenDrawer) {
-                Icon(HugeIcons.Menu03, contentDescription = nativeText(language, "对话列表", "Conversations"))
-            }
-        },
-        title = {
-            Column {
-                AnimatedContent(
-                    targetState = title,
-                    transitionSpec = {
-                        (fadeIn(tween(140, easing = LinearOutSlowInEasing)) +
-                            slideInHorizontally(tween(180, easing = FastOutSlowInEasing)) { it / 12 })
-                            .togetherWith(
-                                fadeOut(tween(90, easing = LinearEasing)) +
-                                    slideOutHorizontally(tween(120, easing = FastOutSlowInEasing)) { -it / 14 },
+    Layout(
+        modifier = modifier.fillMaxWidth(),
+        content = {
+            // The material owns a real 128dp-style sampling surface. This composable is placed
+            // as a full-screen overlay, while conversation content keeps the bar-sized safe inset.
+            Box(Modifier.then(glassMaterialModifier))
+            TopAppBar(
+                modifier = Modifier.then(topBarModifier).statusBarsPadding(),
+                // The separate material layer owns the progressive glass. Keeping this
+                // container transparent prevents it from flattening the alpha fade.
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent,
+                ),
+                navigationIcon = {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(HugeIcons.Menu03, contentDescription = nativeText(language, "对话列表", "Conversations"))
+                    }
+                },
+                title = {
+                    Column {
+                        AnimatedContent(
+                            targetState = title,
+                            transitionSpec = {
+                                (fadeIn(tween(140, easing = LinearOutSlowInEasing)) +
+                                    slideInHorizontally(tween(180, easing = FastOutSlowInEasing)) { it / 12 })
+                                    .togetherWith(
+                                        fadeOut(tween(90, easing = LinearEasing)) +
+                                            slideOutHorizontally(tween(120, easing = FastOutSlowInEasing)) { -it / 14 },
+                                    )
+                            },
+                            label = "conversationTitleTransition",
+                        ) { value ->
+                            Text(value, maxLines = 1, style = MaterialTheme.typography.bodyMedium, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (LocalShowModelSubtitle.current) Text(
+                            text = modelLabel.ifBlank { nativeText(language, "默认模型", "Default model") },
+                            maxLines = 1,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.labelSmall,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onNewConversation) {
+                        Icon(HugeIcons.MessageAdd01, contentDescription = nativeText(language, "新对话", "New conversation"))
+                    }
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(HugeIcons.MoreVertical, contentDescription = nativeText(language, "更多操作", "More actions"))
+                        }
+                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text(nativeText(language, "搜索当前对话", "Search this conversation")) },
+                                leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
+                                onClick = { menuExpanded = false; onSearch() },
                             )
-                    },
-                    label = "conversationTitleTransition",
-                ) { value ->
-                    Text(value, maxLines = 1, style = MaterialTheme.typography.bodyMedium, overflow = TextOverflow.Ellipsis)
-                }
-                if (LocalShowModelSubtitle.current) Text(
-                    text = modelLabel.ifBlank { nativeText(language, "默认模型", "Default model") },
-                    maxLines = 1,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
-                    style = MaterialTheme.typography.labelSmall,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+                            DropdownMenuItem(
+                                text = { Text(nativeText(language, "工作面板", "Work panel")) },
+                                leadingIcon = { Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(18.dp)) },
+                                onClick = { menuExpanded = false; onOpenWorkPanel() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(nativeText(language, "导出对话", "Export conversation")) },
+                                leadingIcon = { Icon(HugeIcons.Share08, null, Modifier.size(18.dp)) },
+                                enabled = canExport,
+                                onClick = { menuExpanded = false; onExport() },
+                            )
+                        }
+                    }
+                },
+            )
         },
-        actions = {
-            IconButton(onClick = onNewConversation) {
-                Icon(HugeIcons.MessageAdd01, contentDescription = nativeText(language, "新对话", "New conversation"))
-            }
-            Box {
-                IconButton(onClick = { menuExpanded = true }) {
-                    Icon(HugeIcons.MoreVertical, contentDescription = nativeText(language, "更多操作", "More actions"))
-                }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text(nativeText(language, "搜索当前对话", "Search this conversation")) },
-                        leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
-                        onClick = { menuExpanded = false; onSearch() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(nativeText(language, "工作面板", "Work panel")) },
-                        leadingIcon = { Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(18.dp)) },
-                        onClick = { menuExpanded = false; onOpenWorkPanel() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(nativeText(language, "导出对话", "Export conversation")) },
-                        leadingIcon = { Icon(HugeIcons.Share08, null, Modifier.size(18.dp)) },
-                        enabled = canExport,
-                        onClick = { menuExpanded = false; onExport() },
-                    )
-                }
-            }
-        },
-    )
+    ) { measurables, constraints ->
+        val topBarPlaceable = measurables[1].measure(constraints)
+        val materialHeightPx = if (useProgressiveGlass) {
+            config.maskHeightDp.dp.roundToPx().coerceAtLeast(topBarPlaceable.height)
+        } else 0
+        val materialPlaceable = measurables[0].measure(
+            Constraints.fixed(topBarPlaceable.width, materialHeightPx),
+        )
+        layout(topBarPlaceable.width, maxOf(topBarPlaceable.height, materialHeightPx)) {
+            // The material is measured at its real height so the Backdrop layer is not clipped.
+            // Placing it first keeps title and actions crisp above the progressive glass.
+            materialPlaceable.placeRelative(0, 0)
+            topBarPlaceable.placeRelative(0, 0)
+        }
+    }
 }
 
 @Composable
@@ -2089,62 +2148,59 @@ private fun RikkaEmptyState(
         modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 20.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth().widthIn(max = 460.dp),
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            border = BorderStroke(0.7.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f)),
-            tonalElevation = 1.dp,
+        // Keep the empty route as content over the chat backdrop, not as a second
+        // opaque card that hides the wallpaper and makes the page feel modal.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 460.dp)
+                .padding(horizontal = 22.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            Surface(
+                modifier = Modifier.size(56.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
             ) {
-                Surface(
-                    modifier = Modifier.size(56.dp),
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            HugeIcons.Sparkles,
-                            contentDescription = null,
-                            modifier = Modifier.size(27.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        HugeIcons.Sparkles,
+                        contentDescription = null,
+                        modifier = Modifier.size(27.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
                 }
-                Text(
-                    nativeText(language, "今天想做什么？", "What would you like to build?"),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Center,
-                )
-                if (status.isNotBlank()) Text(
-                    status,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    suggestions.forEach { (label, prompt) ->
-                        Surface(
-                            modifier = Modifier.clickable(enabled = ready) { onSuggestion(prompt) },
-                            shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
-                        ) {
-                            Text(
-                                label,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                                style = MaterialTheme.typography.labelLarge,
-                            )
-                        }
+            }
+            Text(
+                nativeText(language, "今天想做什么？", "What would you like to build?"),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+            )
+            if (status.isNotBlank()) Text(
+                status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                suggestions.forEach { (label, prompt) ->
+                    Surface(
+                        modifier = Modifier.clickable(enabled = ready) { onSuggestion(prompt) },
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                    ) {
+                        Text(
+                            label,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                        )
                     }
                 }
             }
@@ -2286,9 +2342,12 @@ private fun RikkaMessageItem(
             val historicalFileChanges = remember(message.id, chatState.conversationAnimationKey, chatState.messages.size) {
                 associatedFileChangeItems(chatState.messages, message.id)
             }
-            val liveFileChanges = liveState?.toolDetails?.mapNotNull { raw ->
-                runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }
-            }.orEmpty()
+            // Tool payloads change far less often than the streamed answer. Snapshot the
+            // state list so token batches do not parse every completed tool JSON again.
+            val liveToolDetails = liveState?.toolDetails?.toList().orEmpty()
+            val liveFileChanges = remember(liveToolDetails) {
+                parseToolDetails(liveToolDetails).fileChanges
+            }
             RikkaAssistantMessage(
                 message.id,
                 message.content,
@@ -2348,6 +2407,9 @@ private fun RikkaUserMessage(
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 attachments.forEach { attachment ->
+                    val sizeLabel = remember(attachment.path) {
+                        formatFileSize(java.io.File(attachment.path).length())
+                    }
                     Surface(
                         modifier = Modifier.widthIn(max = 250.dp).clickable { onPreviewAttachment(attachment) },
                         shape = RoundedCornerShape(16.dp),
@@ -2364,7 +2426,7 @@ private fun RikkaUserMessage(
                             Spacer(Modifier.width(9.dp))
                             Column(Modifier.weight(1f, fill = false)) {
                                 Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                                Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(sizeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -2650,8 +2712,6 @@ private fun RikkaAssistantMessage(
     val hasVisibleContent = (liveSnapshot?.sourceChars ?: text.length) > 0
     val actionText = assistantActionText ?: text
     val clipboard = LocalClipboardManager.current
-    val customWallpaper = LocalFcodeChatBackground.current == FcodeChatBackgroundStyle.CUSTOM
-    val isLightTheme = rememberIsLightTheme()
     var menuExpanded by remember { mutableStateOf(false) }
     val markLiveSnapshotPresented: (Int) -> Unit = remember(messageId, liveState) {
         { chars: Int ->
@@ -2659,25 +2719,12 @@ private fun RikkaAssistantMessage(
         }
     }
     Box(modifier = Modifier.fillMaxWidth()) {
-        Surface(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 760.dp)
                 .combinedClickable(onClick = {}, onLongClick = { if (showChrome) menuExpanded = true }),
-            shape = if (customWallpaper) RoundedCornerShape(20.dp) else RectangleShape,
-            color = if (customWallpaper) {
-                MaterialTheme.colorScheme.surface.copy(alpha = if (isLightTheme) 0.94f else 0.90f)
-            } else Color.Transparent,
-            border = if (customWallpaper) {
-                BorderStroke(0.7.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f))
-            } else null,
-            tonalElevation = if (customWallpaper) 1.dp else 0.dp,
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(if (customWallpaper) Modifier.padding(horizontal = 14.dp, vertical = 12.dp) else Modifier),
-            ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     if (liveState != null) {
                         ActiveProcessingPanel(liveState, hasVisibleContent, onLoadSubagentHistory, onReasoningAutoCollapse)
@@ -2723,7 +2770,6 @@ private fun RikkaAssistantMessage(
                 if (!streaming && fileChangeItems.isNotEmpty()) {
                     FileDiffCard(fileChangeItems, projectPath)
                 }
-            }
         }
         DropdownMenu(expanded = showChrome && menuExpanded, onDismissRequest = { menuExpanded = false }) {
             DropdownMenuItem(
@@ -2752,75 +2798,6 @@ private fun RikkaAssistantMessage(
             )
         }
     }
-}
-
-private data class ChangedFileEntry(val path: String, val operation: String)
-
-private fun associatedFileChangeItems(messages: List<NativeChatMessage>, assistantId: String): List<JSONObject> {
-    val assistantIndex = messages.indexOfFirst { it.id == assistantId }
-    if (assistantIndex <= 0) return emptyList()
-    val result = mutableListOf<JSONObject>()
-    var index = assistantIndex - 1
-    while (index >= 0 && messages[index].role == NativeChatRole.ACTIVITY) {
-        val content = messages[index].content
-        if (content.startsWith("PROCESS2|")) {
-            val payload = runCatching {
-                JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
-            }.getOrNull()
-            val tools = payload?.optJSONArray("tools")
-            if (tools != null) for (toolIndex in 0 until tools.length()) {
-                val item = tools.optJSONObject(toolIndex)
-                    ?: runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()
-                    ?: continue
-                if (item.optString("type") == "fileChange") result.add(item)
-            }
-        }
-        index--
-    }
-    return result
-}
-
-private fun collectAllFileChangeItems(state: NativeChatState): List<JSONObject> {
-    val result = mutableListOf<JSONObject>()
-    state.messages.forEach { message ->
-        if (message.role != NativeChatRole.ACTIVITY || !message.content.startsWith("PROCESS2|")) return@forEach
-        val payload = runCatching {
-            JSONObject(String(Base64.decode(message.content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
-        }.getOrNull() ?: return@forEach
-        val tools = payload.optJSONArray("tools") ?: return@forEach
-        for (index in 0 until tools.length()) {
-            val item = tools.optJSONObject(index) ?: runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
-            if (item.optString("type") == "fileChange") result.add(item)
-        }
-    }
-    state.toolDetails.forEach { raw ->
-        runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }?.let(result::add)
-    }
-    return result.distinctBy { it.optString("id", it.optString("itemId", it.toString())) }
-}
-
-private fun extractChangedFiles(items: List<JSONObject>): List<ChangedFileEntry> {
-    val entries = linkedMapOf<String, ChangedFileEntry>()
-    fun add(pathValue: String, operation: String) {
-        val path = pathValue.trim().trim('"', '\'', '`').removePrefix("a/").removePrefix("b/")
-        if (path.isBlank() || path == "/dev/null") return
-        entries[path] = ChangedFileEntry(path, operation)
-    }
-    items.forEach { item ->
-        val detail = item.optString("changes").ifBlank { item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) }
-        listOf("path", "filePath", "file", "name").forEach { key -> item.optString(key).takeIf(String::isNotBlank)?.let { add(it, "edit") } }
-        val changes = item.optJSONArray("changes")
-        if (changes != null) for (index in 0 until changes.length()) {
-            val change = changes.optJSONObject(index) ?: continue
-            val path = listOf("path", "filePath", "file", "name").firstNotNullOfOrNull { key -> change.optString(key).takeIf(String::isNotBlank) }
-            if (path != null) add(path, change.optString("type", "edit").lowercase())
-        }
-        Regex("(?m)^\\*\\*\\*\\s+(Update|Add|Delete) File:\\s*(.+)$", RegexOption.IGNORE_CASE).findAll(detail).forEach { match ->
-            add(match.groupValues[2], match.groupValues[1].lowercase())
-        }
-        Regex("(?m)^(?:\\+\\+\\+|---)\\s+(?:[ab]/)?(.+)$").findAll(detail).forEach { match -> add(match.groupValues[1], "edit") }
-    }
-    return entries.values.toList()
 }
 
 @Composable
@@ -3213,28 +3190,16 @@ private fun ProcessingPanel(
     val liveCommand = remember(state.liveCommandJson) {
         state.liveCommandJson.takeIf(String::isNotBlank)?.let { runCatching { JSONObject(it) }.getOrNull() }
     }
-    val toolDetailCount = state.toolDetails.size
-    val latestToolDetail = state.toolDetails.lastOrNull()
-    val completedCommands = remember(toolDetailCount, latestToolDetail) {
-        state.toolDetails.mapNotNull { raw ->
-            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "commandExecution" }
-        }
-    }
-    val completedFileChanges = remember(toolDetailCount, latestToolDetail) {
-        state.toolDetails.mapNotNull { raw ->
-            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "fileChange" }
-        }
-    }
-    val imageItems = remember(toolDetailCount, latestToolDetail) {
-        state.toolDetails.mapNotNull { raw ->
-            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { isImageToolItem(it.optString("type")) }
-        }
-    }
+    val toolDetailsSnapshot = state.toolDetails.toList()
+    val parsedToolDetails = remember(toolDetailsSnapshot) { parseToolDetails(toolDetailsSnapshot) }
+    val completedCommands = parsedToolDetails.commands
+    val completedFileChanges = parsedToolDetails.fileChanges
+    val imageItems = parsedToolDetails.images
     val commandRunning = liveCommand != null
     val reasoningSeconds = if (state.reasoningCompletedAt > state.turnStartedAt) {
         (state.reasoningCompletedAt - state.turnStartedAt).coerceAtLeast(0L) / 1000L
     } else elapsedSeconds
-    val activityRunning = state.phase in setOf(NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING)
+    val activityRunning = state.phase.showsProcessingPanel
     val fallbackTitle = when {
         state.phase == NativeTurnPhase.FAILED -> nativeText(language, "\u751f\u6210\u5931\u8d25", "Generation failed")
         state.phase == NativeTurnPhase.WAITING && elapsedSeconds >= 12L -> nativeText(language, "\u7b49\u5f85\u6a21\u578b ${elapsedSeconds}s", "Waiting for model ${elapsedSeconds}s")
@@ -3259,15 +3224,17 @@ private fun ProcessingPanel(
         if (liveCommand != null) CommandExecutionCard(liveCommand, running = true, liveOutput = state.commandText, compact = true)
         if (completedFileChanges.isNotEmpty()) FileDiffCard(completedFileChanges, state.projectPath)
         if (imageItems.isNotEmpty()) ImageGroupCard(imageItems)
-        if (state.liveSubagents.isNotEmpty()) {
+        val liveSubagentSnapshot = state.liveSubagents.toList()
+        val liveSubagents = remember(liveSubagentSnapshot) {
+            liveSubagentSnapshot.mapNotNull { raw -> runCatching { JSONObject(raw) }.getOrNull() }
+        }
+        if (liveSubagents.isNotEmpty()) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                state.liveSubagents.forEach { raw ->
-                    runCatching { JSONObject(raw) }.getOrNull()?.let { item ->
-                        CollabAgentCapsule(item = item, state = state, onLoadHistory = onLoadSubagentHistory)
-                    }
+                liveSubagents.forEach { item ->
+                    CollabAgentCapsule(item = item, state = state, onLoadHistory = onLoadSubagentHistory)
                 }
             }
         }
@@ -3400,12 +3367,9 @@ private fun LegacyProcessingPanel(
     }
     // Snapshot list equality keeps expensive JSON parsing isolated from reasoning/answer
     // revisions. Tool details change rarely; stream deltas can update dozens of times a second.
-    val toolDetailCount = state.toolDetails.size
-    val latestToolDetail = state.toolDetails.lastOrNull()
-    val completedCommands = remember(toolDetailCount, latestToolDetail) {
-        state.toolDetails.mapNotNull { raw ->
-            runCatching { JSONObject(raw) }.getOrNull()?.takeIf { it.optString("type") == "commandExecution" }
-        }
+    val toolDetailsSnapshot = state.toolDetails.toList()
+    val completedCommands = remember(toolDetailsSnapshot) {
+        parseToolDetails(toolDetailsSnapshot).commands
     }
     val commandCount = completedCommands.size + if (liveCommand != null) 1 else 0
     val commandRunning = liveCommand != null
@@ -3443,7 +3407,7 @@ private fun LegacyProcessingPanel(
         state.phase == NativeTurnPhase.ANSWERING || state.phase == NativeTurnPhase.COMPLETED || state.reasoningComplete -> nativeText(language, "\u601d\u8003\u4e86 ${reasoningSeconds}s", "Thought for ${reasoningSeconds}s")
         else -> nativeText(language, "\u5904\u7406\u4e2d ${elapsedSeconds}s", "Processing ${elapsedSeconds}s")
     }
-    val activityRunning = state.phase in setOf(NativeTurnPhase.WAITING, NativeTurnPhase.REASONING, NativeTurnPhase.TOOL_RUNNING) &&
+    val activityRunning = state.phase.showsProcessingPanel &&
         !(state.phase == NativeTurnPhase.TOOL_RUNNING && !commandRunning && completedCommands.isNotEmpty())
     val arrowRotation by animateFloatAsState(
         if (expanded) 180f else 0f,
@@ -3545,21 +3509,22 @@ private fun ProcessingPanelBody(
             liveOutput = state.commandText,
         )
     }
-    if (state.liveSubagents.isNotEmpty()) {
+    val liveSubagentSnapshot = state.liveSubagents.toList()
+    val liveSubagents = remember(liveSubagentSnapshot) {
+        liveSubagentSnapshot.mapNotNull { raw -> runCatching { JSONObject(raw) }.getOrNull() }
+    }
+    if (liveSubagents.isNotEmpty()) {
         FlowRow(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            state.liveSubagents.forEach { raw ->
-                runCatching { JSONObject(raw) }.getOrNull()?.let { item ->
-                    val thread = subagentThreadId(item)
-                    CollabAgentCapsule(
-                        item = item,
-                        state = state,
-                        onLoadHistory = onLoadSubagentHistory,
-                    )
-                }
+            liveSubagents.forEach { item ->
+                CollabAgentCapsule(
+                    item = item,
+                    state = state,
+                    onLoadHistory = onLoadSubagentHistory,
+                )
             }
         }
     }
@@ -4283,9 +4248,11 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         }
         return
     }
-    val payload = if (text.startsWith("PROCESS2|")) runCatching {
-        JSONObject(String(Base64.decode(text.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
-    }.getOrNull() else null
+    val payload = remember(text) {
+        if (text.startsWith("PROCESS2|")) runCatching {
+            JSONObject(String(Base64.decode(text.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+        }.getOrNull() else null
+    }
     if (payload != null) {
         HistoricalProcessCapsules(payload, state, onLoadSubagentHistory)
         return
@@ -4450,28 +4417,6 @@ private fun HistoricalProcessCapsules(
     }
 }
 
-private fun jsonText(item: JSONObject, vararg keys: String): String {
-    keys.forEach { key ->
-        if (item.has(key) && !item.isNull(key)) {
-            val value = item.optString(key, "").trim()
-            if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
-        }
-    }
-    return ""
-}
-
-private fun subagentThreadId(item: JSONObject): String {
-    jsonText(item, "agentThreadId").takeIf { it.isNotBlank() }?.let { return it }
-    val receivers = item.optJSONArray("receiverThreadIds") ?: return ""
-    for (index in 0 until receivers.length()) {
-        if (!receivers.isNull(index)) {
-            val value = receivers.optString(index, "").trim()
-            if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
-        }
-    }
-    return ""
-}
-
 @Composable
 private fun CollabAgentCapsule(
     item: JSONObject,
@@ -4515,7 +4460,12 @@ private fun SubagentDrawer(
     onDismiss: () -> Unit,
 ) {
     val initialId = subagentKey(item)
-    val agents = remember(state.liveSubagents.toList(), item.toString()) { collectSubagentItems(state, item) }
+    val messageSnapshot = state.messages.toList()
+    val liveSubagentSnapshot = state.liveSubagents.toList()
+    val itemSnapshot = item.toString()
+    val agents = remember(messageSnapshot, liveSubagentSnapshot, itemSnapshot) {
+        collectSubagentItems(messageSnapshot, liveSubagentSnapshot, item)
+    }
     var selectedId by remember(initialId) { mutableStateOf<String?>(initialId) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -4566,42 +4516,6 @@ private fun SubagentDrawer(
     }
 }
 
-private fun subagentKey(item: JSONObject): String = subagentThreadId(item).ifBlank {
-    jsonText(item, "id", "callId", "tool").ifBlank { item.toString().hashCode().toString() }
-}
-
-private fun subagentAliases(item: JSONObject): Set<String> = buildSet {
-    subagentThreadId(item).takeIf { it.isNotBlank() }?.let(::add)
-    listOf("id", "callId", "eventId").forEach { key -> jsonText(item, key).takeIf { it.isNotBlank() }?.let(::add) }
-}
-
-private fun mergeSubagentItems(existing: JSONObject, incoming: JSONObject): JSONObject {
-    val merged = runCatching { JSONObject(existing.toString()) }.getOrElse { JSONObject() }
-    incoming.keys().forEach { key ->
-        val value = incoming.opt(key)
-        if (value != null && value != JSONObject.NULL && (!(value is String) || value.isNotBlank())) merged.put(key, value)
-    }
-    return merged
-}
-
-private fun subagentName(item: JSONObject): String {
-    val id = subagentThreadId(item)
-    val fallback = if (id.isNotBlank()) "\u5b50\u4ee3\u7406 ${id.take(6)}" else "\u5b50\u4ee3\u7406"
-    val explicit = jsonText(item, "agentName", "agentNickname", "nickname", "agent")
-    if (explicit.isNotBlank() && !explicit.equals("subAgentActivity", true)) return explicit.substringAfterLast('/')
-    val pathName = jsonText(item, "agentPath").substringAfterLast('/').trim()
-    return pathName.ifBlank { fallback }
-}
-
-private fun normalizedSubagentStatus(value: String): String = when (value.trim().lowercase()) {
-    "inprogress", "in_progress", "running", "started", "working" -> "working"
-    "waiting", "pending", "queued" -> "waiting"
-    "failed", "error" -> "failed"
-    "cancelled", "canceled", "stopped", "interrupted" -> "stopped"
-    "done", "complete", "completed", "success" -> "done"
-    else -> "waiting"
-}
-
 private fun resolvedSubagentStatus(state: NativeChatState, item: JSONObject): String {
     val thread = subagentThreadId(item)
     return state.subagentStatuses[thread]?.let(::normalizedSubagentStatus)
@@ -4614,44 +4528,6 @@ private fun subagentStatusLabel(status: String, language: String): String = when
     "failed" -> nativeText(language, "\u5931\u8d25", "Failed")
     "stopped" -> nativeText(language, "\u5df2\u505c\u6b62", "Stopped")
     else -> nativeText(language, "\u5b8c\u6210", "Completed")
-}
-
-private fun isSubagentItem(item: JSONObject): Boolean = item.optString("type") in setOf("collabAgentToolCall", "subAgentActivity")
-
-private fun isSubagentCandidate(item: JSONObject): Boolean {
-    if (!isSubagentItem(item)) return false
-    if (subagentThreadId(item).isNotBlank()) return true
-    val tool = jsonText(item, "tool", "name").lowercase()
-    return tool.contains("spawn")
-}
-
-private fun collectAllSubagentItems(state: NativeChatState): List<JSONObject> {
-    val result = ArrayList<JSONObject>()
-    fun add(value: JSONObject) {
-        if (!isSubagentCandidate(value)) return
-        val aliases = subagentAliases(value)
-        val index = result.indexOfFirst { existing -> subagentAliases(existing).any(aliases::contains) }
-        if (index >= 0) result[index] = mergeSubagentItems(result[index], value) else result.add(value)
-    }
-    state.messages.forEach { message ->
-        if (message.role != NativeChatRole.ACTIVITY || !message.content.startsWith("PROCESS2|")) return@forEach
-        runCatching {
-            val payload = JSONObject(String(Base64.decode(message.content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
-            val tools = payload.optJSONArray("tools") ?: return@runCatching
-            for (index in 0 until tools.length()) tools.optJSONObject(index)?.let(::add)
-        }
-    }
-    state.liveSubagents.forEach { raw -> runCatching { add(JSONObject(raw)) } }
-    return result.filter { subagentThreadId(it).isNotBlank() }
-}
-
-private fun collectSubagentItems(state: NativeChatState, current: JSONObject): List<JSONObject> {
-    val result = collectAllSubagentItems(state).toMutableList()
-    val aliases = subagentAliases(current)
-    val index = result.indexOfFirst { existing -> subagentAliases(existing).any(aliases::contains) }
-    if (index >= 0) result[index] = mergeSubagentItems(result[index], current)
-    else if (subagentThreadId(current).isNotBlank()) result.add(current)
-    return result
 }
 
 @Composable
@@ -4677,17 +4553,27 @@ private fun WorkPanelDialog(
     var visible by remember { mutableStateOf(true) }
     var tab by remember { mutableStateOf("plan") }
     var selectedAgentId by remember { mutableStateOf<String?>(null) }
-    val agents = remember(state.revision, state.messages.size, state.liveSubagents.size) { collectAllSubagentItems(state) }
-    val changes = remember(state.revision, state.messages.size, state.toolDetails.size) { collectAllFileChangeItems(state) }
-    val modelChangedFiles = remember(changes.map { it.toString() }) { extractChangedFiles(changes) }
+    // SnapshotStateList.toList() reuses its immutable backing list until content changes.
+    // These indexes must not follow the global stream revision: answer token batches do not
+    // change process history and should never decode the whole conversation again.
+    val messageSnapshot = state.messages.toList()
+    val liveSubagentSnapshot = state.liveSubagents.toList()
+    val toolDetailsSnapshot = state.toolDetails.toList()
+    val agents = remember(messageSnapshot, liveSubagentSnapshot) {
+        collectAllSubagentItems(messageSnapshot, liveSubagentSnapshot)
+    }
+    val changes = remember(messageSnapshot, toolDetailsSnapshot) {
+        collectAllFileChangeItems(messageSnapshot, toolDetailsSnapshot)
+    }
+    val modelChangedFiles = remember(changes) { extractChangedFiles(changes) }
     val gitEntries = remember(state.gitSnapshot) { parseGitEntries(state.gitSnapshot) }
     val changedFiles = remember(modelChangedFiles, state.gitSnapshot) { mergeChangedFiles(modelChangedFiles, gitEntries) }
-    val checkpoints = remember(state.revision, state.messages.size, state.phase) { NativeCheckpointModel.build(state.messages, state.phase) }
+    val checkpoints = remember(messageSnapshot, state.phase) { NativeCheckpointModel.build(messageSnapshot, state.phase) }
     val agentThreads = remember(agents) { agents.map(::subagentThreadId).filter { it.isNotBlank() } }
     val close: () -> Unit = { entered = false }
     LaunchedEffect(tab, agentThreads) {
         if (tab == "agents") agentThreads.forEach(onLoadSubagentHistory)
-        if (tab in setOf("changes", "git") && !state.gitBusy) onGitAction("refresh", "")
+        if ((tab == "changes" || tab == "git") && !state.gitBusy) onGitAction("refresh", "")
         if (tab == "snapshots") onSnapshotAction("refresh", "")
         if (tab == "worktrees") onWorktreeAction("refresh", "")
     }
@@ -5926,9 +5812,11 @@ private fun SubagentConversationMessage(message: JSONObject, agentName: String) 
 
 @Composable
 private fun SubagentActivityView(content: String) {
-    val payload = if (content.startsWith("PROCESS2|")) runCatching {
-        JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
-    }.getOrNull() else null
+    val payload = remember(content) {
+        if (content.startsWith("PROCESS2|")) runCatching {
+            JSONObject(String(Base64.decode(content.substringAfter('|'), Base64.DEFAULT), Charsets.UTF_8))
+        }.getOrNull() else null
+    }
     if (payload == null) return
     val duration = payload.optLong("duration", 0L)
     val reasoning = payload.optString("reasoning")
@@ -6724,6 +6612,7 @@ private fun ImageGroupCard(items: List<JSONObject>) {
                         path,
                         (if (single) Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 240.dp) else Modifier.size(88.dp))
                             .clip(RoundedCornerShape(11.dp)).clickable { previewPath = path },
+                        maxEdge = if (single) 960 else 320,
                     )
                 }
             }
@@ -6748,8 +6637,6 @@ private fun ImageGroupCard(items: List<JSONObject>) {
         )
     }
 }
-
-private fun isImageToolItem(type: String): Boolean = type in setOf("imageView", "view_image", "image")
 
 @Composable
 private fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
@@ -7173,10 +7060,15 @@ private fun RikkaChatInput(
     val composerScaleY = 0.988f + 0.012f * boundedKeyboardMorph
     val restingCornerRadius = glassConfig.spec.cornerRadiusDp.dp
     val cornerRadius = restingCornerRadius + (30.dp - restingCornerRadius) * boundedCompactProgress
-    // Always drive the bottom corner from the animated keyboard morph so the corners
-    // smoothly round back when the IME dismisses. A boolean imeVisible switch could
-    // strand square corners for frames while the spring settles.
-    val bottomCorner = cornerRadius * (1f - boundedKeyboardMorph)
+    // Treat IME docking and compacting as one continuous shape transition. Once the compact
+    // morph starts, the square keyboard corners must round away with the pill instead of
+    // lingering as translucent rectangles underneath it.
+    val keyboardDockProgress = if (imeVisible) {
+        1f
+    } else {
+        boundedKeyboardMorph * (1f - boundedCompactProgress)
+    }
+    val bottomCorner = cornerRadius * (1f - keyboardDockProgress)
     val bottomPadding = if (imeVisible) 0.dp else 10.dp
     val keyboardOverlap = 3.dp * boundedKeyboardMorph
     val inputBorderColor = androidx.compose.ui.graphics.lerp(
@@ -7189,7 +7081,10 @@ private fun RikkaChatInput(
     // on the outside AND an imePadding() here, which doubled the offset on devices that keep
     // reporting a navigation-bar inset while the IME is up, leaving a gap under the composer.
     val insetModifier = if (imeVisible) Modifier.imePadding() else Modifier.navigationBarsPadding()
-    Surface(modifier = modifier, color = Color.Transparent) {
+    // Use Box instead of Surface to avoid clipping the press-scaled inner composer.
+    // Surface clips its content to RectangleShape by default, which cuts off the
+    // enlarged liquid-glass pill during the long-press zoom animation.
+    Box(modifier = modifier) {
         Column(
             modifier = insetModifier
                 // Measure the entire visible composer (queue strip, padding and card), but not
@@ -7217,17 +7112,27 @@ private fun RikkaChatInput(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(end = maxOf(0.dp, compactActionReservation))
-                    .animateContentSize(
-                        animationSpec = spring(dampingRatio = 0.66f, stiffness = 360f),
-                        alignment = Alignment.BottomCenter,
-                    )
+                    // Keep the press transform outside animateContentSize. That modifier clips
+                    // its child to the animated layout bounds; placing the scale inside it cut off
+                    // the enlarged liquid surface at the pill's original top edge.
                     .graphicsLayer {
                         scaleX = compactPressScale
                         scaleY = compactPressScale
                         transformOrigin = TransformOrigin(0.5f, 1f)
+                        clip = false
                     }
+                    .animateContentSize(
+                        animationSpec = spring(dampingRatio = 0.66f, stiffness = 360f),
+                        alignment = Alignment.BottomCenter,
+                    )
                     .then(
-                        if (useLiquidGlass && backdrop != null) Modifier.drawBackdrop(
+                        if (useLiquidGlass && backdrop != null) Modifier
+                            // Clip the backdrop and tint to inputShape so the liquid glass
+                            // fills the exact shape (including square bottom corners when the
+                            // keyboard is docked) instead of rendering as a full rectangle
+                            // that leaks translucent corners during shape transitions.
+                            .clip(inputShape)
+                            .drawBackdrop(
                             backdrop = backdrop,
                             shape = { inputShape },
                             effects = {
@@ -7238,13 +7143,25 @@ private fun RikkaChatInput(
                                         pressProgress = compactPressProgress,
                                     )
                                 } else {
-                                    applyLiquidGlassEffects(glassConfig.spec, isLightTheme)
+                                    // A radial depth vector makes a zero-radius corner read like a
+                                    // rounded glass body plus a translucent filler. Use edge-normal
+                                    // refraction while docked so the whole straight corner remains
+                                    // one continuous liquid-glass material.
+                                    applyLiquidGlassEffects(
+                                        spec = glassConfig.spec,
+                                        isLight = isLightTheme,
+                                        depthEffect = keyboardDockProgress <= 0.001f,
+                                    )
                                 }
                             },
                             highlight = {
                                 if (compactPressProgress > 0.001f) Highlight.Default.copy(alpha = compactPressProgress)
                                 else Highlight.Plain
                             },
+                            // Disable the default shadow: it renders a separate clipped shape
+                            // underneath the backdrop, which shows through the semi-transparent
+                            // glass as a translucent rectangle during shape transitions.
+                            shadow = { null },
                             onDrawSurface = { drawRect(liquidGlassTint) },
                         ) else Modifier
                     ),
@@ -7268,6 +7185,9 @@ private fun RikkaChatInput(
                         ) {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
                                 items(attachments, key = { it.path }) { attachment ->
+                                    val sizeLabel = remember(attachment.path) {
+                                        formatFileSize(java.io.File(attachment.path).length())
+                                    }
                                     Surface(
                                         modifier = Modifier.clickable { onPreviewAttachment(attachment) },
                                         shape = MaterialTheme.shapes.medium,
@@ -7281,7 +7201,7 @@ private fun RikkaChatInput(
                                             Spacer(Modifier.width(7.dp))
                                             Column(modifier = Modifier.widthIn(max = 140.dp)) {
                                                 Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
-                                                Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                Text(sizeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                             }
                                             IconButton(onClick = { onRemoveAttachment(attachment) }, modifier = Modifier.size(28.dp)) { Icon(HugeIcons.Cancel01, "移除", modifier = Modifier.size(14.dp)) }
                                         }
@@ -7660,17 +7580,11 @@ private fun formatFileSize(bytes: Long): String = when {
     else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }
 
-private fun decodeSampledBitmap(path: String, maxEdge: Int = 1280): android.graphics.Bitmap? {
-    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    android.graphics.BitmapFactory.decodeFile(path, bounds)
-    var sample = 1
-    while (bounds.outWidth / sample > maxEdge * 2 || bounds.outHeight / sample > maxEdge * 2) sample *= 2
-    return android.graphics.BitmapFactory.decodeFile(path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
-}
-
 @Composable
-private fun AttachmentThumbnail(path: String, modifier: Modifier = Modifier) {
-    val bitmap = remember(path) { decodeSampledBitmap(path) }
+private fun AttachmentThumbnail(path: String, modifier: Modifier = Modifier, maxEdge: Int = 256) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = path, key2 = maxEdge) {
+        value = withContext(Dispatchers.IO) { NativeAttachmentImageLoader.load(path, maxEdge) }
+    }
     AndroidView(
         modifier = modifier,
         factory = { context -> android.widget.ImageView(context).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP } },
@@ -7681,16 +7595,23 @@ private fun AttachmentThumbnail(path: String, modifier: Modifier = Modifier) {
 @Composable
 private fun AttachmentPreviewDialog(attachment: NativeAttachment, onDismiss: () -> Unit) {
     val language = LocalNativeLanguage.current
+    val sizeLabel = remember(attachment.path) {
+        formatFileSize(java.io.File(attachment.path).length())
+    }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(attachment.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (attachment.image) AttachmentThumbnail(attachment.path, Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 420.dp).clip(MaterialTheme.shapes.large))
+                if (attachment.image) AttachmentThumbnail(
+                    attachment.path,
+                    Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 420.dp).clip(MaterialTheme.shapes.large),
+                    maxEdge = 1280,
+                )
                 Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainer) {
                     Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(if (attachment.image) nativeText(language, "\u56fe\u7247\u9644\u4ef6", "Image attachment") else nativeText(language, "\u6587\u4ef6\u9644\u4ef6", "File attachment"), style = MaterialTheme.typography.labelLarge)
-                        Text(formatFileSize(java.io.File(attachment.path).length()), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(sizeLabel, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(attachment.path, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }

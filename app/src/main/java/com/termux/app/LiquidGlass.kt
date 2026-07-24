@@ -104,6 +104,7 @@ data class TopBarLiquidGlassConfig(
     val enabled: Boolean = true,
     val blurRadiusDp: Float = DEFAULT_BLUR,
     val tintIntensity: Float = DEFAULT_TINT_INTENSITY,
+    val maskHeightDp: Float = DEFAULT_MASK_HEIGHT,
     val maskStartFraction: Float = DEFAULT_MASK_START,
     val maskEndFraction: Float = DEFAULT_MASK_END,
     val topAlpha: Float = DEFAULT_TOP_ALPHA,
@@ -112,7 +113,10 @@ data class TopBarLiquidGlassConfig(
     companion object {
         const val DEFAULT_BLUR = 10f
         const val DEFAULT_TINT_INTENSITY = 0.20f
-        const val DEFAULT_MASK_START = 0.62f
+        const val DEFAULT_MASK_HEIGHT = 128f
+        const val MIN_MASK_HEIGHT = 104f
+        const val MAX_MASK_HEIGHT = 196f
+        const val DEFAULT_MASK_START = 0.5f
         const val DEFAULT_MASK_END = 1f
         const val DEFAULT_TOP_ALPHA = 1f
         const val DEFAULT_BOTTOM_ALPHA = 0f
@@ -120,6 +124,7 @@ data class TopBarLiquidGlassConfig(
         const val KEY_ENABLED = "top_bar_liquid_glass_enabled"
         const val KEY_BLUR = "top_bar_liquid_glass_blur_dp"
         const val KEY_TINT_INTENSITY = "top_bar_liquid_glass_tint_intensity"
+        const val KEY_MASK_HEIGHT = "top_bar_liquid_glass_mask_height_dp"
         const val KEY_MASK_START = "top_bar_liquid_glass_mask_start"
         const val KEY_MASK_END = "top_bar_liquid_glass_mask_end"
         const val KEY_TOP_ALPHA = "top_bar_liquid_glass_top_alpha"
@@ -176,6 +181,8 @@ fun readTopBarLiquidGlassConfig(context: Context): TopBarLiquidGlassConfig {
         enabled = prefs.getBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, true),
         blurRadiusDp = prefs.getFloat(TopBarLiquidGlassConfig.KEY_BLUR, TopBarLiquidGlassConfig.DEFAULT_BLUR).coerceIn(0f, 32f),
         tintIntensity = prefs.getFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY).coerceIn(0f, 0.72f),
+        maskHeightDp = prefs.getFloat(TopBarLiquidGlassConfig.KEY_MASK_HEIGHT, TopBarLiquidGlassConfig.DEFAULT_MASK_HEIGHT)
+            .coerceIn(TopBarLiquidGlassConfig.MIN_MASK_HEIGHT, TopBarLiquidGlassConfig.MAX_MASK_HEIGHT),
         maskStartFraction = start,
         maskEndFraction = end,
         topAlpha = prefs.getFloat(TopBarLiquidGlassConfig.KEY_TOP_ALPHA, TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA).coerceIn(0f, 1f),
@@ -210,14 +217,18 @@ fun rememberLiquidGlassTint(): Color {
  * is theme-dependent (light x1.6 / dark x0.8) to match the reference DialogContent recipe, which
  * yields light 16dp / dark 8dp at the default base of 10dp - enough to frost the content behind.
  */
-fun BackdropEffectScope.applyLiquidGlassEffects(spec: LiquidGlassSpec, isLight: Boolean) {
+fun BackdropEffectScope.applyLiquidGlassEffects(
+    spec: LiquidGlassSpec,
+    isLight: Boolean,
+    depthEffect: Boolean = true,
+) {
     vibrancy()
     val blurDp = spec.blurRadiusDp * (if (isLight) 1.6f else 0.8f)
     blur(blurDp.dp.toPx())
     lens(
         refractionHeight = spec.refractionHeightDp.dp.toPx(),
         refractionAmount = spec.refractionAmountDp.dp.toPx(),
-        depthEffect = true,
+        depthEffect = depthEffect,
         chromaticAberration = spec.chromaticAberration,
     )
 }
@@ -364,7 +375,7 @@ fun TopBarLiquidGlassPreview(config: TopBarLiquidGlassConfig, modifier: Modifier
     Box(
         modifier
             .fillMaxWidth()
-            .height(156.dp)
+            .height(216.dp)
             .clip(RoundedCornerShape(24.dp)),
     ) {
         Column(
@@ -388,7 +399,11 @@ fun TopBarLiquidGlassPreview(config: TopBarLiquidGlassConfig, modifier: Modifier
             Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .height(92.dp)
+                .height(
+                    config.maskHeightDp
+                        .coerceIn(TopBarLiquidGlassConfig.MIN_MASK_HEIGHT, TopBarLiquidGlassConfig.MAX_MASK_HEIGHT)
+                        .dp,
+                )
                 .then(
                     if (config.enabled && liquidGlassSupported) Modifier.drawPlainBackdrop(
                         backdrop = backdrop,

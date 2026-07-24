@@ -7,7 +7,7 @@ import android.util.AttributeSet
 import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
-import android.widget.TextView
+import androidx.appcompat.widget.AppCompatTextView
 
 /**
  * TextView whose expensive selectable/editor machinery is activated only after a long press.
@@ -16,7 +16,7 @@ import android.widget.TextView
 internal class FcodeSelectableTextView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
-) : TextView(context, attrs) {
+) : AppCompatTextView(context, attrs) {
     var copyLabel: String = "Copy"
     var quoteLabel: String = "Quote"
     var selectAllLabel: String = "Select all"

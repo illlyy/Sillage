@@ -3,7 +3,6 @@ package com.termux.app
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.Base64
 import java.util.LinkedHashMap
 
 /** Immutable history payload prepared before crossing to the Compose main thread. */
@@ -194,11 +193,11 @@ internal object NativeHistoryParser {
         }
         if (!changed) return content
         payload.put("tools", tools)
-        return "PROCESS2|" + Base64.getEncoder().encodeToString(payload.toString().toByteArray(Charsets.UTF_8))
+        return "PROCESS2|" + NativeBase64.encode(payload.toString().toByteArray(Charsets.UTF_8))
     }
 
     private fun decodePayload(encoded: String): JSONObject? = runCatching {
-        JSONObject(String(Base64.getDecoder().decode(encoded), Charsets.UTF_8))
+        JSONObject(String(NativeBase64.decode(encoded), Charsets.UTF_8))
     }.getOrNull()
 }
 

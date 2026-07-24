@@ -4,8 +4,10 @@ import android.content.SharedPreferences;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.WeakHashMap;
 
 /** Persistent named Codex API configurations. Secrets stay in private app SharedPreferences. */
 final class CodexProviderStore {
@@ -471,6 +473,12 @@ final class CodexProviderStore {
             if (models != null) for (ModelConfig item : models) if (item != null) this.models.add(item.copy());
         }
 
+        Profile copy() {
+            return new Profile(id, name, note, baseUrl, apiKey, model, apiFormat, models,
+                proxyEnabled, proxyWebUi, proxyTermux, forwardReasoningContext,
+                ultraSubagentLimit, normalSubagentLimit, customSubagentStability);
+        }
+
         JSONObject json() throws Exception {
             JSONArray catalog = new JSONArray();
             for (ModelConfig item : models) catalog.put(item.json());
@@ -578,31 +586,107 @@ final class CodexProviderStore {
         }
     }
 
+    /**
+     * One coherent, read-only view of provider preferences. Parsing the nested model catalog is
+     * relatively expensive, so readers share this snapshot until either preference value changes.
+     */
+    static final class Snapshot {
+        final List<Profile> profiles;
+        final Profile active;
+        final String configuredActiveId;
+
+        private Snapshot(List<Profile> profiles, String configuredActiveId) {
+            this.profiles = Collections.unmodifiableList(new ArrayList<>(profiles));
+            this.configuredActiveId = configuredActiveId == null ? "" : configuredActiveId;
+            Profile selected = find(this.configuredActiveId);
+            this.active = selected != null ? selected : (profiles.isEmpty() ? null : profiles.get(0));
+        }
+
+        Profile find(String id) {
+            if (id == null || id.isEmpty()) return null;
+            for (Profile profile : profiles) if (id.equals(profile.id)) return profile;
+            return null;
+        }
+    }
+
+    private static final Object SNAPSHOT_LOCK = new Object();
+    private static final WeakHashMap<SharedPreferences, CacheEntry> SNAPSHOT_CACHE = new WeakHashMap<>();
+
+    private static final class CacheEntry {
+        final String profilesJson;
+        final String activeId;
+        final Snapshot snapshot;
+
+        CacheEntry(String profilesJson, String activeId, Snapshot snapshot) {
+            this.profilesJson = profilesJson;
+            this.activeId = activeId;
+            this.snapshot = snapshot;
+        }
+    }
+
     private final SharedPreferences prefs;
-    CodexProviderStore(SharedPreferences prefs) { this.prefs = prefs; migrateLegacy(); }
+
+    CodexProviderStore(SharedPreferences prefs) {
+        this.prefs = prefs;
+        migrateLegacy();
+    }
+
+    Snapshot snapshot() {
+        String profilesJson = prefs.getString(KEY_PROFILES, "[]");
+        if (profilesJson == null) profilesJson = "[]";
+        String activeId = prefs.getString(KEY_ACTIVE, "");
+        if (activeId == null) activeId = "";
+        synchronized (SNAPSHOT_LOCK) {
+            CacheEntry cached = SNAPSHOT_CACHE.get(prefs);
+            if (cached != null && profilesJson.equals(cached.profilesJson) && activeId.equals(cached.activeId)) {
+                return cached.snapshot;
+            }
+            // Re-read while owning the repository cache lock. If another store populated this file
+            // between our optimistic read and the lock, we reuse its snapshot instead of parsing.
+            profilesJson = prefs.getString(KEY_PROFILES, "[]");
+            if (profilesJson == null) profilesJson = "[]";
+            activeId = prefs.getString(KEY_ACTIVE, "");
+            if (activeId == null) activeId = "";
+            cached = SNAPSHOT_CACHE.get(prefs);
+            if (cached != null && profilesJson.equals(cached.profilesJson) && activeId.equals(cached.activeId)) {
+                return cached.snapshot;
+            }
+            ArrayList<Profile> parsed = new ArrayList<>();
+            try {
+                JSONArray array = new JSONArray(profilesJson);
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject item = array.optJSONObject(i);
+                    if (item != null) parsed.add(Profile.from(item));
+                }
+            } catch (Exception ignored) {}
+            Snapshot updated = new Snapshot(parsed, activeId);
+            SNAPSHOT_CACHE.put(prefs, new CacheEntry(profilesJson, activeId, updated));
+            return updated;
+        }
+    }
 
     List<Profile> all() {
-        ArrayList<Profile> result = new ArrayList<>();
-        try {
-            JSONArray array = new JSONArray(prefs.getString(KEY_PROFILES, "[]"));
-            for (int i = 0; i < array.length(); i++) result.add(Profile.from(array.getJSONObject(i)));
-        } catch (Exception ignored) {}
-        return result;
+        ArrayList<Profile> copies = new ArrayList<>();
+        for (Profile profile : snapshot().profiles) copies.add(profile.copy());
+        return copies;
     }
 
-    Profile find(String id) { for (Profile p : all()) if (p.id.equals(id)) return p; return null; }
+    Profile find(String id) {
+        Profile profile = snapshot().find(id);
+        return profile == null ? null : profile.copy();
+    }
 
     Profile active() {
-        Profile value = find(prefs.getString(KEY_ACTIVE, ""));
-        if (value != null) return value;
-        List<Profile> all = all();
-        return all.isEmpty() ? null : all.get(0);
+        Profile profile = snapshot().active;
+        return profile == null ? null : profile.copy();
     }
 
-    boolean isActive(Profile p) { return p != null && p.id.equals(prefs.getString(KEY_ACTIVE, "")); }
+    boolean isActive(Profile profile) {
+        return profile != null && profile.id.equals(snapshot().configuredActiveId);
+    }
 
     void save(Profile profile) {
-        List<Profile> values = all();
+        ArrayList<Profile> values = new ArrayList<>(snapshot().profiles);
         boolean replaced = false;
         for (int i = 0; i < values.size(); i++) {
             if (values.get(i).id.equals(profile.id)) {
@@ -620,14 +704,19 @@ final class CodexProviderStore {
         prefs.edit().putString(KEY_ACTIVE, profile.id)
             .putString("base_url", profile.baseUrl).putString("api_key", profile.apiKey)
             .putString("model", profile.model).apply();
+        invalidateSnapshot();
     }
 
     void delete(Profile profile) {
-        List<Profile> values = all();
-        for (int i = values.size() - 1; i >= 0; i--) if (values.get(i).id.equals(profile.id)) values.remove(i);
+        ArrayList<Profile> values = new ArrayList<>(snapshot().profiles);
+        for (int i = values.size() - 1; i >= 0; i--) {
+            if (values.get(i).id.equals(profile.id)) values.remove(i);
+        }
+        boolean deletingActive = isActive(profile);
         write(values);
-        if (isActive(profile)) {
+        if (deletingActive) {
             prefs.edit().remove(KEY_ACTIVE).apply();
+            invalidateSnapshot();
             if (!values.isEmpty()) activate(values.get(0));
         }
     }
@@ -637,9 +726,16 @@ final class CodexProviderStore {
     private void write(List<Profile> values) {
         JSONArray array = new JSONArray();
         try {
-            for (Profile p : values) array.put(p.json());
+            for (Profile profile : values) array.put(profile.json());
             prefs.edit().putString(KEY_PROFILES, array.toString()).apply();
+            invalidateSnapshot();
         } catch (Exception ignored) {}
+    }
+
+    private void invalidateSnapshot() {
+        synchronized (SNAPSHOT_LOCK) {
+            SNAPSHOT_CACHE.remove(prefs);
+        }
     }
 
     private void migrateLegacy() {
@@ -649,10 +745,12 @@ final class CodexProviderStore {
         String model = prefs.getString("model", "");
         if (url.isEmpty() && key.isEmpty()) {
             prefs.edit().putString(KEY_PROFILES, "[]").apply();
+            invalidateSnapshot();
             return;
         }
         Profile profile = new Profile(newId(), "Default", "", url, key, model);
         save(profile);
         activate(profile);
     }
+
 }

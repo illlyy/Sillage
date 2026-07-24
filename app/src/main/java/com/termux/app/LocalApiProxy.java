@@ -153,10 +153,27 @@ final class LocalApiProxy {
             String internalEffort = requestResponses ? requestEffort(body) : "";
             int internalAgentMessages = requestResponses ? ChatCompletionsAdapter.agentMessageCount(body) : 0;
             String ultraTransportEffort = requestResponses ? ultraTransportEffort(requestModel) : "";
-            boolean flattenCollaboration = requestResponses
+            boolean flattenThirdPartyNamespaces = requestResponses
                 && shouldFlattenCollaborationNamespace(requestModel, ultraTransportEfforts);
+            boolean adaptChat = "openai_chat".equals(apiFormat) && requestResponses;
+            ChatCompletionsAdapter.NamespacedTools namespacedTools = requestResponses
+                ? ChatCompletionsAdapter.namespacedTools(body) : new ChatCompletionsAdapter.NamespacedTools();
+            ChatCompletionsAdapter.NamespacedTools mcpToolMappings = mcpNamespacedTools(namespacedTools);
+            // MCP namespace compatibility is a transport concern, not a model-family or
+            // reasoning-effort capability. Always expose MCP tools as standard Responses
+            // functions when talking directly to an upstream Responses endpoint.
+            boolean flattenMcpNamespaces = requestResponses && !mcpToolMappings.byFlat.isEmpty();
+            boolean rewriteToolNamespaces = flattenThirdPartyNamespaces || flattenMcpNamespaces;
             byte[] responsesBody = requestResponses
                 ? normalizeResponsesRequestForUpstream(body, forwardReasoningContext, ultraTransportEfforts) : body;
+            // OpenAI Responses understands namespace tools natively. Third-party Responses
+            // endpoints commonly accept the JSON but silently hide nested MCP tools from the
+            // model. Present them as ordinary qualified functions and restore the namespace on
+            // the response path before Codex sees the call.
+            if (rewriteToolNamespaces && !adaptChat) {
+                responsesBody = flattenNamespacedResponsesRequest(responsesBody,
+                    flattenThirdPartyNamespaces ? namespacedTools : mcpToolMappings);
+            }
             boolean agentMessagesNormalized = internalAgentMessages > 0
                 && ChatCompletionsAdapter.agentMessageCount(responsesBody) == 0;
             if (internalAgentMessages > 0) Log.i(TAG, "id=" + requestId
@@ -171,11 +188,8 @@ final class LocalApiProxy {
             }
             String wireEffort = requestResponses ? requestEffort(responsesBody) : "";
             String toolSummary = requestResponses ? requestToolSummary(responsesBody) : "none";
-            boolean adaptChat = "openai_chat".equals(apiFormat) && requestResponses;
             String targetPath = adaptChat ? "/chat/completions" : (path.startsWith("/") ? path : "/" + path);
             java.util.Set<String> customTools = adaptChat ? ChatCompletionsAdapter.customToolNames(responsesBody) : java.util.Collections.emptySet();
-            ChatCompletionsAdapter.NamespacedTools namespacedTools = adaptChat
-                ? ChatCompletionsAdapter.namespacedTools(responsesBody) : new ChatCompletionsAdapter.NamespacedTools();
             body = adaptChat ? ChatCompletionsAdapter.responsesRequestToChat(responsesBody) : responsesBody;
             if (adaptChat) Log.i(TAG, "id=" + requestId + " chatHistory " + ChatCompletionsAdapter.toolReasoningSummary(body)
                 + " agentMessages=" + internalAgentMessages);
@@ -223,13 +237,14 @@ final class LocalApiProxy {
                 clientOut.flush();
                 long conversionStartedNanos = System.nanoTime();
                 final long[] firstOutputNanos = new long[]{0L};
-                final boolean rewriteNamespaces = flattenCollaboration;
+                final boolean rewriteNamespaces = rewriteToolNamespaces;
+                final ChatCompletionsAdapter.NamespacedTools responseNamespacedTools = namespacedTools;
                 ChatCompletionsAdapter.StreamStats streamStats;
                 try {
                     streamStats = ChatCompletionsAdapter.streamChatResponseToResponses(
                         response, contentType, adaptedModel, customTools, namespacedTools, value -> {
                             byte[] output = rewriteNamespaces
-                                ? rewriteCollaborationToolCalls(value, "text/event-stream") : value;
+                                ? rewriteNamespacedToolCalls(value, "text/event-stream", responseNamespacedTools) : value;
                             if (firstOutputNanos[0] == 0L) firstOutputNanos[0] = System.nanoTime();
                             writeChunk(clientOut, output, output.length);
                         });
@@ -263,11 +278,12 @@ final class LocalApiProxy {
                             && contentType.toLowerCase(Locale.US).contains("event-stream");
                         if (responsesEventStream) {
                             long normalizationStartedNanos = System.nanoTime();
-                            final boolean rewriteNamespaces = flattenCollaboration;
+                            final boolean rewriteNamespaces = rewriteToolNamespaces;
+                            final ChatCompletionsAdapter.NamespacedTools responseNamespacedTools = namespacedTools;
                             ResponsesSseNormalizer.Stats normalizationStats = ResponsesSseNormalizer.normalize(
                                 response, value -> {
                                     byte[] output = rewriteNamespaces
-                                        ? rewriteCollaborationToolCalls(value, "text/event-stream") : value;
+                                        ? rewriteNamespacedToolCalls(value, "text/event-stream", responseNamespacedTools) : value;
                                     writeChunk(clientOut, output, output.length);
                                 });
                             Log.i(TAG, "id=" + requestId + " responsesNormalization contentType="
@@ -281,8 +297,8 @@ final class LocalApiProxy {
                                 + " missingItemId=" + normalizationStats.deltasWithoutItemId
                                 + " totalMs=" + nanosToMillis(System.nanoTime() - normalizationStartedNanos)
                                 + " types=" + normalizationStats.eventTypeSummary());
-                        } else if (flattenCollaboration && code >= 200 && code < 300) {
-                            streamWithCollaborationNamespaces(response, contentType, clientOut);
+                        } else if (rewriteToolNamespaces && code >= 200 && code < 300) {
+                            streamWithNamespacedToolCalls(response, contentType, clientOut, namespacedTools);
                         } else {
                             byte[] buffer = new byte[16 * 1024]; int count;
                             while ((count = response.read(buffer)) >= 0) {
@@ -585,7 +601,163 @@ final class LocalApiProxy {
         return changed;
     }
 
+    static ChatCompletionsAdapter.NamespacedTools mcpNamespacedTools(
+            ChatCompletionsAdapter.NamespacedTools source) {
+        ChatCompletionsAdapter.NamespacedTools result = new ChatCompletionsAdapter.NamespacedTools();
+        if (source == null) return result;
+        for (Map.Entry<String, ChatCompletionsAdapter.NamespacedTool> entry : source.byFlat.entrySet()) {
+            ChatCompletionsAdapter.NamespacedTool tool = entry.getValue();
+            if (tool == null || tool.namespace == null || !tool.namespace.startsWith("mcp__")) continue;
+            result.byFlat.put(entry.getKey(), tool);
+            result.flatByQualified.put(tool.namespace + "\n" + tool.name, tool.flatName);
+        }
+        return result;
+    }
+
+    static byte[] flattenNamespacedResponsesRequest(byte[] body,
+                                                      ChatCompletionsAdapter.NamespacedTools namespacedTools) {
+        if (body == null || body.length == 0 || namespacedTools == null
+                || namespacedTools.byFlat.isEmpty()) return body;
+        try {
+            JSONObject payload = new JSONObject(new String(body, StandardCharsets.UTF_8));
+            boolean[] changed = new boolean[]{false};
+            org.json.JSONArray tools = payload.optJSONArray("tools");
+            if (tools != null) {
+                org.json.JSONArray flattened = flattenNamespaceToolArray(tools, "", namespacedTools, changed);
+                if (changed[0]) payload.put("tools", flattened);
+            }
+            boolean inputChanged = flattenNamespacedInputCalls(payload.opt("input"), namespacedTools);
+            JSONObject choice = payload.optJSONObject("tool_choice");
+            boolean choiceChanged = false;
+            if (choice != null && "function".equals(choice.optString("type"))) {
+                String namespace = choice.optString("namespace");
+                String name = choice.optString("name");
+                String mappedName = mappedToolName(namespacedTools, namespace, name);
+                if (mappedName != null) {
+                    choice.put("name", mappedName);
+                    choice.remove("namespace");
+                    choiceChanged = true;
+                }
+            }
+            return changed[0] || inputChanged || choiceChanged
+                ? payload.toString().getBytes(StandardCharsets.UTF_8) : body;
+        } catch (Exception ignored) {
+            return body;
+        }
+    }
+
+    private static org.json.JSONArray flattenNamespaceToolArray(org.json.JSONArray source,
+                                                                  String parentNamespace,
+                                                                  ChatCompletionsAdapter.NamespacedTools namespacedTools,
+                                                                  boolean[] changed) throws Exception {
+        org.json.JSONArray result = new org.json.JSONArray();
+        for (int i = 0; i < source.length(); i++) {
+            Object raw = source.opt(i);
+            JSONObject tool = raw instanceof JSONObject ? (JSONObject) raw : null;
+            if (tool == null) {
+                result.put(raw);
+                continue;
+            }
+            String type = tool.optString("type");
+            if ("namespace".equals(type)) {
+                org.json.JSONArray children = tool.optJSONArray("tools");
+                if (children == null) {
+                    result.put(tool);
+                    continue;
+                }
+                String own = tool.optString("name");
+                String namespace = parentNamespace.isEmpty() ? own : parentNamespace + "." + own;
+                if (!hasNamespaceMapping(namespacedTools, namespace)) {
+                    result.put(raw);
+                    continue;
+                }
+                changed[0] = true;
+                org.json.JSONArray flattenedChildren = flattenNamespaceToolArray(
+                    children, namespace, namespacedTools, changed);
+                for (int j = 0; j < flattenedChildren.length(); j++) {
+                    result.put(flattenedChildren.get(j));
+                }
+                continue;
+            }
+            if (!parentNamespace.isEmpty()
+                    && ("function".equals(type) || "custom".equals(type))) {
+                JSONObject flattened = new JSONObject(tool.toString());
+                flattened.put("name", qualifiedToolName(
+                    namespacedTools, parentNamespace, tool.optString("name")));
+                result.put(flattened);
+                changed[0] = true;
+            } else {
+                result.put(raw);
+            }
+        }
+        return result;
+    }
+
+    private static boolean hasNamespaceMapping(ChatCompletionsAdapter.NamespacedTools namespacedTools,
+                                               String namespace) {
+        if (namespacedTools == null || namespace == null || namespace.isEmpty()) return false;
+        for (ChatCompletionsAdapter.NamespacedTool tool : namespacedTools.byFlat.values()) {
+            if (tool != null && (namespace.equals(tool.namespace)
+                    || tool.namespace.startsWith(namespace + "."))) return true;
+        }
+        return false;
+    }
+
+    private static boolean flattenNamespacedInputCalls(Object value,
+                                                         ChatCompletionsAdapter.NamespacedTools namespacedTools)
+            throws Exception {
+        boolean changed = false;
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            String type = object.optString("type");
+            if (("function_call".equals(type) || "custom_tool_call".equals(type))
+                    && object.has("namespace")) {
+                String namespace = object.optString("namespace");
+                String name = object.optString("name");
+                String mappedName = mappedToolName(namespacedTools, namespace, name);
+                if (mappedName != null) {
+                    object.put("name", mappedName);
+                    object.remove("namespace");
+                    changed = true;
+                }
+            }
+            java.util.Iterator<String> keys = object.keys();
+            while (keys.hasNext()) {
+                if (flattenNamespacedInputCalls(object.opt(keys.next()), namespacedTools)) changed = true;
+            }
+        } else if (value instanceof org.json.JSONArray) {
+            org.json.JSONArray array = (org.json.JSONArray) value;
+            for (int i = 0; i < array.length(); i++) {
+                if (flattenNamespacedInputCalls(array.opt(i), namespacedTools)) changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private static String mappedToolName(ChatCompletionsAdapter.NamespacedTools namespacedTools,
+                                         String namespace, String name) {
+        if (namespacedTools == null || namespace == null || namespace.isEmpty()
+                || name == null || name.isEmpty()) return null;
+        return namespacedTools.flatByQualified.get(namespace + "\n" + name);
+    }
+
+    private static String qualifiedToolName(ChatCompletionsAdapter.NamespacedTools namespacedTools,
+                                             String namespace, String name) {
+        String qualified = namespace + "\n" + name;
+        String mapped = namespacedTools.flatByQualified.get(qualified);
+        if (mapped != null && !mapped.isEmpty()) return mapped;
+        String fallback = (namespace + "__" + name).replaceAll("[^A-Za-z0-9_-]", "_");
+        if (fallback.length() <= 64) return fallback;
+        String hash = Integer.toHexString(qualified.hashCode());
+        return fallback.substring(0, Math.max(1, 63 - hash.length())) + "_" + hash;
+    }
+
     static byte[] rewriteCollaborationToolCalls(byte[] body, String contentType) {
+        return rewriteNamespacedToolCalls(body, contentType, new ChatCompletionsAdapter.NamespacedTools());
+    }
+
+    static byte[] rewriteNamespacedToolCalls(byte[] body, String contentType,
+                                              ChatCompletionsAdapter.NamespacedTools namespacedTools) {
         if (body == null || body.length == 0) return body;
         String text = new String(body, StandardCharsets.UTF_8);
         try {
@@ -594,57 +766,73 @@ final class LocalApiProxy {
                 StringBuilder out = new StringBuilder();
                 String[] lines = text.split("\n", -1);
                 for (int i = 0; i < lines.length; i++) {
-                    String line = rewriteSseDataLine(lines[i]);
+                    String line = rewriteSseDataLine(lines[i], namespacedTools);
                     out.append(line);
                     if (i < lines.length - 1) out.append('\n');
                 }
                 return out.toString().getBytes(StandardCharsets.UTF_8);
             }
             JSONObject payload = new JSONObject(text);
-            addCollaborationNamespaces(payload);
+            restoreToolCallNamespaces(payload, namespacedTools);
             return payload.toString().getBytes(StandardCharsets.UTF_8);
         } catch (Exception ignored) { return body; }
     }
 
-    private static String rewriteSseDataLine(String line) {
+    private static String rewriteSseDataLine(String line,
+                                             ChatCompletionsAdapter.NamespacedTools namespacedTools) {
         if (line == null || !line.startsWith("data:")) return line;
         String data = line.substring(5).trim();
         if (data.isEmpty() || "[DONE]".equals(data)) return line;
         try {
             JSONObject payload = new JSONObject(data);
-            addCollaborationNamespaces(payload);
+            restoreToolCallNamespaces(payload, namespacedTools);
             return "data: " + payload;
         } catch (Exception ignored) { return line; }
     }
 
-    private static void addCollaborationNamespaces(Object value) throws Exception {
+    private static void restoreToolCallNamespaces(Object value,
+                                                  ChatCompletionsAdapter.NamespacedTools namespacedTools)
+            throws Exception {
         if (value instanceof JSONObject) {
             JSONObject object = (JSONObject) value;
-            if ("function_call".equals(object.optString("type"))
-                    && COLLABORATION_TOOL_NAMES.contains(object.optString("name"))
+            String type = object.optString("type");
+            if (("function_call".equals(type) || "custom_tool_call".equals(type))
                     && !object.has("namespace")) {
-                object.put("namespace", "collaboration");
+                String flatName = object.optString("name");
+                ChatCompletionsAdapter.NamespacedTool mapped = namespacedTools == null
+                    ? null : namespacedTools.byFlat.get(flatName);
+                if (mapped != null) {
+                    object.put("name", mapped.name);
+                    object.put("namespace", mapped.namespace);
+                } else if (COLLABORATION_TOOL_NAMES.contains(flatName)) {
+                    object.put("namespace", "collaboration");
+                }
             }
             java.util.Iterator<String> keys = object.keys();
-            while (keys.hasNext()) addCollaborationNamespaces(object.opt(keys.next()));
+            while (keys.hasNext()) restoreToolCallNamespaces(object.opt(keys.next()), namespacedTools);
         } else if (value instanceof org.json.JSONArray) {
             org.json.JSONArray array = (org.json.JSONArray) value;
-            for (int i = 0; i < array.length(); i++) addCollaborationNamespaces(array.opt(i));
+            for (int i = 0; i < array.length(); i++) {
+                restoreToolCallNamespaces(array.opt(i), namespacedTools);
+            }
         }
     }
 
-    private static void streamWithCollaborationNamespaces(InputStream response, String contentType,
-                                                            OutputStream clientOut) throws Exception {
+    private static void streamWithNamespacedToolCalls(InputStream response, String contentType,
+                                                       OutputStream clientOut,
+                                                       ChatCompletionsAdapter.NamespacedTools namespacedTools)
+            throws Exception {
         if (contentType != null && contentType.toLowerCase(Locale.US).contains("event-stream")) {
             BufferedReader reader = new BufferedReader(new InputStreamReader(response, StandardCharsets.UTF_8));
             String line;
             while ((line = reader.readLine()) != null) {
-                byte[] bytes = (rewriteSseDataLine(line) + "\n").getBytes(StandardCharsets.UTF_8);
+                byte[] bytes = (rewriteSseDataLine(line, namespacedTools) + "\n")
+                    .getBytes(StandardCharsets.UTF_8);
                 writeChunk(clientOut, bytes, bytes.length);
             }
             return;
         }
-        byte[] rewritten = rewriteCollaborationToolCalls(readAll(response), contentType);
+        byte[] rewritten = rewriteNamespacedToolCalls(readAll(response), contentType, namespacedTools);
         writeChunk(clientOut, rewritten, rewritten.length);
     }
 

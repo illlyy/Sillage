@@ -9,6 +9,7 @@ import org.json.JSONObject
 data class NativeMcpRuntimeStatus(
     val state: String = "checking",
     val toolCount: Int = 0,
+    val toolNames: List<String> = emptyList(),
     val detail: String = "",
     val checkedAt: Long = 0L,
 )
@@ -50,9 +51,11 @@ object NativeMcpRuntimeStatusStore {
             }
             val statusText = item.optString("status").lowercase()
             val unavailable = error.isNotBlank() || statusText.contains("fail") || statusText.contains("error") || statusText.contains("unavailable")
+            val tools = item.opt("tools")
             discovered[name] = NativeMcpRuntimeStatus(
                 state = if (unavailable) "unavailable" else "connected",
-                toolCount = toolCount(item.opt("tools")),
+                toolCount = toolCount(tools),
+                toolNames = toolNames(tools),
                 detail = error.ifBlank { item.optString("status") },
                 checkedAt = checkedAt,
             )
@@ -73,5 +76,11 @@ object NativeMcpRuntimeStatusStore {
         is JSONArray -> value.length()
         is JSONObject -> value.length()
         else -> 0
+    }
+
+    private fun toolNames(value: Any?): List<String> = when (value) {
+        is JSONObject -> value.keys().asSequence().toList().sorted()
+        is JSONArray -> (0 until value.length()).mapNotNull { value.optJSONObject(it)?.optString("name", "")?.ifBlank { null } }.sorted()
+        else -> emptyList()
     }
 }

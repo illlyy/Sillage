@@ -2,8 +2,6 @@ package com.termux.app
 
 import android.content.Intent
 import android.content.SharedPreferences
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
@@ -75,7 +73,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.io.File
 import java.util.Locale
-import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -102,65 +99,6 @@ import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tick02
 
-private enum class SettingsPage {
-    ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND,
-    MCP, MCP_EDITOR, SKILLS,
-    OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY,
-    DEVELOPER,
-}
-
-private val SettingsPage.navigationDepth: Int
-    get() = when (this) {
-        SettingsPage.ROOT -> 0
-        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
-        SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
-        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER -> 1
-        SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE,
-        SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR -> 2
-        SettingsPage.CHAT_BACKGROUND -> 3
-    }
-
-private val SettingsPage.previousPage: SettingsPage?
-    get() = when (this) {
-        SettingsPage.ROOT -> null
-        SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
-        SettingsPage.MCP_EDITOR -> SettingsPage.MCP
-        SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
-        SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
-        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
-        SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
-        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER -> SettingsPage.ROOT
-    }
-
-/** A short-lived, in-memory snapshot used only to bridge the settings Activity back to chat. */
-internal object NativeSettingsBackPreview {
-    @Volatile
-    private var bitmap: Bitmap? = null
-    var revision by mutableIntStateOf(0)
-        private set
-
-    fun capture(window: android.view.Window) {
-        val decor = window.decorView
-        val sourceWidth = decor.width
-        val sourceHeight = decor.height
-        if (sourceWidth <= 0 || sourceHeight <= 0) return
-        runCatching {
-            val previewWidth = (sourceWidth * 0.75f).roundToInt().coerceAtLeast(1)
-            val previewHeight = (sourceHeight * previewWidth.toFloat() / sourceWidth).roundToInt().coerceAtLeast(1)
-            val preview = Bitmap.createBitmap(previewWidth, previewHeight, Bitmap.Config.ARGB_8888)
-            Canvas(preview).apply {
-                val scale = previewWidth.toFloat() / sourceWidth.toFloat()
-                scale(scale, scale)
-                decor.draw(this)
-            }
-            bitmap = preview
-            revision++
-        }
-    }
-
-    fun current(): Bitmap? = bitmap
-}
-
 private data class SettingsEnvironmentSnapshot(
     val loaded: Boolean = false,
     val installedToolCount: Int = 0,
@@ -169,6 +107,8 @@ private data class SettingsEnvironmentSnapshot(
     val mihomoInstalled: Boolean = false,
     val mihomoRunning: Boolean = false,
     val mihomoMixedPort: Int = MihomoManager.DEFAULT_MIXED_PORT,
+    val overlayGranted: Boolean = false,
+    val overlayEnabled: Boolean = false,
 )
 
 private data class McpSettingsSnapshot(
@@ -186,6 +126,9 @@ private enum class CodexDependentFeature {
 }
 
 class NativeSettingsActivity : ComponentActivity() {
+    private var resumeRevision by mutableIntStateOf(0)
+    private var hasResumedOnce = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 34) {
@@ -207,15 +150,18 @@ class NativeSettingsActivity : ComponentActivity() {
         applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
         val providerStore = CodexProviderStore(prefs)
         setContent {
-            var page by remember { mutableStateOf(SettingsPage.ROOT) }
+            val navigator = remember { NativeSettingsNavigator() }
+            val settingsScope = rememberCoroutineScope()
+            val page = navigator.page
+            val editingProfileId = navigator.editingProfileId
+            val editingMcpKey = navigator.editingMcpKey
             var predictiveBackSource by remember { mutableStateOf<SettingsPage?>(null) }
             var predictiveBackPage by remember { mutableStateOf<SettingsPage?>(null) }
             var predictiveBackToChat by remember { mutableStateOf(false) }
             var predictiveBackHandoff by remember { mutableStateOf(false) }
             var suppressNextPageTransition by remember { mutableStateOf(false) }
-            var editingProfileId by remember { mutableStateOf<String?>(null) }
-            var editingMcpKey by remember { mutableStateOf<String?>(null) }
             var providerRevision by remember { mutableIntStateOf(0) }
+            val providerSnapshot = remember(providerRevision) { providerStore.snapshot() }
             var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
             var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
             var interfaceStyle by remember { mutableStateOf(FcodeInterfaceStyle.from(prefs.getString(FcodeAppearancePreferences.INTERFACE_STYLE, FcodeInterfaceStyle.MATERIAL.value)).value) }
@@ -249,8 +195,7 @@ class NativeSettingsActivity : ComponentActivity() {
                 }
             }
             val navigateBack = {
-                val previous = page.previousPage
-                if (previous == null) finish() else page = previous
+                if (!navigator.navigateBack()) finish()
             }
             FcodeChatTheme(
                 theme, lang, animations, reasoning, follow,
@@ -270,11 +215,10 @@ class NativeSettingsActivity : ComponentActivity() {
                 var predictiveBackHandoffStartProgress by remember { mutableFloatStateOf(1f) }
                 var predictiveBackFromLeft by remember { mutableStateOf(true) }
                 val latestPage by rememberUpdatedState(page)
-                val previewRevision = NativeSettingsBackPreview.revision
-                // Keep child-page navigation interactive, but let the system own back from the
-                // root page. On Android 14+ that is what reveals the chat Activity underneath
-                // during a predictive back gesture instead of showing only this window's scale.
-                PredictiveBackHandler(enabled = page != SettingsPage.ROOT || (previewRevision > 0 && NativeSettingsBackPreview.current() != null)) { progress ->
+                // Always register root back as well as child-page back. The chat snapshot is
+                // optional presentation data; a late/failed capture must never disable the
+                // gesture that finishes settings and returns to the live chat Activity.
+                PredictiveBackHandler(enabled = true) { progress ->
                     val source = latestPage
                     val destination = source.previousPage ?: SettingsPage.ROOT
                     val returningToChat = destination == SettingsPage.ROOT && source == SettingsPage.ROOT
@@ -332,7 +276,7 @@ class NativeSettingsActivity : ComponentActivity() {
                                 // same frame as the route swap exposed the Activity backplate
                                 // for a single frame on slower GPUs.
                                 suppressNextPageTransition = true
-                                page = destination
+                                navigator.navigate(destination)
                                 predictiveBackToChat = false
                                 predictiveBackHandoff = false
                                 predictiveBackProgress.snapTo(0f)
@@ -373,22 +317,23 @@ class NativeSettingsActivity : ComponentActivity() {
                 val settingsPageContent: @Composable (SettingsPage) -> Unit = { target ->
                     when (target) {
                         SettingsPage.ROOT -> SettingsRootPage(
-                            lang, providerStore.active(),
+                            lang, providerSnapshot.active,
                             onBack = { finish() },
-                            onModels = { page = SettingsPage.MODEL_CONFIGS },
-                            onWebUi = { page = SettingsPage.WEB_UI },
+                            onModels = { navigator.navigate(SettingsPage.MODEL_CONFIGS) },
+                            onWebUi = { navigator.navigate(SettingsPage.WEB_UI) },
                             onTermux = { requestCodexFeature(CodexDependentFeature.TERMUX) },
                             onInstallCodexCli = { requestCodexFeature(CodexDependentFeature.SETUP) },
                             codexCliInstalled = codexCliInstalled,
-                            onProxy = { page = SettingsPage.PROXY },
-                            onOverlay = { page = SettingsPage.OVERLAY },
-                            onDevelopmentTools = { page = SettingsPage.DEVELOPMENT_TOOLS },
-                            onAppearance = { page = SettingsPage.APPEARANCE },
-                            onMcp = { page = SettingsPage.MCP },
-                            onSkills = { page = SettingsPage.SKILLS },
+                            onProxy = { navigator.navigate(SettingsPage.PROXY) },
+                            onOverlay = { navigator.navigate(SettingsPage.OVERLAY) },
+                            onDevelopmentTools = { navigator.navigate(SettingsPage.DEVELOPMENT_TOOLS) },
+                            onAppearance = { navigator.navigate(SettingsPage.APPEARANCE) },
+                            onMcp = { navigator.navigate(SettingsPage.MCP) },
+                            onSkills = { navigator.navigate(SettingsPage.SKILLS) },
                             onLanguage = { dialog = "language" },
                             onTypography = { dialog = "typography" },
-                            onDeveloper = { page = SettingsPage.DEVELOPER },
+                            onDeveloper = { navigator.navigate(SettingsPage.DEVELOPER) },
+                            environmentRevision = resumeRevision,
                             prefs = prefs,
                             onAbout = { dialog = "about" },
                         )
@@ -398,8 +343,8 @@ class NativeSettingsActivity : ComponentActivity() {
                             colorPalette = colorPalette,
                             interfaceStyle = interfaceStyle,
                             onBack = navigateBack,
-                            onTheme = { page = SettingsPage.THEME },
-                            onChat = { page = SettingsPage.CHAT_APPEARANCE },
+                            onTheme = { navigator.navigate(SettingsPage.THEME) },
+                            onChat = { navigator.navigate(SettingsPage.CHAT_APPEARANCE) },
                         )
                         SettingsPage.THEME -> ThemeSettingsPage(
                             lang = lang,
@@ -420,7 +365,7 @@ class NativeSettingsActivity : ComponentActivity() {
                                 interfaceStyle = FcodeInterfaceStyle.from(value).value
                                 prefs.edit().putString(FcodeAppearancePreferences.INTERFACE_STYLE, interfaceStyle).apply()
                             },
-                            onOpenChatBackground = { page = SettingsPage.CHAT_BACKGROUND },
+                            onOpenChatBackground = { navigator.navigate(SettingsPage.CHAT_BACKGROUND) },
                         )
                         SettingsPage.CHAT_APPEARANCE -> ChatAppearanceSettingsPage(
                             lang = lang,
@@ -481,34 +426,39 @@ class NativeSettingsActivity : ComponentActivity() {
                             onBack = navigateBack,
                         )
                         SettingsPage.MODEL_CONFIGS -> ModelConfigurationsPage(
-                            lang, providerStore.all(), providerStore.active()?.id, providerRevision,
+                            lang, providerSnapshot.profiles, providerSnapshot.active?.id, providerRevision,
                             onBack = navigateBack,
-                            onAdd = { editingProfileId = null; page = SettingsPage.MODEL_EDITOR },
-                            onEdit = { editingProfileId = it; page = SettingsPage.MODEL_EDITOR },
-                            onActivate = { providerStore.activate(it); providerRevision++ },
+                            onAdd = { navigator.openProfileEditor(null) },
+                            onEdit = { navigator.openProfileEditor(it) },
+                            onActivate = { profile ->
+                                settingsScope.launch {
+                                    withContext(kotlinx.coroutines.Dispatchers.IO) { providerStore.activate(profile) }
+                                    providerRevision++
+                                }
+                            },
                         )
                         SettingsPage.MODEL_EDITOR -> key(editingProfileId, providerRevision) {
                             ModelConfigurationEditor(
-                                lang, editingProfileId?.let(providerStore::find), providerStore,
+                                lang, editingProfileId?.let(providerSnapshot::find), providerStore,
                                 onBack = navigateBack,
-                                onSaved = { providerRevision++; page = SettingsPage.MODEL_CONFIGS },
-                                onDeleted = { providerRevision++; page = SettingsPage.MODEL_CONFIGS },
+                                onSaved = { providerRevision++; navigator.finishProfileEditor() },
+                                onDeleted = { providerRevision++; navigator.finishProfileEditor() },
                             )
                         }
                         SettingsPage.MCP -> McpSettingsPage(
                             lang = lang,
                             prefs = prefs,
                             onBack = navigateBack,
-                            onAdd = { editingMcpKey = null; page = SettingsPage.MCP_EDITOR },
-                            onEdit = { editingMcpKey = it; page = SettingsPage.MCP_EDITOR },
+                            onAdd = { navigator.openMcpEditor(null) },
+                            onEdit = { navigator.openMcpEditor(it) },
                         )
                         SettingsPage.MCP_EDITOR -> McpServerEditorPage(
                             lang = lang,
                             existingKey = editingMcpKey,
                             prefs = prefs,
                             onBack = navigateBack,
-                            onSaved = { page = SettingsPage.MCP },
-                            onDeleted = { page = SettingsPage.MCP },
+                            onSaved = { navigator.finishMcpEditor() },
+                            onDeleted = { navigator.finishMcpEditor() },
                         )
                         SettingsPage.SKILLS -> SkillsSettingsPage(lang, prefs, navigateBack)
                         SettingsPage.PROXY -> ProxySettingsPage(
@@ -518,7 +468,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onOpenDashboard = { startActivity(Intent(this@NativeSettingsActivity, MihomoDashboardActivity::class.java)) },
                         )
                         SettingsPage.WEB_UI -> WebUiSettingsPage(
-                            lang, prefs, providerStore.active(), navigateBack,
+                            lang, prefs, providerSnapshot.active, navigateBack,
                             onOpenWebUi = { requestCodexFeature(CodexDependentFeature.WEB_UI) },
                             onOpenDashboard = { startActivity(Intent(this@NativeSettingsActivity, MihomoDashboardActivity::class.java)) },
                             onClearCache = { resetWebUiPreferences(lang) },
@@ -704,6 +654,7 @@ class NativeSettingsActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (hasResumedOnce) resumeRevision++ else hasResumedOnce = true
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
     }
@@ -2323,6 +2274,7 @@ private fun McpSettingsPage(
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var revision by remember { mutableIntStateOf(0) }
+    var refreshing by remember { mutableStateOf(false) }
     val snapshot by produceState(McpSettingsSnapshot(), revision) {
         value = withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
@@ -2339,6 +2291,16 @@ private fun McpSettingsPage(
         prefs.edit().putLong(NativeMcpConfigStore.REVISION_KEY, System.currentTimeMillis()).apply()
         revision++
     }
+    fun refreshStatus() {
+        if (refreshing) return
+        refreshing = true
+        CodexNativeRuntime.refreshMcpStatus()
+        scope.launch {
+            delay(2500) // Wait for the async mcpServerStatus/list response to be recorded.
+            revision++
+            refreshing = false
+        }
+    }
     SettingsScaffold(
         "MCP",
         tr(lang, "\u4e0e WebUI \u5171\u7528 Codex config.toml \u4e2d\u7684\u5916\u90e8\u5de5\u5177", "Share external tools from Codex config.toml with WebUI"),
@@ -2352,6 +2314,17 @@ private fun McpSettingsPage(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            if (snapshot.loaded && snapshot.servers.isNotEmpty()) {
+                item {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { refreshStatus() }, enabled = !refreshing) {
+                            Icon(HugeIcons.Refresh03, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (refreshing) tr(lang, "\u5237\u65b0\u4e2d…", "Refreshing…") else tr(lang, "\u5237\u65b0\u72b6\u6001", "Refresh status"), style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
             }
             when {
                 !snapshot.loaded -> item { EmptySettingsState(HugeIcons.Code, tr(lang, "\u6b63\u5728\u8bfb\u53d6 MCP", "Loading MCP"), tr(lang, "\u6b63\u5728\u89e3\u6790 config.toml", "Parsing config.toml")) }
@@ -2387,17 +2360,19 @@ private fun McpSettingsPage(
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     val statusDetail = when (runtimeStatus.state) {
-                                        "connected" -> tr(lang, "\u5df2\u8fde\u63a5\uff0c${runtimeStatus.toolCount} \u4e2a\u5de5\u5177", "Connected, ${runtimeStatus.toolCount} tools")
+                                        "connected" -> if (runtimeStatus.toolNames.isNotEmpty())
+                                            tr(lang, "\u5df2\u8fde\u63a5\uff0c${runtimeStatus.toolCount} \u4e2a\u5de5\u5177", "Connected, ${runtimeStatus.toolCount} tools") + "\n" + runtimeStatus.toolNames.joinToString(", ")
+                                        else tr(lang, "\u5df2\u8fde\u63a5\uff0c${runtimeStatus.toolCount} \u4e2a\u5de5\u5177", "Connected, ${runtimeStatus.toolCount} tools")
                                         "unavailable" -> runtimeStatus.detail.ifBlank { tr(lang, "\u65e0\u6cd5\u8fde\u63a5\u4e0a\u6e38\u670d\u52a1", "Upstream unavailable") }
                                         "disabled" -> tr(lang, "\u5df2\u7981\u7528\uff0c\u4e0d\u4f1a\u5f71\u54cd\u5bf9\u8bdd", "Disabled; chat will continue normally")
-                                        else -> tr(lang, "\u7b49\u5f85\u804a\u5929\u540e\u7aef\u68c0\u6d4b", "Waiting for the chat backend probe")
+                                        else -> tr(lang, "\u7b49\u5f85\u804a\u5929\u540e\u7aef\u68c0\u6d4b\uff0c\u70b9\u51fb\u5237\u65b0\u72b6\u6001\u91cd\u8bd5", "Waiting for probe; tap Refresh to retry")
                                     }
                                     Text(
                                         statusDetail,
                                         modifier = Modifier.padding(top = 5.dp),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (runtimeStatus.state == "unavailable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                                        maxLines = 2,
+                                        maxLines = 4,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
@@ -2664,6 +2639,7 @@ private fun SettingsRootPage(
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
     onDeveloper: () -> Unit,
+    environmentRevision: Int,
     prefs: SharedPreferences,
     onAbout: () -> Unit,
 ) {
@@ -2671,6 +2647,7 @@ private fun SettingsRootPage(
     val environment by produceState(
         initialValue = SettingsEnvironmentSnapshot(),
         key1 = context.applicationContext,
+        key2 = environmentRevision,
     ) {
         value = withContext(kotlinx.coroutines.Dispatchers.IO) {
             val manager = MihomoManager.get(context.applicationContext)
@@ -2682,6 +2659,8 @@ private fun SettingsRootPage(
                 mihomoInstalled = manager.isInstalled,
                 mihomoRunning = manager.isRunning,
                 mihomoMixedPort = manager.mixedPort(),
+                overlayGranted = canDrawOverlays(context),
+                overlayEnabled = prefs.getBoolean("overlay_enabled", false),
             )
         }
     }
@@ -2754,11 +2733,10 @@ private fun SettingsRootPage(
                 )
             }
             item {
-                val overlayGranted = canDrawOverlays(context)
-                val overlayEnabled = prefs.getBoolean("overlay_enabled", false) && overlayGranted
                 val overlaySummary = when {
-                    overlayEnabled -> tr(lang, "悬浮球已开启 · 手势、提醒与后台保持", "Bubble enabled · gestures, reminders and keep-alive")
-                    !overlayGranted -> tr(lang, "需要悬浮窗权限 · 配置手势与完成提醒", "Overlay permission required · configure gestures and completion alerts")
+                    !environment.loaded -> tr(lang, "正在检查系统权限…", "Checking system permission…")
+                    environment.overlayEnabled && environment.overlayGranted -> tr(lang, "悬浮球已开启 · 手势、提醒与后台保持", "Bubble enabled · gestures, reminders and keep-alive")
+                    !environment.overlayGranted -> tr(lang, "需要悬浮窗权限 · 配置手势与完成提醒", "Overlay permission required · configure gestures and completion alerts")
                     else -> tr(lang, "已关闭 · 配置手势、提醒与后台保持", "Off · configure gestures, reminders and keep-alive")
                 }
                 NavigationSettingsRow(HugeIcons.Sparkles, tr(lang, "悬浮窗与后台", "Floating window & background"), overlaySummary, onOverlay)
@@ -2939,11 +2917,21 @@ private fun ModelConfigurationEditor(
         )
     }
     fun save() {
+        if (busyAction != null) return
         val profile = pendingProfile() ?: return
-        val activeBefore = store.active()?.id
-        store.save(profile)
-        if (activeBefore == null || activeBefore == existing?.id) store.activate(profile)
-        onSaved()
+        busyAction = "save"
+        scope.launch {
+            val result = runCatching {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val activeBefore = store.active()?.id
+                    if (activeBefore == null || activeBefore == existing?.id) store.activate(profile)
+                    else store.save(profile)
+                }
+            }
+            busyAction = null
+            result.onSuccess { onSaved() }
+                .onFailure { failure -> error = failure.message ?: tr(lang, "保存配置失败", "Failed to save configuration") }
+        }
     }
     fun runTest() {
         val profile = pendingProfile() ?: return
@@ -3046,7 +3034,7 @@ private fun ModelConfigurationEditor(
             }
             item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "转发 reasoning.context", "Forward reasoning.context"), tr(lang, "仅控制 Responses reasoning.context；DeepSeek reasoning_content 会自动保留", "Controls Responses reasoning.context only; DeepSeek reasoning_content is preserved automatically"), forwardReasoning) { forwardReasoning = it } }
             if (error != null) item { Text(error.orEmpty(), Modifier.padding(horizontal = 20.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
-            item { Button(::save, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).height(52.dp), shape = RoundedCornerShape(16.dp)) { Icon(HugeIcons.Tick02, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "保存配置", "Save configuration")) } }
+            item { Button(onClick = ::save, enabled = busyAction == null, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).height(52.dp), shape = RoundedCornerShape(16.dp)) { Icon(HugeIcons.Tick02, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "保存配置", "Save configuration")) } }
             if (existing != null) item { TextButton({ confirmDelete = true }, Modifier.fillMaxWidth().padding(horizontal = 16.dp)) { Icon(HugeIcons.Delete01, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "删除此配置", "Delete configuration"), color = MaterialTheme.colorScheme.error) } }
             item { Spacer(Modifier.height(28.dp)) }
         }
@@ -3085,7 +3073,20 @@ private fun ModelConfigurationEditor(
         title = { Text(tr(lang, "删除模型配置？", "Delete model configuration?")) },
         text = { Text(tr(lang, "“${existing.name}”及其中保存的 API Key 和模型目录将被删除。", "“${existing.name}”, its API key and model catalog will be deleted.")) },
         dismissButton = { TextButton({ confirmDelete = false }) { Text(tr(lang, "取消", "Cancel")) } },
-        confirmButton = { TextButton({ store.delete(existing); confirmDelete = false; onDeleted() }) { Text(tr(lang, "删除", "Delete"), color = MaterialTheme.colorScheme.error) } },
+        confirmButton = { TextButton(
+            onClick = {
+                if (busyAction != null) return@TextButton
+                confirmDelete = false
+                busyAction = "delete"
+                scope.launch {
+                    val result = runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { store.delete(existing) } }
+                    busyAction = null
+                    result.onSuccess { onDeleted() }
+                        .onFailure { failure -> error = failure.message ?: tr(lang, "删除配置失败", "Failed to delete configuration") }
+                }
+            },
+            enabled = busyAction == null,
+        ) { Text(tr(lang, "删除", "Delete"), color = MaterialTheme.colorScheme.error) } },
     )
 }
 
@@ -4095,6 +4096,7 @@ private fun LiquidGlassSettingsSection(lang: String) {
     var topBarEnabled by remember { mutableStateOf(prefs.getBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, true)) }
     var topBarBlur by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_BLUR, TopBarLiquidGlassConfig.DEFAULT_BLUR)) }
     var topBarTint by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY)) }
+    var topBarMaskHeight by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_MASK_HEIGHT, TopBarLiquidGlassConfig.DEFAULT_MASK_HEIGHT)) }
     var topBarMaskStart by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_MASK_START, TopBarLiquidGlassConfig.DEFAULT_MASK_START)) }
     var topBarMaskEnd by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_MASK_END, TopBarLiquidGlassConfig.DEFAULT_MASK_END)) }
     var topBarTopAlpha by remember { mutableStateOf(prefs.getFloat(TopBarLiquidGlassConfig.KEY_TOP_ALPHA, TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA)) }
@@ -4104,6 +4106,7 @@ private fun LiquidGlassSettingsSection(lang: String) {
         enabled = topBarEnabled,
         blurRadiusDp = topBarBlur,
         tintIntensity = topBarTint,
+        maskHeightDp = topBarMaskHeight.coerceIn(TopBarLiquidGlassConfig.MIN_MASK_HEIGHT, TopBarLiquidGlassConfig.MAX_MASK_HEIGHT),
         maskStartFraction = topBarMaskStart.coerceIn(0f, 0.92f),
         maskEndFraction = topBarMaskEnd.coerceIn(topBarMaskStart.coerceIn(0f, 0.92f) + 0.04f, 1f),
         topAlpha = topBarTopAlpha,
@@ -4114,11 +4117,20 @@ private fun LiquidGlassSettingsSection(lang: String) {
     ToggleSettingsRow(
         HugeIcons.Sparkles,
         tr(lang, "启用顶栏渐变玻璃", "Enable progressive top-bar glass"),
-        tr(lang, "模糊和色调向下连续淡出，不覆盖聊天内容", "Blur and tint fade continuously into the conversation"),
+        tr(lang, "在 Material 与液态玻璃主题中都向下连续淡出", "Fades continuously in both Material and Liquid Glass themes"),
         topBarEnabled,
     ) { value -> topBarEnabled = value; prefs.edit().putBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, value).apply() }
     GlassSliderRow(tr(lang, "顶栏模糊", "Top-bar blur"), topBarBlur, 0f..32f, { "${it.toInt()} dp" }) { value ->
         topBarBlur = value; prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_BLUR, value).apply()
+    }
+    GlassSliderRow(
+        tr(lang, "蒙版高度", "Mask height"),
+        topBarMaskHeight,
+        TopBarLiquidGlassConfig.MIN_MASK_HEIGHT..TopBarLiquidGlassConfig.MAX_MASK_HEIGHT,
+        { "${it.toInt()} dp" },
+    ) { value ->
+        topBarMaskHeight = value
+        prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_MASK_HEIGHT, value).apply()
     }
     GlassSliderRow(tr(lang, "玻璃色调", "Glass tint"), topBarTint, 0f..0.72f, { "${(it * 100).toInt()}%" }) { value ->
         topBarTint = value; prefs.edit().putFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, value).apply()
@@ -4146,6 +4158,7 @@ private fun LiquidGlassSettingsSection(lang: String) {
             topBarEnabled = true
             topBarBlur = TopBarLiquidGlassConfig.DEFAULT_BLUR
             topBarTint = TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY
+            topBarMaskHeight = TopBarLiquidGlassConfig.DEFAULT_MASK_HEIGHT
             topBarMaskStart = TopBarLiquidGlassConfig.DEFAULT_MASK_START
             topBarMaskEnd = TopBarLiquidGlassConfig.DEFAULT_MASK_END
             topBarTopAlpha = TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA
@@ -4154,6 +4167,7 @@ private fun LiquidGlassSettingsSection(lang: String) {
                 .putBoolean(TopBarLiquidGlassConfig.KEY_ENABLED, true)
                 .putFloat(TopBarLiquidGlassConfig.KEY_BLUR, TopBarLiquidGlassConfig.DEFAULT_BLUR)
                 .putFloat(TopBarLiquidGlassConfig.KEY_TINT_INTENSITY, TopBarLiquidGlassConfig.DEFAULT_TINT_INTENSITY)
+                .putFloat(TopBarLiquidGlassConfig.KEY_MASK_HEIGHT, TopBarLiquidGlassConfig.DEFAULT_MASK_HEIGHT)
                 .putFloat(TopBarLiquidGlassConfig.KEY_MASK_START, TopBarLiquidGlassConfig.DEFAULT_MASK_START)
                 .putFloat(TopBarLiquidGlassConfig.KEY_MASK_END, TopBarLiquidGlassConfig.DEFAULT_MASK_END)
                 .putFloat(TopBarLiquidGlassConfig.KEY_TOP_ALPHA, TopBarLiquidGlassConfig.DEFAULT_TOP_ALPHA)

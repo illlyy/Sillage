@@ -3750,7 +3750,7 @@ public final class CodexHomeActivity extends Activity {
         }, "MihomoButtonAction").start();
     }
 
-    private final class DelayStatusView extends TextView {
+    private final class DelayStatusView extends androidx.appcompat.widget.AppCompatTextView {
         private final LoadingDrawable spinner;
         DelayStatusView(String type) {
             super(CodexHomeActivity.this);
@@ -4852,7 +4852,7 @@ public final class CodexHomeActivity extends Activity {
 
     private ImageView logo(int size) {
         ImageView image = new ImageView(this);
-        image.setImageResource(2131165290);
+        image.setImageResource(com.termux.R.drawable.ic_codex_logo);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setContentDescription("Codex");
         return image;

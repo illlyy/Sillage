@@ -128,10 +128,10 @@ internal object NativeCodeHighlighter {
         // comments or strings are never double-colored.
         val combined = runCatching {
             Regex(
-                "(?<comment>${commentRegex.pattern})" +
-                    "|(?<string>\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\]|\\\\.)*`)" +
-                    "|(?<number>\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)[fFdDlLuU]*)\\b)" +
-                    "|(?<keyword>\\b(?:$keywordPattern)\\b)",
+                "(${commentRegex.pattern})" +
+                    "|(\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\]|\\\\.)*`)" +
+                    "|(\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)[fFdDlLuU]*)\\b)" +
+                    "|(\\b(?:$keywordPattern)\\b)",
             )
         }.getOrNull() ?: return null
 
@@ -140,10 +140,10 @@ internal object NativeCodeHighlighter {
             for (match in combined.findAll(code)) {
                 val groups = match.groups
                 val (color, bold) = when {
-                    groups["comment"] != null -> palette.comment to false
-                    groups["string"] != null -> palette.string to false
-                    groups["number"] != null -> palette.number to false
-                    groups["keyword"] != null -> palette.keyword to true
+                    groups[1] != null -> palette.comment to false
+                    groups[2] != null -> palette.string to false
+                    groups[3] != null -> palette.number to false
+                    groups[4] != null -> palette.keyword to true
                     else -> continue
                 }
                 val range = match.range

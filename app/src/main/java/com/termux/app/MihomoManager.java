@@ -234,7 +234,9 @@ final class MihomoManager {
                     try { Thread.sleep(100L); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
                 }
             }
-            try { active.destroyForcibly(); } catch (Exception ignored) {}
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try { active.destroyForcibly(); } catch (Exception ignored) {}
+            }
         }
         if (isMihomoPid(persistedPid)) {
             try { android.os.Process.killProcess(persistedPid); } catch (Exception ignored) {}

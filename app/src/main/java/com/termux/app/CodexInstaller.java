@@ -222,8 +222,16 @@ final class CodexInstaller {
                 builder.environment().put("PREFIX", TermuxConstants.TERMUX_PREFIX_DIR_PATH);
                 builder.environment().put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin");
                 builder.redirectErrorStream(true);
-                builder.redirectOutput(ProcessBuilder.Redirect.appendTo(log));
-                int exitCode = builder.start().waitFor();
+                Process setupProcess = builder.start();
+                try (InputStream input = setupProcess.getInputStream();
+                     FileOutputStream output = new FileOutputStream(log, true)) {
+                    byte[] buffer = new byte[8 * 1024];
+                    int count;
+                    while ((count = input.read(buffer)) >= 0) {
+                        if (count > 0) output.write(buffer, 0, count);
+                    }
+                }
+                int exitCode = setupProcess.waitFor();
                 if (exitCode != 0) throw new IOException("Environment setup exited with code " + exitCode + ". Log: " + log.getAbsolutePath());
                 activity.runOnUiThread(() -> {
                     progress.dismiss();
