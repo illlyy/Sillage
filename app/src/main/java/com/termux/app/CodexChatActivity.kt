@@ -23,6 +23,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.termux.R
+import com.termux.app.update.AppUpdateManager
 import com.termux.shared.termux.TermuxConstants
 import java.io.File
 import java.util.UUID
@@ -3237,6 +3238,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         hideNativeStatusBar = prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)
         applyNativeStatusBarVisibility(hideNativeStatusBar)
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
+        val installUpdateRequested = intent?.getBooleanExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE, false) == true
+        intent?.removeExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE)
+        AppUpdateManager.resumePendingInstall(this, nativeLanguage, userInitiated = installUpdateRequested)
+        AppUpdateManager.checkAutomatically(this, nativeLanguage)
         bridge?.loadSkills()
         reloadProviderConfigurationIfChanged()
         if (chatState.busy) startFrameDiagnostics()
@@ -3251,6 +3256,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.getBooleanExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE, false)) {
+            intent.removeExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE)
+            AppUpdateManager.resumePendingInstall(this, nativeLanguage, userInitiated = true)
+        }
         val threadId = intent.getStringExtra(NativeTaskNotificationManager.EXTRA_THREAD_ID).orEmpty()
         if (threadId.isBlank()) return
         notificationTargetThreadId = threadId

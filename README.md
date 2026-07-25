@@ -23,6 +23,58 @@ The repository's `app/dev_keystore.jks` is the public upstream debug key and mus
 
 The WebView preparation step downloads a pinned Codex Desktop package from the upstream static asset location. Keep the recorded version and digest metadata current whenever the snapshot is regenerated.
 
+## Signed GitHub releases and in-app updates
+
+Stable builds read update metadata from:
+
+```text
+https://github.com/illlyy/Fcode/releases/latest/download/update.json
+```
+
+The repository must be public for unauthenticated clients to use that URL. Never embed a GitHub
+personal access token in the APK. If source must remain private, publish legally distributable
+release artifacts from a separate public repository and override `FCODE_UPDATE_MANIFEST_URL` at
+build time.
+
+Generate one production signing key and keep it outside the repository:
+
+```powershell
+keytool -genkeypair -v -keystore D:\AndroidKeys\fcode-release.jks -alias fcode -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Add these GitHub Actions repository secrets:
+
+- `FCODE_KEYSTORE_BASE64`
+- `FCODE_STORE_PASSWORD`
+- `FCODE_KEY_ALIAS`
+- `FCODE_KEY_PASSWORD`
+
+If this source repository remains private, create a separate public repository with an initial
+commit, set the Actions variable `FCODE_RELEASE_REPOSITORY` to a value such as
+`illlyy/Fcode-Releases`, and add `FCODE_RELEASE_TOKEN` as a fine-grained token with Contents write
+access to that repository. The token is used only by GitHub Actions and is never embedded in the
+APK. If `FCODE_RELEASE_REPOSITORY` is unset, releases are published to the current repository.
+
+On Windows, copy the keystore as Base64 without writing another credential file:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("D:\AndroidKeys\fcode-release.jks")) | Set-Clipboard
+```
+
+For every release, increment both `versionCode` and `versionName` in `app/build.gradle`, update
+`RELEASE_NOTES.md`, commit the changes, and push a matching annotated tag:
+
+```powershell
+git tag -a v0.118.4 -m "Fcode v0.118.4"
+git push origin HEAD
+git push origin v0.118.4
+```
+
+The `Publish signed release` workflow verifies the tag against the APK metadata, verifies the APK
+signature, generates `update.json` and SHA-256 sums, preserves the R8 mapping, and creates the
+GitHub Release. Existing installations signed with the public development key cannot be upgraded
+in place to the production key; back up application data and reinstall once when changing keys.
+
 ## Private-backup and upgrade workflow
 
 - Keep the combined repository private while it contains generated Codex Desktop assets whose public redistribution terms have not been confirmed.

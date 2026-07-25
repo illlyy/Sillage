@@ -11,6 +11,13 @@ android {
     def apkVersionTag = System.getenv("TERMUX_APK_VERSION_TAG") ?: ""
     def splitAPKsForDebugBuilds = System.getenv("TERMUX_SPLIT_APKS_FOR_DEBUG_BUILDS") ?: "1"
     def splitAPKsForReleaseBuilds = System.getenv("TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS") ?: "0" // F-Droid does not support split APKs #1904
+    def configuredUpdateManifestUrl = System.getenv("FCODE_UPDATE_MANIFEST_URL") ?: ""
+    def updateManifestUrl = configuredUpdateManifestUrl.isBlank() ? "https://github.com/illlyy/Fcode/releases/latest/download/update.json" : configuredUpdateManifestUrl
+    def releaseKeystorePath = System.getenv("FCODE_KEYSTORE_PATH") ?: ""
+    def releaseStorePassword = System.getenv("FCODE_STORE_PASSWORD") ?: ""
+    def releaseKeyAlias = System.getenv("FCODE_KEY_ALIAS") ?: ""
+    def releaseKeyPassword = System.getenv("FCODE_KEY_PASSWORD") ?: ""
+    def releaseSigningConfigured = [releaseKeystorePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { !it.isBlank() }
 
     dependencies {
                 implementation platform('androidx.compose:compose-bom:2025.04.01')
@@ -23,6 +30,7 @@ android {
         implementation 'io.github.kyant0:backdrop:2.0.0'
         implementation 'io.github.kyant0:shapes:1.2.0'
         implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.9.0'
+        implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.9.0'
         implementation 'androidx.profileinstaller:profileinstaller:1.4.1'
         implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
         debugImplementation 'androidx.compose.ui:ui-tooling'
@@ -50,11 +58,12 @@ implementation "androidx.annotation:annotation:1.3.0"
         applicationId "com.ilyop.codex"
         minSdk project.properties.minSdkVersion.toInteger()
         targetSdk project.properties.targetSdkVersion.toInteger()
-        versionCode 1002
-        versionName "0.118.3"
+        versionCode 1003
+        versionName "0.118.4"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
+        buildConfigField "String", "UPDATE_MANIFEST_URL", "\"${updateManifestUrl}\""
 
         manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.ilyop.codex"
         manifestPlaceholders.TERMUX_APP_NAME = "Sillage"
@@ -89,6 +98,14 @@ implementation "androidx.annotation:annotation:1.3.0"
             storePassword 'xrj45yWGLbsO7W0v'
             keyPassword 'xrj45yWGLbsO7W0v'
         }
+        release {
+            if (releaseSigningConfigured) {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -96,10 +113,9 @@ implementation "androidx.annotation:annotation:1.3.0"
             minifyEnabled true
             shrinkResources false // Reproducible builds
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // Signed with the committed dev keystore so performance testing can use a real
-            // non-debuggable build: debug builds run with CheckJNI + interpreter-first ART and
-            // ignore baseline-prof.txt, which makes the whole native UI feel janky.
-            signingConfig signingConfigs.debug
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
         }
 
         debug {

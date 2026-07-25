@@ -12,6 +12,7 @@ import android.webkit.WebView
 import android.widget.Toast
 import com.termux.BuildConfig
 import com.termux.R
+import com.termux.app.update.AppUpdateManager
 import com.termux.shared.termux.TermuxConstants
 import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
@@ -338,6 +339,13 @@ class NativeSettingsActivity : ComponentActivity() {
                             onDeveloper = { navigator.navigate(SettingsPage.DEVELOPER) },
                             environmentRevision = resumeRevision,
                             prefs = prefs,
+                            onCheckUpdates = {
+                                AppUpdateManager.checkForUpdates(
+                                    this@NativeSettingsActivity,
+                                    lang,
+                                    userInitiated = true,
+                                )
+                            },
                             onAbout = { dialog = "about" },
                         )
                         SettingsPage.APPEARANCE -> AppearanceSettingsPage(
@@ -673,6 +681,10 @@ class NativeSettingsActivity : ComponentActivity() {
         if (hasResumedOnce) resumeRevision++ else hasResumedOnce = true
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
+        AppUpdateManager.resumePendingInstall(
+            this,
+            resolveLanguage(prefs.getString(KEY_LANGUAGE, "system").orEmpty()),
+        )
     }
 
     private fun applyNativeStatusBarVisibility(hidden: Boolean) {
@@ -2802,6 +2814,7 @@ private fun SettingsRootPage(
     onDeveloper: () -> Unit,
     environmentRevision: Int,
     prefs: SharedPreferences,
+    onCheckUpdates: () -> Unit,
     onAbout: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -2901,6 +2914,14 @@ private fun SettingsRootPage(
                     else -> tr(lang, "已关闭 · 配置手势、提醒与后台保持", "Off · configure gestures, reminders and keep-alive")
                 }
                 NavigationSettingsRow(HugeIcons.Sparkles, tr(lang, "悬浮窗与后台", "Floating window & background"), overlaySummary, onOverlay)
+            }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.Refresh03,
+                    tr(lang, "检查更新", "Check for updates"),
+                    "${tr(lang, "当前版本", "Current version")} ${BuildConfig.VERSION_NAME}",
+                    onCheckUpdates,
+                )
             }
             item { NavigationSettingsRow(HugeIcons.Settings03, tr(lang, "关于 Fcode", "About Fcode"), "${tr(lang, "版本", "Version")} ${BuildConfig.VERSION_NAME}", onAbout) }
             item { Spacer(Modifier.height(28.dp)) }

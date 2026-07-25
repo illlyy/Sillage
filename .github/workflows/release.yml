@@ -1,0 +1,145 @@
+name: Publish signed release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        shell: bash
+        run: sdkmanager "platforms;android-37" "ndk;22.1.7171670"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure distribution repository
+        env:
+          CONFIGURED_REPOSITORY: ${{ vars.FCODE_RELEASE_REPOSITORY }}
+        shell: bash
+        run: |
+          RELEASE_REPOSITORY="${CONFIGURED_REPOSITORY:-$GITHUB_REPOSITORY}"
+          echo "RELEASE_REPOSITORY=$RELEASE_REPOSITORY" >> "$GITHUB_ENV"
+          echo "FCODE_UPDATE_MANIFEST_URL=https://github.com/$RELEASE_REPOSITORY/releases/latest/download/update.json" >> "$GITHUB_ENV"
+
+      - name: Validate signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FCODE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.FCODE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.FCODE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.FCODE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+
+      - name: Restore release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FCODE_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/fcode-release.jks"
+          chmod 600 "$RUNNER_TEMP/fcode-release.jks"
+
+      - name: Run tests and build signed APK
+        env:
+          FCODE_KEYSTORE_PATH: ${{ runner.temp }}/fcode-release.jks
+          FCODE_STORE_PASSWORD: ${{ secrets.FCODE_STORE_PASSWORD }}
+          FCODE_KEY_ALIAS: ${{ secrets.FCODE_KEY_ALIAS }}
+          FCODE_KEY_PASSWORD: ${{ secrets.FCODE_KEY_PASSWORD }}
+          TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS: "0"
+        shell: bash
+        run: ./gradlew testDebugUnitTest assembleRelease --console=plain
+
+      - name: Prepare release assets
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          METADATA="app/build/outputs/apk/release/output-metadata.json"
+          VERSION_NAME="$(jq -r '.elements[0].versionName' "$METADATA")"
+          VERSION_CODE="$(jq -r '.elements[0].versionCode' "$METADATA")"
+          OUTPUT_FILE="$(jq -r '.elements[0].outputFile' "$METADATA")"
+          APK_PATH="$(dirname "$METADATA")/$OUTPUT_FILE"
+
+          if [ "v$VERSION_NAME" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match versionName $VERSION_NAME" >&2
+            exit 1
+          fi
+
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
+
+          APK_NAME="Fcode-$GITHUB_REF_NAME.apk"
+          cp "$APK_PATH" "$APK_NAME"
+          SHA256="$(sha256sum "$APK_NAME" | awk '{print $1}')"
+          printf '%s  %s\n' "$SHA256" "$APK_NAME" > sha256sums.txt
+
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg apkUrl "https://github.com/$RELEASE_REPOSITORY/releases/download/$GITHUB_REF_NAME/$APK_NAME" \
+            --arg sha256 "$SHA256" \
+            --arg publishedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --rawfile changelog RELEASE_NOTES.md \
+            '{
+              versionCode: $versionCode,
+              versionName: $versionName,
+              minSdk: 24,
+              force: false,
+              apkUrl: $apkUrl,
+              sha256: $sha256,
+              publishedAt: $publishedAt,
+              changelog: $changelog
+            }' > update.json
+
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve R8 mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping-${{ github.ref_name }}
+          path: app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.FCODE_RELEASE_TOKEN || github.token }}
+          APK_NAME: ${{ steps.assets.outputs.apk_name }}
+        shell: bash
+        run: |
+          VERIFY_TAG=()
+          if [ "$RELEASE_REPOSITORY" = "$GITHUB_REPOSITORY" ]; then
+            VERIFY_TAG=(--verify-tag)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$RELEASE_REPOSITORY" \
+            "$APK_NAME" \
+            update.json \
+            sha256sums.txt \
+            "${VERIFY_TAG[@]}" \
+            --title "Fcode $GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md
