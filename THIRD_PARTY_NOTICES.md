@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-This private monorepo combines source and generated assets from multiple upstream projects. The original license files remain authoritative.
+This public repository combines source and generated assets from multiple upstream projects. The original license files remain authoritative. Public availability of this repository does not grant any additional right to redistribute upstream code, generated bundles, fonts, icons, or binaries.
 
 ## Termux application
 
@@ -32,11 +32,11 @@ This private monorepo combines source and generated assets from multiple upstrea
 
 ## Codex Desktop generated WebView
 
-`app/src/main/assets/codex-desktop/` is a generated snapshot derived from a pinned Codex Desktop package and the vendored codex-web preparation process. It is retained in this repository only to reproduce the currently runnable private Android build. No public redistribution right is asserted by this notice. Confirm the applicable upstream terms and remove the generated snapshot from public history before making the repository public.
+`app/src/main/assets/codex-desktop/` is a generated snapshot derived from a pinned Codex Desktop package and the vendored codex-web preparation process. Its presence in this public source repository is not a license grant. Confirm the applicable upstream terms before distributing source or APKs; if redistribution is not permitted, remove the snapshot and publish from a repository/build that does not bundle it.
 
 ## Official skills snapshot
 
-`app/src/main/assets/official-skills.json` and `app/src/main/assets/official-skills.zip` are a pinned runtime snapshot used by the Android application. Their source revision and redistribution terms must be recorded and reviewed before public publication.
+`app/src/main/assets/official-skills.json` and `app/src/main/assets/official-skills.zip` are a pinned runtime snapshot used by the Android application. Their source revision and redistribution terms must be recorded and reviewed before distributing public builds.
 ## RikkaHub native UI
 
 - Upstream: https://github.com/rikkahub/rikkahub

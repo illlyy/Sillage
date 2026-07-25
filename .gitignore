@@ -62,3 +62,21 @@ scratch/
 
 # The upstream public debug keystore remains tracked for debug builds only.
 !app/dev_keystore.jks
+
+# Local ADB/UI dumps, screenshots, logs and rollout transcripts. Keep these out
+# of the repository; formal Android resources live below app/src/ instead.
+/*.xml
+/*.txt
+/*.png
+/*.jsonl
+/latest-sessions/
+/perf-artifacts/
+/qa-artifacts/
+/_Temp/
+/.kotlin/
+
+# Optional local clones used only as design/reference sources.
+/vendor/AndroidLiquidGlass/
+/vendor/FlClash/
+/vendor/kelivo/
+/vendor/rikkahub/
