@@ -93,6 +93,29 @@ Linux/macOS：
 
 生产 keystore 必须只保存在安全的密码管理器和 GitHub Secrets 中。若把发布资产放到另一个公开仓库，可设置 Actions Variable `FCODE_RELEASE_REPOSITORY`（例如 `illlyy/Fcode-Releases`），并为工作流提供具有 Contents write 权限的 `FCODE_RELEASE_TOKEN`。默认情况下，发布到当前仓库。
 
+### 更新说明怎么写
+
+每个版本都把面向用户的变化写进 `RELEASE_NOTES.md`，再同步到 `CHANGELOG.md`。只写用户能感知或维护者需要知道的内容，建议使用下面的结构：
+
+```markdown
+## 新增
+- 新增了什么功能，用户在哪里可以找到它。
+
+## 修复
+- 修复了什么问题，什么场景不再出错。
+
+## 变更
+- 行为、兼容性或配置是否发生变化。
+
+## 安全
+- 签名、权限、凭据处理等重要变化。
+
+## 已知问题
+- 当前版本仍存在的限制，以及临时解决办法。
+```
+
+不要把内部 commit hash、测试截图或未经确认的功能计划当作已发布功能；这些内容留在 issue 或开发记录中。
+
 ## 应用内更新协议
 
 `update.json` 至少包含以下字段：
@@ -121,6 +144,6 @@ Linux/macOS：
 
 ## 许可证
 
-Android 基础工程按 GPLv3-only 发布，模块例外和第三方许可证以各目录中的原始文件为准。详见 [`LICENSE.md`](LICENSE.md) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+Android 基础工程按 GPLv3-only 发布，模块例外和第三方许可证以各目录中的原始文件为准。详见 [`LICENSE.md`](LICENSE.md) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。上游 Termux 文档和项目说明见 [termux/termux-app](https://github.com/termux/termux-app)。
 
 问题反馈和功能讨论请使用 [GitHub Issues](https://github.com/illlyy/Fcode/issues)。
