@@ -31,9 +31,103 @@ internal object FcodeAppearancePreferences {
     const val CHAT_BACKGROUND = "native_chat_background_v1"
     const val CHAT_BACKGROUND_IMAGE = "native_chat_background_image_v1"
     const val CHAT_BACKGROUND_DIM = "native_chat_background_dim_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_ENABLED = "native_chat_dynamic_background_enabled_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_DELAY_MS = "native_chat_dynamic_background_delay_ms_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_DURATION_MS = "native_chat_dynamic_background_duration_ms_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_BLUR_DP = "native_chat_dynamic_background_blur_dp_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_REFRACTION_HEIGHT_DP = "native_chat_dynamic_background_refraction_height_dp_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_REFRACTION_AMOUNT_DP = "native_chat_dynamic_background_refraction_amount_dp_v1"
+    const val CHAT_DYNAMIC_BACKGROUND_CHROMATIC = "native_chat_dynamic_background_chromatic_v1"
     const val COMPACT_COMPOSER_ON_SCROLL = "native_compact_composer_on_scroll_v1"
 
     fun normalizeColorMode(value: String?): String = value?.takeIf { it in setOf("system", "light", "dark") } ?: "system"
+}
+
+/**
+ * The first native animated chat background: a clear liquid-glass circle reveals the crisp
+ * wallpaper through an initially frosted canvas. Values intentionally mirror the tunable
+ * Backdrop recipes from vendor/AndroidLiquidGlass while keeping the motion controls in the
+ * chat-background settings page rather than the developer-only glass controls.
+ */
+@Immutable
+internal data class FcodeChatDynamicBackgroundConfig(
+    val enabled: Boolean = DEFAULT_ENABLED,
+    val autoStartDelayMs: Int = DEFAULT_AUTO_START_DELAY_MS,
+    val expansionDurationMs: Int = DEFAULT_EXPANSION_DURATION_MS,
+    val initialBlurDp: Float = DEFAULT_INITIAL_BLUR_DP,
+    val refractionHeightDp: Float = DEFAULT_REFRACTION_HEIGHT_DP,
+    val refractionAmountDp: Float = DEFAULT_REFRACTION_AMOUNT_DP,
+    val chromaticAberration: Boolean = DEFAULT_CHROMATIC_ABERRATION,
+) {
+    companion object {
+        const val DEFAULT_ENABLED = true
+        const val DEFAULT_AUTO_START_DELAY_MS = 2200
+        const val DEFAULT_EXPANSION_DURATION_MS = 1900
+        const val DEFAULT_INITIAL_BLUR_DP = 18f
+        const val DEFAULT_REFRACTION_HEIGHT_DP = 18f
+        const val DEFAULT_REFRACTION_AMOUNT_DP = 28f
+        const val DEFAULT_CHROMATIC_ABERRATION = false
+
+        const val MIN_DELAY_MS = 300
+        const val MAX_DELAY_MS = 12000
+        const val MIN_DURATION_MS = 500
+        const val MAX_DURATION_MS = 6000
+        const val MIN_BLUR_DP = 0f
+        const val MAX_BLUR_DP = 32f
+        const val MIN_REFRACTION_HEIGHT_DP = 0f
+        const val MAX_REFRACTION_HEIGHT_DP = 48f
+        const val MIN_REFRACTION_AMOUNT_DP = 0f
+        const val MAX_REFRACTION_AMOUNT_DP = 72f
+    }
+}
+
+internal fun readFcodeChatDynamicBackgroundConfig(context: android.content.Context): FcodeChatDynamicBackgroundConfig {
+    val prefs = context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)
+    return FcodeChatDynamicBackgroundConfig(
+        enabled = prefs.getBoolean(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_ENABLED,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_ENABLED,
+        ),
+        autoStartDelayMs = prefs.getInt(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_DELAY_MS,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_AUTO_START_DELAY_MS,
+        ).coerceIn(
+            FcodeChatDynamicBackgroundConfig.MIN_DELAY_MS,
+            FcodeChatDynamicBackgroundConfig.MAX_DELAY_MS,
+        ),
+        expansionDurationMs = prefs.getInt(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_DURATION_MS,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_EXPANSION_DURATION_MS,
+        ).coerceIn(
+            FcodeChatDynamicBackgroundConfig.MIN_DURATION_MS,
+            FcodeChatDynamicBackgroundConfig.MAX_DURATION_MS,
+        ),
+        initialBlurDp = prefs.getFloat(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_BLUR_DP,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_INITIAL_BLUR_DP,
+        ).coerceIn(
+            FcodeChatDynamicBackgroundConfig.MIN_BLUR_DP,
+            FcodeChatDynamicBackgroundConfig.MAX_BLUR_DP,
+        ),
+        refractionHeightDp = prefs.getFloat(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_REFRACTION_HEIGHT_DP,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_REFRACTION_HEIGHT_DP,
+        ).coerceIn(
+            FcodeChatDynamicBackgroundConfig.MIN_REFRACTION_HEIGHT_DP,
+            FcodeChatDynamicBackgroundConfig.MAX_REFRACTION_HEIGHT_DP,
+        ),
+        refractionAmountDp = prefs.getFloat(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_REFRACTION_AMOUNT_DP,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_REFRACTION_AMOUNT_DP,
+        ).coerceIn(
+            FcodeChatDynamicBackgroundConfig.MIN_REFRACTION_AMOUNT_DP,
+            FcodeChatDynamicBackgroundConfig.MAX_REFRACTION_AMOUNT_DP,
+        ),
+        chromaticAberration = prefs.getBoolean(
+            FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_CHROMATIC,
+            FcodeChatDynamicBackgroundConfig.DEFAULT_CHROMATIC_ABERRATION,
+        ),
+    )
 }
 
 internal enum class FcodeInterfaceStyle(val value: String) {
@@ -94,6 +188,7 @@ internal val LocalFcodeColorPalette = staticCompositionLocalOf { FcodeColorPalet
 internal val LocalFcodeChatBackground = staticCompositionLocalOf { FcodeChatBackgroundStyle.THEME }
 internal val LocalFcodeChatBackgroundImage = staticCompositionLocalOf { "" }
 internal val LocalFcodeChatBackgroundDim = staticCompositionLocalOf { 0.32f }
+internal val LocalFcodeChatDynamicBackground = staticCompositionLocalOf { FcodeChatDynamicBackgroundConfig() }
 internal val LocalFcodeMarkdownColors = staticCompositionLocalOf {
     fcodeMarkdownColors(FcodeColorPalette.ROSE, dark = false, scheme = fcodeColorScheme(FcodeColorPalette.ROSE, false))
 }

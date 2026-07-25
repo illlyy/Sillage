@@ -31,6 +31,7 @@ internal object NativeHistoryParser {
         var planExplanation = ""
         var planPanelIndex = -1
         var estimatedChars = 0L
+        var pendingLegacyCompactionIndex = -1
 
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
@@ -41,6 +42,13 @@ internal object NativeHistoryParser {
                 else -> continue
             }
             var content = item.optString("content").trim()
+            // History can be reparsed during a route refresh. Keep LazyColumn keys stable by
+            // preferring the server id and otherwise deriving one from position/content instead
+            // of generating a fresh UUID on every parse.
+            val sourceId = item.optString("id").trim()
+            val stableSourceId = sourceId.ifBlank {
+                "history:$index:${role.name.lowercase()}:${content.hashCode()}"
+            }
             val messageSkills = buildList {
                 val skillArray = item.optJSONArray("skills") ?: JSONArray()
                 for (skillIndex in 0 until skillArray.length()) {
@@ -72,21 +80,107 @@ internal object NativeHistoryParser {
                 }
                 continue
             }
-            if (role == NativeChatRole.ACTIVITY && content.startsWith("PROCESS2|")) {
+            if (role == NativeChatRole.ACTIVITY && (content.startsWith("PROCESS2|") || content.startsWith("PROCESS|"))) {
                 content = compactProcessContent(content)
             }
+            if (role == NativeChatRole.ACTIVITY && content.startsWith("NOTICE|")) {
+                val legacyCompaction = NativeHistoryAdapter.decodeLegacyNotice(content)
+                if (pendingLegacyCompactionIndex >= 0 && legacyCompaction == null) {
+                    // Do not merge a later unrelated NOTICE into an earlier compression marker.
+                    pendingLegacyCompactionIndex = -1
+                }
+                if (legacyCompaction != null) {
+                    if (legacyCompaction.status == NativeCompactionStatus.RUNNING) {
+                        pendingLegacyCompactionIndex = parsed.size
+                    } else if (pendingLegacyCompactionIndex in parsed.indices) {
+                        val previous = NativeHistoryAdapter.decodeCompaction(parsed[pendingLegacyCompactionIndex].content)
+                        val merged = legacyCompaction.copy(
+                            id = previous?.id ?: legacyCompaction.id,
+                            source = previous?.source ?: legacyCompaction.source,
+                            createdAtMs = previous?.createdAtMs ?: legacyCompaction.createdAtMs,
+                        )
+                        parsed[pendingLegacyCompactionIndex] = parsed[pendingLegacyCompactionIndex].copy(
+                            content = NativeHistoryAdapter.encodeCompaction(merged),
+                            streaming = false,
+                        )
+                        pendingLegacyCompactionIndex = -1
+                        continue
+                    }
+                    content = NativeHistoryAdapter.encodeCompaction(legacyCompaction)
+                }
+            } else if (pendingLegacyCompactionIndex >= 0) {
+                pendingLegacyCompactionIndex = -1
+            }
             if (content.isEmpty()) continue
+            // Some app-server versions persist agent-message markup verbatim instead of the
+            // normalized history parts produced by the bridge. Run the same stateful parser used
+            // by live deltas so protocol tags can never reach the regular assistant renderer.
+            if (role == NativeChatRole.ASSISTANT && content.contains('<')) {
+                val parts = NativePlanStreamParser.splitComplete(content)
+                if (parts.any { it.role == "plan" }) {
+                    parts.forEachIndexed { partIndex, part ->
+                        val partText = part.text.trim()
+                        if (partText.isEmpty()) return@forEachIndexed
+                        val partRole = if (part.role == "plan") NativeChatRole.ACTIVITY else NativeChatRole.ASSISTANT
+                        val partContent = if (partRole == NativeChatRole.ACTIVITY) {
+                            encodeNativeProposedPlan(partText)
+                        } else partText
+                        estimatedChars += partContent.length
+                        parsed.add(
+                            NativeChatMessage(
+                                id = "$stableSourceId:part:$partIndex",
+                                role = partRole,
+                                content = partContent,
+                                skills = if (partRole == NativeChatRole.ASSISTANT) messageSkills else emptyList(),
+                                attachments = if (partRole == NativeChatRole.ASSISTANT) messageAttachments else emptyList(),
+                            ),
+                        )
+                    }
+                    continue
+                }
+            }
             estimatedChars += content.length
             messageSkills.forEach { estimatedChars += it.name.length + it.description.length + it.path.length }
             messageAttachments.forEach { estimatedChars += it.name.length + it.path.length }
+            val stableMessageId = if (role == NativeChatRole.ACTIVITY) {
+                NativeHistoryAdapter.decodeCompaction(content)?.id ?: stableSourceId
+            } else stableSourceId
             parsed.add(
                 NativeChatMessage(
+                    id = stableMessageId,
                     role = role,
                     content = content,
                     skills = messageSkills,
                     attachments = messageAttachments,
                 ),
             )
+        }
+        // Keep the first timeline position for duplicate compaction lifecycle records. The
+        // server may replay a journal item after the same item was already present in history,
+        // sometimes without carrying the server item id.
+        val canonicalCompactions = ArrayList<Pair<Int, NativeCompactionItem>>()
+        val duplicateCompactionIndexes = ArrayList<Int>()
+        parsed.forEachIndexed { messageIndex, message ->
+            if (message.role != NativeChatRole.ACTIVITY) return@forEachIndexed
+            val compaction = NativeHistoryAdapter.decodeCompaction(message.content) ?: return@forEachIndexed
+            val canonicalIndex = canonicalCompactions.indexOfFirst { (_, existing) ->
+                NativeHistoryAdapter.mergeCompactionTimeline(listOf(existing, compaction)).size == 1
+            }
+            if (canonicalIndex < 0) {
+                canonicalCompactions += messageIndex to compaction
+            } else {
+                val (previousIndex, previous) = canonicalCompactions[canonicalIndex]
+                val merged = NativeHistoryAdapter.mergeCompactionTimeline(listOf(previous, compaction)).first()
+                parsed[previousIndex] = parsed[previousIndex].copy(
+                    content = NativeHistoryAdapter.encodeCompaction(merged),
+                    streaming = !merged.isTerminal,
+                )
+                canonicalCompactions[canonicalIndex] = previousIndex to merged
+                duplicateCompactionIndexes += messageIndex
+            }
+        }
+        duplicateCompactionIndexes.asReversed().forEach { duplicateIndex ->
+            if (duplicateIndex in parsed.indices) parsed.removeAt(duplicateIndex)
         }
         estimatedChars += planJson.length + planExplanation.length
         val contentFingerprint = contentFingerprint(parsed, planJson, planExplanation, planPanelIndex)
@@ -123,7 +217,7 @@ internal object NativeHistoryParser {
     /** Command cache refs use random UUIDs on every disk parse. Normalize them and include
      * the full cached stream hash so equivalent history receives a stable fingerprint. */
     private fun stableContentHash(content: String): Int {
-        if (!content.startsWith("PROCESS2|")) return content.hashCode()
+        if (!content.startsWith("PROCESS2|") && !content.startsWith("PROCESS|")) return content.hashCode()
         val payload = decodePayload(content.substringAfter('|')) ?: return content.hashCode()
         val tools = payload.optJSONArray("tools") ?: return payload.toString().hashCode()
         for (index in 0 until tools.length()) {
@@ -199,6 +293,7 @@ internal object NativeHistoryParser {
     private fun decodePayload(encoded: String): JSONObject? = runCatching {
         JSONObject(String(NativeBase64.decode(encoded), Charsets.UTF_8))
     }.getOrNull()
+
 }
 
 

@@ -63,6 +63,24 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private val chatState = NativeChatState()
     private lateinit var providerStore: CodexProviderStore
+    private lateinit var compactionSettingsStore: NativeCompactionSettingsStore
+    private lateinit var compactionJournalStore: NativeCompactionJournalStore
+    private var compactionPolicy = NativeCompactionPolicy()
+    private var compactionPolicyKey = ""
+    private var compactionSettingsSnapshot: NativeCompactionSettings? = null
+    private var lastReliableUsage: NativeTurnUsage? = null
+    private var protocolReasoningSeen = false
+    private var protocolAssistantSeen = false
+    private var protocolCommandSeen = false
+    private var protocolPlanSeen = false
+    private var protocolToolSeen = false
+    private var protocolSubagentSeen = false
+    private var protocolUsageSeen = false
+    private var protocolTurnCompletedSeen = false
+    private val protocolEventQueue = NativeOrderedProtocolEventQueue()
+    private val flushProtocolEventQueueRunnable = Runnable { flushProtocolEventQueue() }
+    private var pendingAutoCompactionTurn = ""
+    private val compactionLifecycleTimeouts = HashMap<String, Runnable>()
     private var bridge: CodexAppServerBridge? = null
     private val pendingNativeSteers = mutableMapOf<Int, PendingNativeSteer>()
     private var activeProfileId: String = ""
@@ -84,6 +102,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
     }
     private val streamHandler = Handler(Looper.getMainLooper())
+    private val autoCompactionRunnable = Runnable {
+        val expectedTurn = pendingAutoCompactionTurn
+        pendingAutoCompactionTurn = ""
+        if (expectedTurn.isBlank() || expectedTurn != activeCompactionTurnKey()) return@Runnable
+        val usage = lastReliableUsage ?: return@Runnable
+        val decision = currentCompactionPolicy().evaluate(compactionPolicyInput(usage))
+        if (!decision.shouldTrigger || chatState.compactionItems.any { !it.isTerminal }) return@Runnable
+        requestCompaction(NativeCompactionSource.AUTOMATIC, decision)
+    }
     private val backendScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val backendCatalogPreparer = NativeBackendCatalogPreparer(
         File(File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "ilyop-model-catalog.json"),
@@ -216,6 +243,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .put("diagnostics", NativeChatDiagnostics.file(this).absolutePath))
         val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         providerStore = CodexProviderStore(nativePrefs)
+        compactionSettingsStore = NativeCompactionSettingsStore(nativePrefs)
+        compactionJournalStore = NativeCompactionJournalStore(nativePrefs)
         notificationTargetThreadId = intent?.getStringExtra(NativeTaskNotificationManager.EXTRA_THREAD_ID).orEmpty()
         if (stalePendingStateCleaned.compareAndSet(false, true)) {
             val staleApprovalKeys = nativePrefs.all.keys.filter { it.startsWith("native_thread_pending_approval_v1_") }
@@ -290,7 +319,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onSetGoal = ::setGoal,
                     onClearGoal = ::clearGoal,
                     onToggleGoalPause = ::toggleGoalPause,
-                    onCompact = { bridge?.compactThread() },
+                    onCompact = ::requestManualCompaction,
                     onAnswerUserInput = ::answerUserInput,
                     onExecutePendingPlan = ::executePendingPlan,
                     onRevisePendingPlan = ::revisePendingPlan,
@@ -351,6 +380,112 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         mcpRevision = prefs.getLong(NativeMcpConfigStore.REVISION_KEY, 0L),
         mcpFileFingerprint = NativeMcpConfigStore.fileFingerprint(),
     )
+
+    private fun selectedModelConfig(): CodexProviderStore.ModelConfig? {
+        val profile = providerStore.active() ?: return null
+        val selected = chatState.selectedModel.ifBlank { profile.model }
+        return profile.models.firstOrNull { it.id.equals(selected, ignoreCase = true) }
+    }
+
+    private fun currentCompactionPolicy(): NativeCompactionPolicy {
+        val profile = providerStore.active()
+        val profileId = profile?.id.orEmpty().ifBlank { activeProfileId.ifBlank { "default" } }
+        val modelId = chatState.selectedModel.ifBlank { profile?.model.orEmpty() }.ifBlank { "default" }
+        val key = NativeCompactionSettingsStore.key(profileId, modelId)
+        val settings = compactionSettingsStore.read(profileId, modelId)
+        if (key != compactionPolicyKey || settings != compactionSettingsSnapshot) {
+            compactionPolicyKey = key
+            compactionSettingsSnapshot = settings
+            compactionPolicy = NativeCompactionPolicy(settings)
+        }
+        return compactionPolicy
+    }
+
+    private fun activeCompactionTurnKey(): String = currentThreadId.orEmpty() + ":" +
+        chatState.currentTurnId.ifBlank { chatState.turnStartedAt.toString() }
+
+    private fun compactionPolicyInput(usage: NativeTurnUsage): NativeCompactionPolicyInput {
+        val model = selectedModelConfig()
+        val contextWindow = usage.contextWindow.takeIf { it > 0L } ?: model?.contextWindow ?: 0L
+        val used = usage.currentContextTokens.takeIf { it > 0L } ?: 0L
+        val serverLimit = usage.autoCompactTokenLimit.takeIf { it > 0L }
+            ?: model?.autoCompactTokenLimit
+            ?: 0L
+        return NativeCompactionPolicyInput(
+            threadId = currentThreadId.orEmpty(),
+            turnId = chatState.currentTurnId.takeIf { it.isNotBlank() }
+                ?: chatState.turnStartedAt.takeIf { it > 0L }?.toString(),
+            contextWindow = contextWindow,
+            usedTokens = used,
+            serverAutoCompactTokenLimit = serverLimit,
+            usageReliable = usage.contextUsageReliable && used > 0L,
+            estimated = usage.estimated,
+            turnActive = chatState.phase.active,
+            compactionInProgress = chatState.compactionItems.any { !it.isTerminal },
+            waitingForUserInput = chatState.pendingUserInputRequest.isNotBlank() || chatState.pendingApprovalRequest.isNotBlank(),
+            stopping = chatState.phase == NativeTurnPhase.STOPPING,
+        )
+    }
+
+    private fun evaluateAutomaticCompaction(usage: NativeTurnUsage) {
+        val policyInput = compactionPolicyInput(usage)
+        if (!usage.estimated &&
+            (policyInput.contextWindow > 0L || policyInput.serverAutoCompactTokenLimit > 0L) &&
+            policyInput.usedTokens > 0L && policyInput.usageReliable
+        ) {
+            lastReliableUsage = usage
+        }
+        val decision = currentCompactionPolicy().evaluate(policyInput)
+        if (!decision.shouldTrigger) {
+            decision.skipReason?.let { reason ->
+                NativeChatDiagnostics.record(this, "compaction_fallback_skipped_reason", JSONObject()
+                    .put("reason", reason.name.lowercase())
+                    .put("thread", currentThreadId.orEmpty().take(8)))
+            }
+            return
+        }
+        val turnKey = activeCompactionTurnKey()
+        if (pendingAutoCompactionTurn == turnKey) {
+            NativeChatDiagnostics.record(this, "compaction_duplicate_suppressed", JSONObject().put("turn", turnKey.takeLast(16)))
+            return
+        }
+        pendingAutoCompactionTurn = turnKey
+        streamHandler.removeCallbacks(autoCompactionRunnable)
+        // Give the server's native auto-compaction event a short lead. A started event cancels
+        // this runnable, so the client never races a server request at the same threshold.
+        streamHandler.postDelayed(autoCompactionRunnable, 450L)
+    }
+
+    private fun requestManualCompaction() {
+        requestCompaction(NativeCompactionSource.MANUAL, null)
+    }
+
+    private fun requestCompaction(source: NativeCompactionSource, decision: NativeCompactionDecision?) {
+        val threadId = currentThreadId ?: return
+        if (threadId.isBlank() || bridge == null || chatState.compactionItems.any { !it.isTerminal }) {
+            NativeChatDiagnostics.record(this, "compaction_duplicate_suppressed", JSONObject()
+                .put("thread", threadId.take(8)).put("source", source.name.lowercase()))
+            return
+        }
+        val requestId = "${source.name.lowercase()}:${threadId.takeLast(8)}:${System.currentTimeMillis()}"
+        val item = if (source == NativeCompactionSource.MANUAL) chatState.beginManualCompaction(requestId)
+            else chatState.beginAutomaticCompaction(requestId)
+        compactionJournalStore.record(item)
+        currentCompactionPolicy().markRequested(
+            threadId,
+            chatState.currentTurnId.takeIf { it.isNotBlank() },
+        )
+        NativeChatDiagnostics.record(this, "compaction_trigger_source", JSONObject()
+            .put("source", decision?.source?.name?.lowercase() ?: source.name.lowercase())
+            .put("threshold", decision?.threshold ?: 0L)
+            .put("thread", threadId.take(8)))
+        bridge?.compactThread(requestId)
+    }
+
+    private fun cancelPendingAutoCompaction() {
+        pendingAutoCompactionTurn = ""
+        streamHandler.removeCallbacks(autoCompactionRunnable)
+    }
 
     private fun startBackend(
         preferConfiguredDefault: Boolean = false,
@@ -600,20 +735,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.messages[userIndex] = chatState.messages[userIndex].copy(content = value)
         while (chatState.messages.size > userIndex + 1) chatState.messages.removeAt(chatState.messages.lastIndex)
         chatState.messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "NOTICE|已从此处重新生成"))
-        chatState.phase = NativeTurnPhase.WAITING
+        resetProtocolTurnState()
+        chatState.prepareReplacementTurn()
         startFrameDiagnostics()
-        chatState.processingLabel = "处理中"
-        chatState.clearReasoning()
-        chatState.reasoningComplete = false
-        chatState.reasoningCompletedAt = 0L
-        chatState.commandText = ""
-        chatState.liveCommandJson = ""
-        chatState.toolDetails.clear()
-        chatState.liveSubagents.clear()
-        chatState.turnStartedAt = System.currentTimeMillis()
-        chatState.turnMessageStartIndex = chatState.messages.size
-        chatState.phaseStartedAt = chatState.turnStartedAt
-        chatState.phaseMessageStartIndex = chatState.turnMessageStartIndex
         bridge?.editTurn(value, chatState.selectedModel, chatState.selectedEffort, rollbackTurns)
     }
 
@@ -630,20 +754,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         } else displayValue
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
         chatState.prepareForRetry(preserveRetryStatus)
-        chatState.phase = NativeTurnPhase.WAITING
+        resetProtocolTurnState()
+        chatState.prepareReplacementTurn()
         startFrameDiagnostics()
-        chatState.processingLabel = "处理中"
-        chatState.clearReasoning()
-        chatState.reasoningComplete = false
-        chatState.reasoningCompletedAt = 0L
-        chatState.commandText = ""
-        chatState.liveCommandJson = ""
-        chatState.toolDetails.clear()
-        chatState.liveSubagents.clear()
-        chatState.turnStartedAt = System.currentTimeMillis()
-        chatState.turnMessageStartIndex = chatState.messages.size
-        chatState.phaseStartedAt = chatState.turnStartedAt
-        chatState.phaseMessageStartIndex = chatState.turnMessageStartIndex
         bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", if (implementsPlan) "default" else chatState.selectedMode)
     }
 
@@ -683,6 +796,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.selectedSkills.clear()
     }
 
+    private fun resetProtocolTurnState() {
+        streamHandler.removeCallbacks(flushProtocolEventQueueRunnable)
+        flushProtocolEventQueue()
+        protocolEventQueue.clear()
+        currentCompactionPolicy().reset()
+        compactionLifecycleTimeouts.values.forEach(streamHandler::removeCallbacks)
+        compactionLifecycleTimeouts.clear()
+        protocolReasoningSeen = false
+        protocolAssistantSeen = false
+        protocolCommandSeen = false
+        protocolPlanSeen = false
+        protocolToolSeen = false
+        protocolSubagentSeen = false
+        protocolUsageSeen = false
+        protocolTurnCompletedSeen = false
+        lastReliableUsage = null
+        cancelPendingAutoCompaction()
+    }
+
     private fun queueFollowUp(followUp: NativeQueuedFollowUp, clearComposer: Boolean = true): NativeSubmitResult {
         if (chatState.queuedFollowUps.none { it.id == followUp.id }) chatState.queuedFollowUps.add(followUp)
         if (clearComposer) clearComposerAfterSubmit()
@@ -706,6 +838,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 .let { if (it.length > 28) it.take(27) + "…" else it }
                 .ifBlank { "新对话" }
         }
+        resetProtocolTurnState()
         val userMessage = chatState.addUser(followUp.text, followUp.skills, followUp.attachments)
         startFrameDiagnostics()
         bridge?.sendMessage(
@@ -1067,6 +1200,515 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         syncPendingNotification(threadId)
         if (currentThreadId == threadId) chatState.pendingApprovalRequest = ""
         refreshConversations()
+    }
+
+    private fun protocolString(item: JSONObject?, vararg keys: String): String {
+        if (item == null) return ""
+        keys.forEach { key ->
+            val value = item.optString(key, "").trim()
+            if (value.isNotBlank() && !value.equals("null", true)) return value
+        }
+        return ""
+    }
+
+    private fun protocolLong(payload: JSONObject, key: String): Long {
+        val snake = key.replace(Regex("([a-z])([A-Z])"), "$1_$2").lowercase()
+        return payload.optLong(key, payload.optLong(snake, payload.optLong("${key}Number", 0L)))
+    }
+
+    private fun protocolEventThread(payload: JSONObject): String {
+        val direct = protocolString(payload, "threadId", "thread_id")
+        if (direct.isNotBlank()) return direct
+        val turn = payload.optJSONObject("turn")
+        val item = payload.optJSONObject("item") ?: payload.optJSONObject("details")
+        return protocolString(turn, "threadId", "thread_id")
+            .ifBlank { protocolString(item, "threadId", "thread_id", "senderThreadId", "sender_thread_id") }
+    }
+
+    private fun protocolEventTurn(payload: JSONObject): String? {
+        val direct = protocolString(payload, "turnId", "turn_id")
+        if (direct.isNotBlank()) return direct
+        val turn = payload.optJSONObject("turn")
+        val item = payload.optJSONObject("item") ?: payload.optJSONObject("details")
+        return protocolString(turn, "id", "turnId", "turn_id")
+            .ifBlank { protocolString(item, "turnId", "turn_id") }
+            .takeIf { it.isNotBlank() }
+    }
+
+    private fun protocolCompactionSource(payload: JSONObject?, item: JSONObject?): NativeCompactionSource? {
+        val raw = protocolString(item, "source", "origin", "trigger")
+            .ifBlank { protocolString(payload, "source", "origin", "trigger") }
+            .lowercase()
+        return when (raw) {
+            "manual", "user", "interactive" -> NativeCompactionSource.MANUAL
+            "automatic", "auto", "server", "fallback" -> NativeCompactionSource.AUTOMATIC
+            "legacy" -> NativeCompactionSource.LEGACY
+            else -> null
+        }
+    }
+
+    private fun isFinalAssistantItem(item: JSONObject?): Boolean {
+        if (item == null) return false
+        val phase = protocolString(item, "phase", "itemPhase", "item_phase")
+            .replace("-", "_").replace(" ", "_").lowercase(Locale.ROOT)
+        return phase in setOf("final_answer", "finalanswer", "final", "answer") ||
+            item.optBoolean("final", false) || item.optBoolean("isFinal", false)
+    }
+
+    private fun enqueueProtocolEvent(event: NativeProtocolEvent, immediate: Boolean = false) {
+        // Legacy callbacks do not carry a sequence.  Flush any normalized deltas already waiting
+        // for the same UI batch before accepting the unsequenced barrier, otherwise a later queue
+        // drain can move an older reasoning/command chunk after its completion callback.
+        if (event.sequence <= 0L) flushProtocolEventQueue()
+        val ready = protocolEventQueue.offer(event)
+        if (ready.isNotEmpty()) ready.forEach(chatState::acceptNormalizedProtocolEvent)
+        if (immediate) {
+            streamHandler.removeCallbacks(flushProtocolEventQueueRunnable)
+            flushProtocolEventQueue()
+        } else if (ready.isEmpty()) {
+            streamHandler.removeCallbacks(flushProtocolEventQueueRunnable)
+            streamHandler.postDelayed(flushProtocolEventQueueRunnable, 12L)
+        }
+    }
+
+    private fun flushProtocolEventQueue() {
+        protocolEventQueue.drain().forEach(chatState::acceptNormalizedProtocolEvent)
+    }
+
+    /** Accept lifecycle recordings produced by retained/older bridges without duplicating their
+     * protocol-specific parsing in the Compose state. */
+    private fun handleDecodedLifecycleEvent(event: NativeProtocolEvent) {
+        if (event.threadId.isNotBlank() && currentThreadId != null && event.threadId != currentThreadId) return
+        event.turnId?.takeIf { it.isNotBlank() }?.let { chatState.currentTurnId = it }
+        when (event) {
+            is NativeProtocolEvent.CompactionStarted -> {
+                cancelPendingAutoCompaction()
+                enqueueProtocolEvent(event, immediate = true)
+                chatState.compactionItems.firstOrNull { it.serverItemId == event.itemId || it.id == event.itemId }
+                    ?.let(compactionJournalStore::record)
+                currentCompactionPolicy().markStarted(event.threadId, event.turnId)
+                scheduleCompactionLifecycleTimeout(event)
+            }
+            is NativeProtocolEvent.CompactionCompleted,
+            is NativeProtocolEvent.CompactionFailed -> {
+                enqueueProtocolEvent(event, immediate = true)
+                chatState.compactionItems.lastOrNull { event.itemId.isNullOrBlank() || it.serverItemId == event.itemId || it.id == event.itemId }
+                    ?.let { item ->
+                        compactionJournalStore.record(item)
+                        if (item.status == NativeCompactionStatus.COMPLETED) {
+                            currentCompactionPolicy().markCompleted(
+                                event.threadId,
+                                event.turnId,
+                                lastReliableUsage?.currentContextTokens ?: 0L,
+                                lastReliableUsage?.contextWindow ?: 0L,
+                            )
+                        } else currentCompactionPolicy().markFailed(event.threadId, event.turnId)
+                    }
+                cancelCompactionLifecycleTimeout(event)
+            }
+            is NativeProtocolEvent.TokenUsageUpdated -> {
+                enqueueProtocolEvent(event, immediate = true)
+                evaluateAutomaticCompaction(
+                    NativeTurnUsage(
+                        inputTokens = event.inputTokens,
+                        cachedInputTokens = event.cachedInputTokens,
+                        outputTokens = event.outputTokens,
+                        reasoningOutputTokens = event.reasoningTokens,
+                        currentContextTokens = event.currentContextTokens,
+                        contextWindow = event.contextWindow,
+                        estimated = event.estimated,
+                        contextUsageReliable = event.contextUsageReliable,
+                        autoCompactTokenLimit = event.autoCompactTokenLimit,
+                    ),
+                )
+            }
+            else -> {
+                when (event) {
+                    is NativeProtocolEvent.ReasoningDelta,
+                    is NativeProtocolEvent.ReasoningCompleted -> protocolReasoningSeen = true
+                    is NativeProtocolEvent.AssistantDelta,
+                    is NativeProtocolEvent.AssistantCompleted -> protocolAssistantSeen = true
+                    is NativeProtocolEvent.CommandStarted,
+                    is NativeProtocolEvent.CommandCompleted -> protocolCommandSeen = true
+                    is NativeProtocolEvent.PlanStarted,
+                    is NativeProtocolEvent.PlanDelta,
+                    is NativeProtocolEvent.PlanCompleted -> protocolPlanSeen = true
+                    is NativeProtocolEvent.ToolCompleted -> protocolToolSeen = true
+                    is NativeProtocolEvent.SubagentUpdated -> protocolSubagentSeen = true
+                    is NativeProtocolEvent.TurnCompleted -> protocolTurnCompletedSeen = true
+                    else -> Unit
+                }
+                enqueueProtocolEvent(event, immediate = true)
+                if (event is NativeProtocolEvent.PlanCompleted) {
+                    val planText = chatState.messages.lastOrNull {
+                        it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+                    }?.let { decodeNativeProposedPlan(it.content) }.orEmpty()
+                    currentThreadId?.takeIf { planText.isNotBlank() }
+                        ?.let { persistPendingPlanImplementation(it, planText) }
+                }
+            }
+        }
+    }
+
+    private fun scheduleCompactionLifecycleTimeout(event: NativeProtocolEvent.CompactionStarted) {
+        val timeoutKey = event.itemId ?: "${event.threadId}:${event.turnId.orEmpty()}"
+        compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
+        val timeout = Runnable {
+            if (chatState.compactionItems.any {
+                    (event.itemId.isNullOrBlank() || it.serverItemId == event.itemId || it.id == event.itemId) &&
+                        it.status == NativeCompactionStatus.RUNNING
+                }) {
+                NativeChatDiagnostics.record(this, "compaction_lifecycle_timeout", JSONObject()
+                    .put("thread", event.threadId.take(8)).put("itemId", event.itemId.orEmpty()))
+            }
+        }
+        compactionLifecycleTimeouts[timeoutKey] = timeout
+        streamHandler.postDelayed(timeout, 60_000L)
+    }
+
+    private fun cancelCompactionLifecycleTimeout(event: NativeProtocolEvent) {
+        val timeoutKey = event.itemId ?: "${event.threadId}:${event.turnId.orEmpty()}"
+        compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
+    }
+
+    private fun canonicalProtocolKind(raw: String): String {
+        val normalized = raw.replace("_", "").replace("-", "").replace("/", "").replace(".", "").lowercase(Locale.ROOT)
+        return when (normalized) {
+            "itemstarted", "itemstart" -> "itemStarted"
+            "itemcompleted", "itemcomplete" -> "itemCompleted"
+            "contextcompacted", "contextcompaction" -> "contextCompactionCompleted"
+            "contextcompactionstarted", "contextcompactionstart" -> "contextCompactionStarted"
+            "contextcompactioncompleted", "contextcompactioncomplete" -> "contextCompactionCompleted"
+            "contextcompactionfailed" -> "contextCompactionFailed"
+            "contextcompactioncancelled", "contextcompactioncanceled" -> "contextCompactionCancelled"
+            "reasoningdelta" -> "reasoningDelta"
+            "reasoningcompleted", "reasoningcomplete" -> "reasoningCompleted"
+            "assistantdelta" -> "assistantDelta"
+            "assistantstarted", "assistantstart" -> "assistantStarted"
+            "assistantcompleted", "assistantcomplete" -> "assistantCompleted"
+            "commandstarted", "commandstart" -> "commandStarted"
+            "commandoutput", "commanddelta" -> "commandOutput"
+            "commandcompleted", "commandcomplete" -> "commandCompleted"
+            "toolcompleted", "toolcomplete" -> "toolCompleted"
+            "planstarted", "planstart" -> "planStarted"
+            "plandelta" -> "planDelta"
+            "plancompleted", "plancomplete" -> "planCompleted"
+            "subagentupdated", "subagentupdate" -> "subagentUpdated"
+            "tokenusageupdated", "tokenusageupdate" -> "tokenUsageUpdated"
+            "turncompleted", "turncomplete" -> "turnCompleted"
+            "error" -> "error"
+            else -> raw
+        }
+    }
+
+    private fun handleProtocolEvent(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val kind = canonicalProtocolKind(
+            payload.optString("kind").ifBlank {
+                payload.optString("event_kind").ifBlank {
+                    payload.optString("method").ifBlank { payload.optString("event", payload.optString("type")) }
+                }
+            },
+        )
+        val threadId = protocolEventThread(payload).ifBlank { currentThreadId.orEmpty() }
+        if (currentThreadId != null && threadId.isNotBlank() && threadId != currentThreadId) return
+        val turnId = protocolEventTurn(payload)
+        // Token-usage and lifecycle notifications can be the first event of a turn. Capture the
+        // identity before evaluating automatic compaction, otherwise a synthetic marker is stored
+        // without turnId and cannot be consumed when the server sends item/started later.
+        if (!turnId.isNullOrBlank()) chatState.currentTurnId = turnId
+        val item = payload.optJSONObject("item") ?: payload.optJSONObject("details")
+        val itemId = protocolString(payload, "itemId", "item_id")
+            .ifBlank { protocolString(item, "id", "itemId", "item_id") }
+            .takeIf { it.isNotBlank() }
+        val sequence = protocolLong(payload, "sequence")
+        val timestamp = payload.optLong("timestampMs", payload.optLong("timestamp_ms", System.currentTimeMillis()))
+        if (kind in setOf("itemStarted", "itemCompleted")) {
+            val decoded = NativeProtocolEventDecoder.decodeLifecycle(raw, threadId)
+            if (decoded != null) {
+                handleDecodedLifecycleEvent(decoded)
+                return
+            }
+        }
+        when (kind) {
+            "contextCompactionStarted" -> {
+                cancelPendingAutoCompaction()
+                val event = NativeProtocolEvent.CompactionStarted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    source = protocolCompactionSource(payload, item),
+                    requestId = protocolString(item, "requestId", "request_id")
+                        .ifBlank { protocolString(payload, "requestId", "request_id") }
+                        .takeIf { it.isNotBlank() },
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                )
+                chatState.currentTurnId = turnId.orEmpty().ifBlank { chatState.currentTurnId }
+                enqueueProtocolEvent(event, immediate = true)
+                val visual = chatState.compactionItems.firstOrNull { it.serverItemId == itemId || it.id == itemId }
+                visual?.let { compactionJournalStore.record(it) }
+                currentCompactionPolicy().markStarted(threadId, turnId)
+                val timeoutKey = itemId ?: "${threadId}:${turnId.orEmpty()}"
+                compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
+                val timeout = Runnable {
+                    if (chatState.compactionItems.any { (it.serverItemId == itemId || it.id == itemId || itemId.isNullOrBlank()) && it.status == NativeCompactionStatus.RUNNING }) {
+                        NativeChatDiagnostics.record(this, "compaction_lifecycle_timeout", JSONObject()
+                            .put("thread", threadId.take(8)).put("itemId", itemId.orEmpty()))
+                    }
+                }
+                compactionLifecycleTimeouts[timeoutKey] = timeout
+                streamHandler.postDelayed(timeout, 60_000L)
+            }
+            "contextCompactionCompleted", "contextCompactionFailed", "contextCompactionCancelled" -> {
+                val error = protocolString(item, "error", "message").takeIf { it.isNotBlank() }
+                val status = protocolString(item, "status", "state").lowercase()
+                val cancelled = kind == "contextCompactionCancelled" || status in setOf("cancelled", "canceled")
+                val failed = kind == "contextCompactionFailed" || status in setOf("failed", "error", "failure")
+                val event: NativeProtocolEvent = if (failed || cancelled) {
+                    NativeProtocolEvent.CompactionFailed(
+                        threadId = threadId,
+                        turnId = turnId,
+                        itemId = itemId,
+                        error = error.orEmpty(),
+                        cancelled = cancelled,
+                        source = protocolCompactionSource(payload, item),
+                        requestId = protocolString(item, "requestId", "request_id")
+                            .ifBlank { protocolString(payload, "requestId", "request_id") }
+                            .takeIf { it.isNotBlank() },
+                        sequence = sequence,
+                        timestampMs = timestamp,
+                    )
+                } else NativeProtocolEvent.CompactionCompleted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    error = error,
+                    cancelled = false,
+                    source = protocolCompactionSource(payload, item),
+                    requestId = protocolString(item, "requestId", "request_id")
+                        .ifBlank { protocolString(payload, "requestId", "request_id") }
+                        .takeIf { it.isNotBlank() },
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                )
+                enqueueProtocolEvent(event, immediate = true)
+                val visual = chatState.compactionItems.lastOrNull { itemId.isNullOrBlank() || it.serverItemId == itemId || it.id == itemId }
+                visual?.let {
+                    compactionJournalStore.record(it)
+                    if (it.status == NativeCompactionStatus.COMPLETED) {
+                        currentCompactionPolicy().markCompleted(threadId, turnId, lastReliableUsage?.currentContextTokens ?: 0L, lastReliableUsage?.contextWindow ?: 0L)
+                    } else currentCompactionPolicy().markFailed(threadId, turnId)
+                }
+                val timeoutKey = itemId ?: "${threadId}:${turnId.orEmpty()}"
+                compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
+            }
+            "commandStarted" -> enqueueProtocolEvent(
+                NativeProtocolEvent.CommandStarted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    command = protocolString(item, "command", "cmd"),
+                    cwd = protocolString(item, "cwd", "workingDirectory", "working_directory"),
+                    payload = item?.toString().orEmpty(),
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+            "commandCompleted" -> enqueueProtocolEvent(
+                NativeProtocolEvent.CommandCompleted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    command = protocolString(item, "command", "cmd"),
+                    outputRef = protocolString(item, NativeCommandOutputStore.OUTPUT_REF),
+                    status = protocolString(item, "status").ifBlank { "completed" },
+                    exitCode = item?.optInt("exitCode")?.takeIf { item.has("exitCode") },
+                    payload = item?.toString().orEmpty(),
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+            "reasoningCompleted" -> enqueueProtocolEvent(
+                NativeProtocolEvent.ReasoningCompleted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    text = protocolString(item, "text", "summary"),
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+            "assistantStarted", "assistantCompleted" -> enqueueProtocolEvent(
+                if (kind == "assistantCompleted") NativeProtocolEvent.AssistantCompleted(
+                    threadId, turnId, itemId, text = protocolString(item, "text", "content"),
+                    finalAnswer = isFinalAssistantItem(item), sequence = sequence, timestampMs = timestamp,
+                ) else NativeProtocolEvent.AssistantDelta(threadId, turnId, itemId, delta = "", sequence = sequence, timestampMs = timestamp),
+                immediate = true,
+            )
+            "planStarted" -> enqueueProtocolEvent(NativeProtocolEvent.PlanStarted(threadId, turnId, itemId, sequence = sequence, timestampMs = timestamp), immediate = true)
+            "planCompleted" -> {
+                enqueueProtocolEvent(
+                    NativeProtocolEvent.PlanCompleted(
+                        threadId, turnId, itemId, text = protocolString(item, "text", "content"),
+                        sequence = sequence, timestampMs = timestamp,
+                    ),
+                    immediate = true,
+                )
+                val planText = chatState.messages.lastOrNull {
+                    it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+                }?.let { decodeNativeProposedPlan(it.content) }.orEmpty()
+                currentThreadId?.takeIf { planText.isNotBlank() }
+                    ?.let { persistPendingPlanImplementation(it, planText) }
+            }
+            "toolCompleted" -> enqueueProtocolEvent(
+                NativeProtocolEvent.ToolCompleted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    type = payload.optString("itemType", item?.optString("type", "tool").orEmpty()),
+                    title = protocolString(item, "tool", "name", "query", "agentName"),
+                    payloadRef = protocolString(item, NativeLargePayloadStore.PAYLOAD_REF),
+                    status = protocolString(item, "status").ifBlank { "completed" },
+                    payload = item?.toString().orEmpty(),
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+            "subagentUpdated" -> enqueueProtocolEvent(
+                NativeProtocolEvent.SubagentUpdated(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    agentThreadId = protocolString(item, "agentThreadId", "agent_thread_id"),
+                    callId = protocolString(item, "callId", "call_id"),
+                    name = protocolString(item, "agentName", "agentNickname", "nickname"),
+                    status = protocolString(item, "status").ifBlank { "working" },
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+            "tokenUsageUpdated" -> {
+                val usage = item ?: JSONObject()
+                val parsed = NativeTokenUsageParser.parse(usage.toString(), 0L)
+                if (parsed != null) {
+                    enqueueProtocolEvent(
+                        NativeProtocolEvent.TokenUsageUpdated(
+                            threadId = threadId,
+                            turnId = turnId,
+                            itemId = itemId,
+                            inputTokens = parsed.inputTokens,
+                            cachedInputTokens = parsed.cachedInputTokens,
+                            outputTokens = parsed.outputTokens,
+                            reasoningTokens = parsed.reasoningOutputTokens,
+                            currentContextTokens = parsed.currentContextTokens,
+                            contextWindow = parsed.contextWindow,
+                            estimated = parsed.estimated,
+                            contextUsageReliable = parsed.contextUsageReliable,
+                            autoCompactTokenLimit = parsed.autoCompactTokenLimit,
+                            sequence = sequence,
+                            timestampMs = timestamp,
+                        ),
+                        immediate = true,
+                    )
+                    evaluateAutomaticCompaction(parsed)
+                }
+            }
+            "turnCompleted" -> enqueueProtocolEvent(
+                NativeProtocolEvent.TurnCompleted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    failed = item?.has("error") == true && !item.isNull("error"),
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+            "error" -> enqueueProtocolEvent(
+                NativeProtocolEvent.Error(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    message = protocolString(item, "message", "error").ifBlank { payload.optString("message") },
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
+        }
+        if (kind.startsWith("reasoning")) protocolReasoningSeen = true
+        if (kind.startsWith("assistant")) protocolAssistantSeen = true
+        if (kind.startsWith("command")) protocolCommandSeen = true
+        if (kind.startsWith("plan")) protocolPlanSeen = true
+        if (kind.startsWith("tool")) protocolToolSeen = true
+        if (kind.startsWith("subagent")) protocolSubagentSeen = true
+        if (kind.startsWith("tokenUsage")) protocolUsageSeen = true
+        if (kind == "turnCompleted") protocolTurnCompletedSeen = true
+    }
+
+    private fun handleProtocolDelta(raw: String) {
+        NativeProtocolEventDecoder.decodeDeltas(raw, currentThreadId.orEmpty()).forEach { event ->
+            if (currentThreadId != null && event.threadId.isNotBlank() && event.threadId != currentThreadId) return@forEach
+            event.turnId?.takeIf { it.isNotBlank() }?.let { chatState.currentTurnId = it }
+            when (event) {
+                is NativeProtocolEvent.ReasoningDelta -> protocolReasoningSeen = true
+                is NativeProtocolEvent.AssistantDelta -> protocolAssistantSeen = true
+                is NativeProtocolEvent.PlanDelta -> protocolPlanSeen = true
+                else -> Unit
+            }
+            enqueueProtocolEvent(event)
+        }
+    }
+
+    private fun handleCommandDeltaV2(raw: String) {
+        NativeProtocolEventDecoder.decodeCommandOutputs(raw, currentThreadId.orEmpty()).forEach { event ->
+            if (currentThreadId != null && event.threadId.isNotBlank() && event.threadId != currentThreadId) return@forEach
+            event.turnId?.takeIf { it.isNotBlank() }?.let { chatState.currentTurnId = it }
+            protocolCommandSeen = true
+            enqueueProtocolEvent(event)
+        }
+    }
+
+    private fun handleCompactionRpcResult(raw: String) {
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val requestId = protocolString(payload, "requestId", "request_id").takeIf { it.isNotBlank() }
+        val status = protocolString(payload, "status", "state").lowercase(Locale.ROOT)
+        val success = if (payload.has("success")) payload.optBoolean("success", false)
+        else status in setOf("completed", "complete", "success", "succeeded", "ok")
+        val cancelled = status in setOf("cancelled", "canceled", "cancel", "aborted")
+        val threadId = protocolString(payload, "threadId", "thread_id").ifBlank { currentThreadId.orEmpty() }
+        val complete: () -> Unit = {
+            val current = chatState.compactionItems.firstOrNull { it.requestId == requestId }
+            if (!(success && current?.status == NativeCompactionStatus.RUNNING)) {
+                val updated = chatState.completeManualCompactionRpc(
+                    requestId,
+                    success = success && !cancelled,
+                    cancelled = cancelled,
+                    error = protocolString(payload, "error", "message"),
+                    threadId = threadId,
+                )
+                updated?.let(compactionJournalStore::record)
+                if (success && !cancelled && updated != null) {
+                    // Older servers return only the RPC result. Mark the policy as completed now
+                    // so a later reliable low-usage update can release hysteresis even when no
+                    // item/started or item/completed notification ever arrives.
+                    currentCompactionPolicy().markCompleted(
+                        threadId,
+                        chatState.currentTurnId.takeIf { it.isNotBlank() },
+                        lastReliableUsage?.currentContextTokens ?: 0L,
+                        lastReliableUsage?.contextWindow ?: 0L,
+                    )
+                }
+            }
+        }
+        if (!success || cancelled) complete() else streamHandler.postDelayed(complete, 900L)
+        if (!success || cancelled) currentCompactionPolicy().markFailed(threadId, chatState.currentTurnId)
     }
 
     private fun configuredProjectPath(): String {
@@ -1935,6 +2577,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         goalRetryWaitingForCompletion = false
         suppressGoalRetryUntilNewTurn = false
         discardPendingStreamEvents("resume")
+        resetProtocolTurnState()
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
         currentThreadId = threadId
@@ -1996,6 +2639,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         goalRetryWaitingForCompletion = false
         suppressGoalRetryUntilNewTurn = false
         discardPendingStreamEvents("new")
+        resetProtocolTurnState()
         chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
@@ -2075,11 +2719,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             reasoningFlushScheduled = true
             streamHandler.postDelayed(flushReasoningRunnable, STREAM_CATCH_UP_DELAY_MS)
         }
-        val continuedAfterAnswer = chatState.reasoningComplete
-        chatState.beginReasoningAfterAnswerIfNeeded()
-        if (continuedAfterAnswer) NativeChatDiagnostics.record(this, "reasoning_segment_started", JSONObject()
-            .put("messageIndex", chatState.messages.size))
-        chatState.appendReasoning(value)
+        if (!protocolReasoningSeen) {
+            val continuedAfterAnswer = chatState.reasoningComplete
+            chatState.beginReasoningAfterAnswerIfNeeded()
+            if (continuedAfterAnswer) NativeChatDiagnostics.record(this, "reasoning_segment_started", JSONObject()
+                .put("messageIndex", chatState.messages.size))
+            chatState.appendReasoning(value)
+            chatState.acceptProtocolEvent(NativeProtocolEvent.ReasoningDelta(
+                threadId = currentThreadId.orEmpty(),
+                turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                delta = value,
+            ))
+        }
     }
 
     private fun answerFlushDelayMs(): Long {
@@ -2109,8 +2760,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             answerFlushScheduled = true
             streamHandler.postDelayed(flushAnswerRunnable, STREAM_CATCH_UP_DELAY_MS)
         }
-        chatState.finishReasoning()
-        chatState.appendAssistant(value)
+        if (!protocolAssistantSeen) {
+            chatState.finishReasoning()
+            chatState.appendAssistant(value)
+            chatState.acceptProtocolEvent(NativeProtocolEvent.AssistantDelta(
+                threadId = currentThreadId.orEmpty(),
+                turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                delta = value,
+            ))
+        }
     }
 
     private fun commandFlushDelayMs(): Long =
@@ -2122,7 +2780,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (pendingCommand.isEmpty()) return
         val delta = pendingCommand.toString()
         pendingCommand.setLength(0)
-        chatState.appendCommandOutput(delta)
+        if (!protocolCommandSeen) {
+            chatState.appendCommandOutput(delta)
+            val live = runCatching { JSONObject(chatState.liveCommandJson) }.getOrNull()
+            chatState.acceptProtocolEvent(
+                NativeProtocolEvent.CommandOutput(
+                    threadId = currentThreadId.orEmpty(),
+                    turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                    itemId = live?.optString("id")?.takeIf { it.isNotBlank() },
+                    delta = delta,
+                ),
+            )
+        }
     }
 
     private fun flushPlanDeltas() {
@@ -2163,6 +2832,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             if (!preserveCachedSnapshot && !unchangedFreshSnapshot) NativeHistorySnapshotCache.put(threadId, snapshot)
             chatState.historyLoading = false
         }
+        // Older app-server histories may omit context-compaction items. Merge the bounded local
+        // journal by stable server/id key; NativeChatState keeps one divider for duplicates.
+        compactionJournalStore.load(threadId).takeIf { it.isNotEmpty() }?.let(chatState::restoreCompactions)
         if (chatState.busy) {
             // A resumed running turn starts a fresh live phase after the persisted snapshot.
             chatState.turnMessageStartIndex = chatState.messages.size
@@ -2183,6 +2855,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     override fun onEvent(function: String, value: String) {
         when (function) {
+            "onProtocolEvent" -> handleProtocolEvent(value)
+            "onProtocolDelta" -> handleProtocolDelta(value)
+            "onCommandDeltaV2" -> handleCommandDeltaV2(value)
+            "onCompactionRpcResult" -> handleCompactionRpcResult(value)
             "onReady" -> {
                 // A late onReady from the previous conversation must not overwrite the
                 // goal/mode of the conversation the user has already selected.
@@ -2212,61 +2888,127 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }, "CodexHistoryParser").start()
             }
             "onDelta" -> {
-                flushReasoningDeltas(force = true)
-                flushCommandDeltas()
-                if (pendingAnswer.isEmpty()) answerPendingSince = android.os.SystemClock.uptimeMillis()
-                pendingAnswer.append(value)
-                if (!answerFlushScheduled) {
-                    answerFlushScheduled = true
-                    streamHandler.postDelayed(flushAnswerRunnable, answerFlushDelayMs())
+                if (!protocolAssistantSeen) {
+                    flushReasoningDeltas(force = true)
+                    flushCommandDeltas()
+                    if (pendingAnswer.isEmpty()) answerPendingSince = android.os.SystemClock.uptimeMillis()
+                    pendingAnswer.append(value)
+                    if (!answerFlushScheduled) {
+                        answerFlushScheduled = true
+                        streamHandler.postDelayed(flushAnswerRunnable, answerFlushDelayMs())
+                    }
                 }
             }
             "onAssistantItemComplete" -> {
                 flushReasoningDeltas(force = true)
                 flushAnswerDeltas(force = true)
                 flushCommandDeltas()
-                chatState.finishReasoning()
-                chatState.completeAssistantItem(value)
+                if (!protocolAssistantSeen) {
+                    chatState.finishReasoning()
+                    chatState.completeAssistantItem(value)
+                }
             }
             "onFinalAnswer" -> {
                 flushReasoningDeltas(force = true)
                 flushAnswerDeltas(force = true)
                 flushCommandDeltas()
-                chatState.finishReasoning()
-                chatState.appendAssistantFinal(value)
+                if (!protocolAssistantSeen) {
+                    chatState.finishReasoning()
+                    chatState.appendAssistantFinal(value)
+                }
             }
             "onReasoningDelta" -> {
-                flushAnswerDeltas(force = true)
-                flushCommandDeltas()
-                if (pendingReasoning.isEmpty()) reasoningPendingSince = android.os.SystemClock.uptimeMillis()
-                pendingReasoning.append(value)
-                if (!reasoningFlushScheduled) {
-                    reasoningFlushScheduled = true
-                    streamHandler.postDelayed(flushReasoningRunnable, reasoningFlushDelayMs())
+                if (!protocolReasoningSeen) {
+                    flushAnswerDeltas(force = true)
+                    flushCommandDeltas()
+                    if (pendingReasoning.isEmpty()) reasoningPendingSince = android.os.SystemClock.uptimeMillis()
+                    pendingReasoning.append(value)
+                    if (!reasoningFlushScheduled) {
+                        reasoningFlushScheduled = true
+                        streamHandler.postDelayed(flushReasoningRunnable, reasoningFlushDelayMs())
+                    }
                 }
             }
             "onReasoningComplete" -> {
                 flushReasoningDeltas(force = true)
                 flushCommandDeltas()
-                if (value.length > chatState.reasoningText.length) chatState.replaceReasoning(value)
-                chatState.revision++
+                if (!protocolReasoningSeen) chatState.acceptProtocolEvent(
+                    NativeProtocolEvent.ReasoningCompleted(
+                        threadId = currentThreadId.orEmpty(),
+                        turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                        text = value,
+                    ),
+                )
+                if (!protocolReasoningSeen) {
+                    if (value.length > chatState.reasoningText.length) chatState.replaceReasoning(value)
+                    chatState.finishReasoning()
+                    chatState.revision++
+                }
             }
             "onCommandStarted" -> {
                 flushCommandDeltas()
-                chatState.startCommand(value)
+                if (!protocolCommandSeen) {
+                    chatState.beginReasoningAfterAnswerIfNeeded()
+                    chatState.startCommand(value)
+                    val item = runCatching { JSONObject(value) }.getOrNull()
+                    chatState.acceptProtocolEvent(
+                        NativeProtocolEvent.CommandStarted(
+                            threadId = currentThreadId.orEmpty(),
+                            turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                            itemId = item?.optString("id")?.takeIf { it.isNotBlank() },
+                            command = item?.optString("command", item.optString("cmd")).orEmpty(),
+                            cwd = item?.optString("cwd", item.optString("workingDirectory")).orEmpty(),
+                            payload = value,
+                        ),
+                    )
+                }
             }
             "onCommandDelta" -> {
-                pendingCommand.append(value)
-                if (!commandFlushScheduled) {
-                    commandFlushScheduled = true
-                    streamHandler.postDelayed(flushCommandRunnable, commandFlushDelayMs())
+                if (!protocolCommandSeen) {
+                    pendingCommand.append(value)
+                    if (!commandFlushScheduled) {
+                        commandFlushScheduled = true
+                        streamHandler.postDelayed(flushCommandRunnable, commandFlushDelayMs())
+                    }
                 }
             }
             "onCommandComplete" -> {
                 flushCommandDeltas()
-                chatState.completeCommand(value)
+                if (!protocolCommandSeen) {
+                    chatState.completeCommand(value)
+                    val item = runCatching { JSONObject(value) }.getOrNull()
+                    chatState.acceptProtocolEvent(
+                        NativeProtocolEvent.CommandCompleted(
+                            threadId = currentThreadId.orEmpty(),
+                            turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                            itemId = item?.optString("id")?.takeIf { it.isNotBlank() },
+                            command = item?.optString("command", item.optString("cmd")).orEmpty(),
+                            outputRef = item?.optString(NativeCommandOutputStore.OUTPUT_REF).orEmpty(),
+                            status = item?.optString("status", "completed").orEmpty(),
+                            exitCode = item?.optInt("exitCode")?.takeIf { item.has("exitCode") },
+                            payload = value,
+                        ),
+                    )
+                }
             }
-            "onToolComplete" -> { chatState.toolDetails.add(value); chatState.revision++ }
+            "onToolComplete" -> {
+                if (!protocolToolSeen) {
+                    chatState.addToolDetail(value)
+                    val item = runCatching { JSONObject(value) }.getOrNull()
+                    chatState.acceptProtocolEvent(
+                        NativeProtocolEvent.ToolCompleted(
+                            threadId = currentThreadId.orEmpty(),
+                            turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                            itemId = item?.optString("id")?.takeIf { it.isNotBlank() },
+                            type = item?.optString("type", "tool").orEmpty(),
+                            title = item?.optString("tool", item.optString("name", item.optString("query"))).orEmpty(),
+                            payloadRef = item?.optString(NativeLargePayloadStore.PAYLOAD_REF).orEmpty(),
+                            status = item?.optString("status", "completed").orEmpty(),
+                            payload = value,
+                        ),
+                    )
+                }
+            }
             "onSkills" -> {
                 val array = runCatching { JSONArray(value) }.getOrNull() ?: JSONArray()
                 val parsed = buildList {
@@ -2280,31 +3022,43 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.skills.clear()
                 chatState.skills.addAll(parsed)
             }
-            "onTokenUsage" -> chatState.updateTokenUsage(value)
+            "onTokenUsage" -> {
+                if (!protocolUsageSeen) {
+                    chatState.updateTokenUsage(value)
+                    NativeTokenUsageParser.parse(value, 0L)?.let { usage -> evaluateAutomaticCompaction(usage) }
+                }
+            }
             "onPlanStarted" -> {
-                flushAnswerDeltas(force = true); flushPlanDeltas(); chatState.finishReasoning(); chatState.startProposedPlan(value)
+                if (!protocolPlanSeen) {
+                    flushAnswerDeltas(force = true); flushPlanDeltas(); chatState.closeActivityBoundary(); chatState.startProposedPlan(value)
+                    chatState.phaseMessageStartIndex = chatState.messages.size
+                }
             }
             "onPlanDelta" -> {
-                flushAnswerDeltas(force = true); chatState.finishReasoning()
-                val payload = runCatching { JSONObject(value) }.getOrNull()
-                val itemId = payload?.optString("itemId", payload.optString("item_id")).orEmpty()
-                val delta = payload?.optString("delta").orEmpty()
-                if (itemId.isNotBlank() && pendingPlanItemId.isNotBlank() && itemId != pendingPlanItemId) flushPlanDeltas()
-                if (itemId.isNotBlank()) pendingPlanItemId = itemId
-                if (delta.isNotEmpty()) pendingPlan.append(delta)
-                if (!planFlushScheduled && pendingPlan.isNotEmpty()) { planFlushScheduled = true; streamHandler.postDelayed(flushPlanRunnable, 56L) }
+                if (!protocolPlanSeen) {
+                    flushAnswerDeltas(force = true); chatState.finishReasoning()
+                    val payload = runCatching { JSONObject(value) }.getOrNull()
+                    val itemId = payload?.optString("itemId", payload.optString("item_id")).orEmpty()
+                    val delta = payload?.optString("delta").orEmpty()
+                    if (itemId.isNotBlank() && pendingPlanItemId.isNotBlank() && itemId != pendingPlanItemId) flushPlanDeltas()
+                    if (itemId.isNotBlank()) pendingPlanItemId = itemId
+                    if (delta.isNotEmpty()) pendingPlan.append(delta)
+                    if (!planFlushScheduled && pendingPlan.isNotEmpty()) { planFlushScheduled = true; streamHandler.postDelayed(flushPlanRunnable, 56L) }
+                }
             }
             "onPlanComplete" -> {
-                flushAnswerDeltas(force = true)
-                flushPlanDeltas()
-                chatState.finishReasoning()
-                chatState.completeProposedPlan(value)
-                pendingPlanItemId = ""
-                val planText = chatState.messages.lastOrNull {
-                    it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
-                }?.let { decodeNativeProposedPlan(it.content) }.orEmpty()
-                currentThreadId?.takeIf { planText.isNotBlank() }
-                    ?.let { persistPendingPlanImplementation(it, planText) }
+                if (!protocolPlanSeen) {
+                    flushAnswerDeltas(force = true)
+                    flushPlanDeltas()
+                    chatState.finishReasoning()
+                    chatState.completeProposedPlan(value)
+                    pendingPlanItemId = ""
+                    val planText = chatState.messages.lastOrNull {
+                        it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+                    }?.let { decodeNativeProposedPlan(it.content) }.orEmpty()
+                    currentThreadId?.takeIf { planText.isNotBlank() }
+                        ?.let { persistPendingPlanImplementation(it, planText) }
+                }
             }
             "onPlanUpdated" -> {
                 // App-server versions have emitted the plan at params.plan, turn.plan,
@@ -2341,13 +3095,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (threadId.isNotBlank() && threadId == currentThreadId) clearLocalGoal(threadId)
             }
             "onCompactStatus" -> {
-                val text = when (value) {
-                    "started" -> nativeText(nativeLanguage, "\u6b63\u5728\u538b\u7f29\u4e0a\u4e0b\u6587\u2026", "Compacting context?")
-                    "completed" -> nativeText(nativeLanguage, "\u4e0a\u4e0b\u6587\u5df2\u538b\u7f29", "Context compacted")
-                    else -> nativeText(nativeLanguage, "\u4e0a\u4e0b\u6587\u538b\u7f29\u5931\u8d25", "Context compaction failed")
+                // Retained bridges used a string-only RPC status. Fold it into the same reducer
+                // instead of appending a second NOTICE capsule.
+                when (value.lowercase()) {
+                    "started" -> if (chatState.compactionItems.none { !it.isTerminal }) {
+                        chatState.closeActivityBoundary()
+                        chatState.beginManualCompaction()
+                    }
+                    "completed" -> chatState.completeManualCompactionRpc(success = true)
+                    "cancelled", "canceled" -> chatState.completeManualCompactionRpc(success = false, cancelled = true)
+                    else -> chatState.completeManualCompactionRpc(success = false, error = value)
                 }
-                chatState.messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "NOTICE|$text"))
-                chatState.revision++
             }
             "onUserInputRequest" -> {
                 storePendingUserInput(value)
@@ -2364,7 +3122,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.processingLabel = nativeText(nativeLanguage, "\u7b49\u5f85\u6743\u9650\u786e\u8ba4", "Waiting for approval")
             }
             "onSubagentEvent" -> {
-                val thread = chatState.updateSubagent(value)
+                val thread = if (!protocolSubagentSeen) chatState.updateSubagent(value) else runCatching {
+                    val item = JSONObject(value)
+                    item.optString("agentThreadId", item.optString("agent_thread_id"))
+                }.getOrDefault("")
                 if (thread.isNotBlank()) loadSubagentHistory(thread)
             }
             "onSubagentHistory" -> handleSubagentHistory(value)
@@ -2383,10 +3144,19 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }
             }
             "onTurnError" -> handleTurnError(value)
-            "onItem" -> chatState.addActivity(value)
+            "onItem" -> {
+                chatState.beginReasoningAfterAnswerIfNeeded()
+                chatState.addActivity(value)
+            }
             "onTurnComplete" -> {
                 val wasFailed = chatState.phase == NativeTurnPhase.FAILED
                 val waitingForGoalRetry = goalRetryWaitingForCompletion
+                cancelPendingAutoCompaction()
+                if (!protocolTurnCompletedSeen) chatState.acceptProtocolEvent(NativeProtocolEvent.TurnCompleted(
+                    threadId = currentThreadId.orEmpty(),
+                    turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
+                    failed = wasFailed,
+                ))
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
                 flushReasoningDeltas(force = true)
                 flushAnswerDeltas(force = true)

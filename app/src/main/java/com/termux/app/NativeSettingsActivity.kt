@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.io.File
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -168,6 +169,7 @@ class NativeSettingsActivity : ComponentActivity() {
             var chatBackground by remember { mutableStateOf(FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value) }
             var chatBackgroundImage by remember { mutableStateOf(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()) }
             var chatBackgroundDim by remember { mutableFloatStateOf(prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)) }
+            var chatDynamicBackground by remember { mutableStateOf(readFcodeChatDynamicBackgroundConfig(this@NativeSettingsActivity)) }
             var language by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "system").orEmpty()) }
             var animations by remember { mutableStateOf(prefs.getBoolean(KEY_STREAM_ANIMATIONS, true)) }
             var fixedStreamingViewport by remember { mutableStateOf(prefs.getBoolean(KEY_STREAM_FIXED_VIEWPORT, true)) }
@@ -204,6 +206,7 @@ class NativeSettingsActivity : ComponentActivity() {
                 chatBackground = chatBackground,
                 chatBackgroundImage = chatBackgroundImage,
                 chatBackgroundDim = chatBackgroundDim,
+                chatDynamicBackground = chatDynamicBackground,
                 showResponseStats = showResponseStats,
                 showModelSubtitle = showModelSubtitle,
                 showReasoningTitles = showReasoningTitles,
@@ -401,6 +404,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             selectedValue = chatBackground,
                             imagePath = chatBackgroundImage,
                             imageDim = chatBackgroundDim,
+                            dynamicConfig = chatDynamicBackground,
                             onBack = navigateBack,
                             onSelected = { value ->
                                 chatBackground = FcodeChatBackgroundStyle.from(value).value
@@ -413,6 +417,18 @@ class NativeSettingsActivity : ComponentActivity() {
                             onDimChanged = { value ->
                                 chatBackgroundDim = value.coerceIn(0f, 0.72f)
                                 prefs.edit().putFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, chatBackgroundDim).apply()
+                            },
+                            onDynamicConfigChanged = { value ->
+                                chatDynamicBackground = value
+                                prefs.edit()
+                                    .putBoolean(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_ENABLED, value.enabled)
+                                    .putInt(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_DELAY_MS, value.autoStartDelayMs)
+                                    .putInt(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_DURATION_MS, value.expansionDurationMs)
+                                    .putFloat(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_BLUR_DP, value.initialBlurDp)
+                                    .putFloat(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_REFRACTION_HEIGHT_DP, value.refractionHeightDp)
+                                    .putFloat(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_REFRACTION_AMOUNT_DP, value.refractionAmountDp)
+                                    .putBoolean(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_CHROMATIC, value.chromaticAberration)
+                                    .apply()
                             },
                         )
                         SettingsPage.DEVELOPMENT_TOOLS -> DevelopmentToolsSettingsPage(
@@ -1895,10 +1911,12 @@ private fun ChatBackgroundSettingsPage(
     selectedValue: String,
     imagePath: String,
     imageDim: Float,
+    dynamicConfig: FcodeChatDynamicBackgroundConfig,
     onBack: () -> Unit,
     onSelected: (String) -> Unit,
     onImageChanged: (String) -> Unit,
     onDimChanged: (Float) -> Unit,
+    onDynamicConfigChanged: (FcodeChatDynamicBackgroundConfig) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1906,6 +1924,7 @@ private fun ChatBackgroundSettingsPage(
     val imageInfo = remember(imagePath) { ChatBackgroundImageStore.readInfo(imagePath) }
     var importing by remember { mutableStateOf(false) }
     var importError by remember { mutableStateOf<String?>(null) }
+    var dynamicPreviewReplayToken by remember { mutableIntStateOf(0) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         importing = true
@@ -1930,7 +1949,16 @@ private fun ChatBackgroundSettingsPage(
         onBack,
     ) { pad ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
-            item { ChatBackgroundPreview(lang, selected) }
+            item {
+                ChatBackgroundPreview(
+                    lang = lang,
+                    style = selected,
+                    imagePath = imagePath,
+                    imageDim = imageDim,
+                    dynamicConfig = dynamicConfig,
+                    replayToken = dynamicPreviewReplayToken,
+                )
+            }
             item { SettingsSection(tr(lang, "自定义图片", "Custom image")) }
             item {
                 Surface(
@@ -2022,7 +2050,14 @@ private fun ChatBackgroundSettingsPage(
                 }
             }
             item { SettingsSection(tr(lang, "动态背景", "Animated backgrounds")) }
-            item { FutureMotionPreviewCard(lang) }
+            item {
+                DynamicBackgroundSettingsCard(
+                    lang = lang,
+                    config = dynamicConfig,
+                    onConfigChanged = onDynamicConfigChanged,
+                    onReplay = { dynamicPreviewReplayToken++ },
+                )
+            }
             item {
                 Text(
                     tr(lang, "图片会复制到应用私有目录，不依赖相册 URI 的长期访问权限。背景只应用于原生聊天内容区域。", "The image is copied into private app storage and does not depend on long-term gallery URI access. It only applies to the native chat canvas."),
@@ -2064,7 +2099,14 @@ private fun formatBackgroundImageSize(bytes: Long): String = when {
 }
 
 @Composable
-private fun ChatBackgroundPreview(lang: String, style: FcodeChatBackgroundStyle) {
+private fun ChatBackgroundPreview(
+    lang: String,
+    style: FcodeChatBackgroundStyle,
+    imagePath: String,
+    imageDim: Float,
+    dynamicConfig: FcodeChatDynamicBackgroundConfig,
+    replayToken: Int,
+) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
         shape = RoundedCornerShape(28.dp),
@@ -2072,7 +2114,14 @@ private fun ChatBackgroundPreview(lang: String, style: FcodeChatBackgroundStyle)
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f)),
     ) {
         Box(Modifier.fillMaxWidth().height(270.dp)) {
-            FcodeChatBackdrop(Modifier.fillMaxSize(), style, customImageMaxDimension = 1280)
+            FcodeChatDynamicBackgroundPreview(
+                modifier = Modifier.fillMaxSize(),
+                style = style,
+                imagePath = imagePath,
+                imageDim = imageDim,
+                config = dynamicConfig,
+                animationKey = "settings-preview:${style.value}:${imagePath}:${dynamicConfig.enabled}:$replayToken",
+            )
             Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(Modifier.size(34.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
@@ -2158,26 +2207,138 @@ private fun BackgroundChoiceCard(
 }
 
 @Composable
-private fun FutureMotionPreviewCard(lang: String) {
+private fun DynamicBackgroundSettingsCard(
+    lang: String,
+    config: FcodeChatDynamicBackgroundConfig,
+    onConfigChanged: (FcodeChatDynamicBackgroundConfig) -> Unit,
+    onReplay: () -> Unit,
+) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         shape = RoundedCornerShape(22.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .45f)),
     ) {
-        Row(Modifier.padding(17.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(Modifier.size(44.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
-                Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+        Column {
+            Row(Modifier.padding(17.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(Modifier.size(44.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                    Box(contentAlignment = Alignment.Center) { Icon(HugeIcons.Sparkles, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+                }
+                Spacer(Modifier.width(13.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(tr(lang, "液态玻璃扩散", "Liquid glass reveal"), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        tr(
+                            lang,
+                            "先模糊聊天背景，再由偏离中心的清晰玻璃圆扩散并永久铺满",
+                            "Frost the chat first, then let an off-center clear glass circle expand and remain full-screen",
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = config.enabled,
+                    onCheckedChange = { onConfigChanged(config.copy(enabled = it)) },
+                    enabled = liquidGlassSupported,
+                )
             }
-            Spacer(Modifier.width(13.dp))
-            Column(Modifier.weight(1f)) {
-                Text(tr(lang, "动态预览区域已预留", "Motion preview area is ready"), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                Text(tr(lang, "未来的粒子、渐变与液态动效会直接在上方聊天预览中播放。", "Future particles, gradients and liquid motion will play directly in the chat preview above."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
-                Text(tr(lang, "未来", "Future"), Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+            if (!liquidGlassSupported) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .45f))
+                Text(
+                    tr(lang, "液态折射需要 Android 12 或更高版本。", "Liquid refraction requires Android 12 or newer."),
+                    modifier = Modifier.padding(horizontal = 17.dp, vertical = 14.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else if (config.enabled) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .45f))
+                Text(
+                    tr(lang, "圆心默认在屏幕中心偏左上方；点击聊天页面可提前触发，不点击则按延迟自动播放。", "The origin sits slightly above-left of center. Tap the chat to start early, or let the delay trigger it automatically."),
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                DynamicBackgroundSliderRow(
+                    label = tr(lang, "自动触发延迟", "Auto-start delay"),
+                    value = config.autoStartDelayMs.toFloat(),
+                    range = FcodeChatDynamicBackgroundConfig.MIN_DELAY_MS.toFloat()..FcodeChatDynamicBackgroundConfig.MAX_DELAY_MS.toFloat(),
+                    format = { String.format(Locale.US, "%.1f s", it / 1000f) },
+                    onValueChange = { onConfigChanged(config.copy(autoStartDelayMs = it.toInt())) },
+                )
+                DynamicBackgroundSliderRow(
+                    label = tr(lang, "扩散时长", "Expansion time"),
+                    value = config.expansionDurationMs.toFloat(),
+                    range = FcodeChatDynamicBackgroundConfig.MIN_DURATION_MS.toFloat()..FcodeChatDynamicBackgroundConfig.MAX_DURATION_MS.toFloat(),
+                    format = { String.format(Locale.US, "%.1f s", it / 1000f) },
+                    onValueChange = { onConfigChanged(config.copy(expansionDurationMs = it.toInt())) },
+                )
+                DynamicBackgroundSliderRow(
+                    label = tr(lang, "初始背景模糊", "Initial background blur"),
+                    value = config.initialBlurDp,
+                    range = FcodeChatDynamicBackgroundConfig.MIN_BLUR_DP..FcodeChatDynamicBackgroundConfig.MAX_BLUR_DP,
+                    format = { "${it.toInt()} dp" },
+                    onValueChange = { onConfigChanged(config.copy(initialBlurDp = it)) },
+                )
+                DynamicBackgroundSliderRow(
+                    label = tr(lang, "玻璃折射高度", "Glass refraction height"),
+                    value = config.refractionHeightDp,
+                    range = FcodeChatDynamicBackgroundConfig.MIN_REFRACTION_HEIGHT_DP..FcodeChatDynamicBackgroundConfig.MAX_REFRACTION_HEIGHT_DP,
+                    format = { "${it.toInt()} dp" },
+                    onValueChange = { onConfigChanged(config.copy(refractionHeightDp = it)) },
+                )
+                DynamicBackgroundSliderRow(
+                    label = tr(lang, "玻璃折射强度", "Glass refraction amount"),
+                    value = config.refractionAmountDp,
+                    range = FcodeChatDynamicBackgroundConfig.MIN_REFRACTION_AMOUNT_DP..FcodeChatDynamicBackgroundConfig.MAX_REFRACTION_AMOUNT_DP,
+                    format = { "${it.toInt()} dp" },
+                    onValueChange = { onConfigChanged(config.copy(refractionAmountDp = it)) },
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr(lang, "轻微色散", "Chromatic edge"), style = MaterialTheme.typography.bodyMedium)
+                        Text(tr(lang, "在玻璃边缘加入很轻的 RGB 分离", "Add a restrained RGB split at the glass edge"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = config.chromaticAberration,
+                        onCheckedChange = { onConfigChanged(config.copy(chromaticAberration = it)) },
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                ) {
+                    TextButton(onClick = onReplay) { Text(tr(lang, "重播预览", "Replay preview")) }
+                    TextButton(
+                        onClick = {
+                            onConfigChanged(FcodeChatDynamicBackgroundConfig())
+                            onReplay()
+                        },
+                    ) { Text(tr(lang, "恢复默认", "Reset")) }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun DynamicBackgroundSliderRow(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    format: (Float) -> String,
+    onValueChange: (Float) -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 20.dp, vertical = 2.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(format(value), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Slider(value = value, onValueChange = onValueChange, valueRange = range)
     }
 }
 
@@ -3041,7 +3202,7 @@ private fun ModelConfigurationEditor(
     }
 
     if (showModelEditor) ModelEditorDialog(
-        lang = lang, editing = editingModel, seed = modelSeed,
+        lang = lang, profileId = providerId, editing = editingModel, seed = modelSeed,
         existingIds = models.filter { it !== editingModel }.map { it.id },
         onDismiss = { showModelEditor = false },
         onSave = { saved ->
@@ -3126,12 +3287,15 @@ private fun ModelCatalogCard(lang: String, model: CodexProviderStore.ModelConfig
 @Composable
 private fun ModelEditorDialog(
     lang: String,
+    profileId: String,
     editing: CodexProviderStore.ModelConfig?,
     seed: CodexProviderStore.ModelConfig?,
     existingIds: List<String>,
     onDismiss: () -> Unit,
     onSave: (CodexProviderStore.ModelConfig) -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val compactionStore = remember { NativeCompactionSettingsStore(context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)) }
     val value = remember(seed?.id, editing?.id) { (seed ?: CodexProviderStore.ModelConfig("", "", 0L)).copy() }
     var name by remember { mutableStateOf(value.name) }
     var id by remember { mutableStateOf(value.id) }
@@ -3157,6 +3321,12 @@ private fun ModelEditorDialog(
     var skillsInstructions by remember { mutableStateOf(value.includeSkillsInstructions) }
     var responsesLite by remember { mutableStateOf(value.responsesLite) }
     var applyPatch by remember { mutableStateOf(value.applyPatchTool) }
+    var nativeCompactionEnabled by remember(profileId, value.id) {
+        mutableStateOf(compactionStore.read(profileId, value.id).enabled)
+    }
+    var nativeCompactionPercent by remember(profileId, value.id) {
+        mutableIntStateOf(compactionStore.read(profileId, value.id).normalizedPercent)
+    }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun saveModel() {
@@ -3187,6 +3357,7 @@ private fun ModelEditorDialog(
             imageInput, imageInput && imageDetail, reasoningSummaries, parallelTools, verbosity, webSearch,
             skillsInstructions, responsesLite, applyPatch, resolvedMultiAgent, toolMode, ultraTransportEffort,
         ))
+        compactionStore.write(profileId, nextId, NativeCompactionSettings(nativeCompactionEnabled, nativeCompactionPercent))
     }
 
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
@@ -3203,6 +3374,31 @@ private fun ModelEditorDialog(
                     item { SettingsTextField(contextWindow, { contextWindow = it; error = null }, tr(lang, "上下文窗口（tokens）", "Context window (tokens)"), "200000", keyboardType = KeyboardType.Number) }
                     item { SettingsTextField(compactLimit, { compactLimit = it; error = null }, tr(lang, "自动压缩阈值（tokens）", "Auto-compact limit (tokens)"), tr(lang, "可留空", "Optional"), keyboardType = KeyboardType.Number) }
                     item { SettingsTextField(effectivePercent, { effectivePercent = it; error = null }, tr(lang, "可用上下文比例（%）", "Effective context (%)"), "95", keyboardType = KeyboardType.Number) }
+                    item { SettingsSection(tr(lang, "原生聊天压缩", "Native chat compaction")) }
+                    item {
+                        ToggleSettingsRow(
+                            HugeIcons.Refresh03,
+                            tr(lang, "启用自动压缩", "Enable automatic compaction"),
+                            tr(lang, "只影响原生 UI 的本地回退策略，不会向 app-server 写入额外参数", "Only controls the native UI fallback; no unsupported app-server parameter is sent"),
+                            nativeCompactionEnabled,
+                        ) { nativeCompactionEnabled = it }
+                    }
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(tr(lang, "回退阈值", "Fallback threshold"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                                Text("$nativeCompactionPercent%", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = nativeCompactionPercent.toFloat(),
+                                onValueChange = { nativeCompactionPercent = it.roundToInt().coerceIn(80, 95) },
+                                valueRange = 80f..95f,
+                                steps = 14,
+                                enabled = nativeCompactionEnabled,
+                            )
+                            Text(tr(lang, "服务端提供的 auto_compact_token_limit 优先；缺失可靠上下文数据时不会猜测触发。", "A server auto_compact_token_limit takes precedence; missing reliable context data never triggers a guess."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                     item { SettingsSection(tr(lang, "推理与输出", "Reasoning & output")) }
                     item { ChoiceSettingsField(tr(lang, "默认推理强度", "Default reasoning effort"), defaultEffort, reasoningEffortOptions(lang)) { defaultEffort = it } }
                     item { SettingsTextField(supportedEfforts, { supportedEfforts = it; error = null }, tr(lang, "支持的推理强度（逗号分隔）", "Supported efforts (comma-separated)"), "none,minimal,low,medium,high,xhigh,max,ultra") }

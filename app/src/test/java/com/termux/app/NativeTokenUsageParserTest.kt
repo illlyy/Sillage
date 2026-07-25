@@ -28,4 +28,46 @@ class NativeTokenUsageParserTest {
         assertEquals(10, estimate.outputTokens)
         assertTrue(estimate.estimated)
     }
+
+    @Test
+    fun preservesSnakeCaseContextAndCurrentUsageWithoutInputBreakdown() {
+        val usage = NativeTokenUsageParser.parse(
+            """{"context_window":100000,"context_tokens":91000,"auto_compact_token_limit":90000}""",
+        )!!
+        assertEquals(100000L, usage.contextWindow)
+        assertEquals(91000L, usage.currentContextTokens)
+        assertEquals(90000L, usage.autoCompactTokenLimit)
+        assertTrue(usage.contextUsageReliable)
+    }
+
+    @Test
+    fun explicitUnreliableFlagWinsOverCumulativeShape() {
+        val usage = NativeTokenUsageParser.parse(
+            """{"contextWindow":100000,"contextUsageReliable":false,"total":{"totalTokens":95000}}""",
+        )!!
+        assertEquals(95000L, usage.currentContextTokens)
+        assertFalse(usage.contextUsageReliable)
+    }
+
+    @Test
+    fun parsesSnakeCaseLastAndCumulativeUsageShapes() {
+        val usage = NativeTokenUsageParser.parse(
+            """{"last_usage":{"input_tokens":10},"cumulative_usage":{"total_tokens":920},"context_window":1000}""",
+        )!!
+        assertEquals(10L, usage.inputTokens)
+        assertEquals(920L, usage.currentContextTokens)
+        assertTrue(usage.contextUsageReliable)
+    }
+
+    @Test
+    fun parsesCodexModelAutoCompactAndTotalTokenUsageAliases() {
+        val usage = NativeTokenUsageParser.parse(
+            """{"last_token_usage":{"input_tokens":12,"output_tokens":3},"total_token_usage":{"input_tokens":91000,"total_tokens":91003},"model_context_window":100000,"model_auto_compact_token_limit":90000}""",
+        )!!
+        assertEquals(12L, usage.inputTokens)
+        assertEquals(91003L, usage.currentContextTokens)
+        assertEquals(100000L, usage.contextWindow)
+        assertEquals(90000L, usage.autoCompactTokenLimit)
+        assertTrue(usage.contextUsageReliable)
+    }
 }

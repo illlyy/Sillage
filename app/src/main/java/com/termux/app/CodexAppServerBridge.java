@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Direct JSONL bridge to `codex app-server --stdio`; no Node.js or external Termux required. */
 final class CodexAppServerBridge {
@@ -79,6 +80,8 @@ final class CodexAppServerBridge {
     private int deferredResumeGeneration = -1;
     private volatile int editRollbackRequestId = -1;
     private volatile int compactRequestId = -1;
+    private volatile String compactNativeRequestId;
+    private final AtomicLong nativeProtocolSequence = new AtomicLong();
     private volatile int collaborationModesRequestId = -1;
     private volatile int mcpStatusRequestId = -1;
     private volatile JSONObject planCollaborationMode;
@@ -639,14 +642,36 @@ final class CodexAppServerBridge {
     }
 
     void compactThread() {
+        compactThread(null);
+    }
+
+    void compactThread(String nativeRequestId) {
         if (threadId == null || threadId.trim().isEmpty()) return;
         try {
-            emit("onCompactStatus", "started");
+            compactNativeRequestId = nativeRequestId;
+            if (webView != null) emit("onCompactStatus", "started");
             compactRequestId = sendRequest("thread/compact/start", new JSONObject().put("threadId", threadId));
         } catch (Exception e) {
-            emit("onCompactStatus", "failed");
+            emitCompactionRpcResult(false, e.getMessage());
+            if (webView != null) emit("onCompactStatus", "failed");
             emit("onNativeError", e.getMessage());
         }
+    }
+
+    private void emitCompactionRpcResult(boolean success, String error) {
+        if (webView == null) {
+            try {
+                emit("onCompactionRpcResult", new JSONObject()
+                    .put("threadId", threadId == null ? "" : threadId)
+                    .put("requestId", compactNativeRequestId == null ? JSONObject.NULL : compactNativeRequestId)
+                    .put("success", success)
+                    .put("error", error == null ? "" : error)
+                    .put("sequence", nativeProtocolSequence.incrementAndGet())
+                    .put("timestampMs", System.currentTimeMillis())
+                    .toString());
+            } catch (Exception ignored) {}
+        }
+        compactNativeRequestId = null;
     }
 
     void setThreadGoalStatus(String status) {
@@ -1144,7 +1169,9 @@ final class CodexAppServerBridge {
             }
             if (message.optInt("id", -1) == compactRequestId) {
                 compactRequestId = -1;
-                emit("onCompactStatus", "failed");
+                String compactError = message.getJSONObject("error").optString("message", message.toString());
+                emitCompactionRpcResult(false, compactError);
+                if (webView != null) emit("onCompactStatus", "failed");
             }
             if (message.optInt("id", -1) == editRollbackRequestId) {
                 editRollbackRequestId = -1;
@@ -1188,7 +1215,8 @@ final class CodexAppServerBridge {
             }
             if (id == compactRequestId) {
                 compactRequestId = -1;
-                emit("onCompactStatus", "completed");
+                emitCompactionRpcResult(true, "");
+                if (webView != null) emit("onCompactStatus", "completed");
             }
             JSONObject result = message.optJSONObject("result");
             if (result != null && result.optJSONObject("thread") != null) {
@@ -1215,7 +1243,7 @@ final class CodexAppServerBridge {
         }
         String method = message.optString("method", "");
         JSONObject params = message.optJSONObject("params");
-        boolean primaryEvent = isPrimaryEvent(params);
+        boolean primaryEvent = isPrimaryEvent(method, params);
         logCollabAgentEvent(method, params);
         if ("thread/goal/updated".equals(method) && params != null) {
             publishNativeGoalState(params.optString("threadId", ""), params.optJSONObject("goal"));
@@ -1270,6 +1298,29 @@ final class CodexAppServerBridge {
             emit("onPlanUpdated", params.toString());
         }
         if (("item/started".equals(method) || "item/completed".equals(method)) && params != null && primaryEvent) {
+            emitProtocolItemEvent(method, params);
+        }
+        if (primaryEvent && params != null && isContextCompactionLifecycleMethod(method)
+                && !("item/started".equals(method) || "item/completed".equals(method))) {
+            emitProtocolCompactionLifecycle(method, params);
+        }
+        if (primaryEvent && params != null && (
+                "contextCompacted".equals(method) || "context/compacted".equals(method)
+                || "thread/contextCompacted".equals(method) || "thread/context_compacted".equals(method))) {
+            try {
+                JSONObject legacy = new JSONObject()
+                    .put("kind", "contextCompactionCompleted")
+                    .put("method", method)
+                    .put("threadId", protocolThreadId(params))
+                    .put("turnId", protocolTurnId(params))
+                    .put("itemId", protocolItemId(params))
+                    .put("legacy", true)
+                    .put("sequence", nativeProtocolSequence.incrementAndGet())
+                    .put("timestampMs", System.currentTimeMillis());
+                emit("onProtocolEvent", legacy.toString());
+            } catch (Exception ignored) {}
+        }
+        if (("item/started".equals(method) || "item/completed".equals(method)) && params != null && primaryEvent) {
             JSONObject liveItem = params.optJSONObject("item");
             String liveType = liveItem == null ? "" : liveItem.optString("type", "");
             JSONArray liveReceivers = liveItem == null ? null : liveItem.optJSONArray("receiverThreadIds");
@@ -1277,8 +1328,18 @@ final class CodexAppServerBridge {
                 || (liveReceivers != null && liveReceivers.length() > 0));
             if ("subAgentActivity".equals(liveType) || ("collabAgentToolCall".equals(liveType) && hasAgentIdentity)) {
                 JSONObject presentationItem = new JSONObject(liveItem.toString());
-                if ("subAgentActivity".equals(liveType) || "item/started".equals(method)) {
+                if ("item/started".equals(method)) {
                     presentationItem.put("status", "working");
+                } else if ("subAgentActivity".equals(liveType)) {
+                    // Some app-server versions omit status on the completed subAgentActivity
+                    // item. Do not turn a finished chip back into a working one; preserve an
+                    // explicit failure/cancel state and otherwise expose a terminal status.
+                    String existingStatus = presentationItem.optString("status", "").trim();
+                    String normalizedStatus = normalizeProtocolName(existingStatus);
+                    if (existingStatus.isEmpty() || "working".equals(normalizedStatus)
+                            || "running".equals(normalizedStatus) || "inprogress".equals(normalizedStatus)) {
+                        presentationItem.put("status", "done");
+                    }
                 }
                 emit("onSubagentEvent", NativeLargePayloadStore.compactToolItem(presentationItem));
                 NativeChatDiagnostics.record(appContext, "subagent_capsule", new JSONObject()
@@ -1290,14 +1351,20 @@ final class CodexAppServerBridge {
             // Plan mode emits its final <proposed_plan> block as a dedicated Plan item,
             // not as an agentMessage. Forward that stream explicitly or the native UI
             // remains blank until it reparses the rollout after a route change.
-            emit("onPlanDelta", params.toString());
+            emitProtocolDeltaEvent("planDelta", params, params.optString("delta", ""));
+            if (webView != null) emit("onPlanDelta", params.toString());
+        } else if (primaryEvent && "item/started".equals(method) && isContextCompactionItem(params)) {
+            // The normalized event above owns the native divider. Do not turn compaction into a
+            // generic processing label/capsule.
+        } else if (primaryEvent && "item/completed".equals(method) && isContextCompactionItem(params)) {
+            // Completion updates the same stable divider via onProtocolEvent.
         } else if (primaryEvent && "item/started".equals(method) && isPlanItem(params)) {
-            emit("onPlanStarted", params.toString());
+            if (webView != null) emit("onPlanStarted", params.toString());
         } else if (primaryEvent && "item/completed".equals(method) && isPlanItem(params)) {
-            emit("onPlanComplete", params.toString());
+            if (webView != null) emit("onPlanComplete", params.toString());
         } else if (primaryEvent && "item/started".equals(method) && isCommandItem(params)) {
             JSONObject item = params == null ? null : params.optJSONObject("item");
-            emit("onCommandStarted", item == null ? "{}" : item.toString());
+            if (webView != null) emit("onCommandStarted", item == null ? "{}" : item.toString());
         } else if (primaryEvent && "item/agentMessage/delta".equals(method) && params != null) {
             String itemId = params.optString("itemId", "");
             if (!itemId.isEmpty()) streamedAgentItemIds.add(itemId);
@@ -1305,19 +1372,20 @@ final class CodexAppServerBridge {
             lastAgentDeltaAt = android.os.SystemClock.uptimeMillis();
             agentDeltaCount++;
             agentDeltaChars += delta.length();
-            emit("onDelta", delta);
+            emitProtocolDeltaEvent("assistantDelta", params, delta);
+            if (webView != null) emit("onDelta", delta);
         } else if (primaryEvent && "item/completed".equals(method) && isReasoningItem(params)) {
             JSONObject item = params.optJSONObject("item");
             String text = extractReasoningText(item);
-            if (!text.isEmpty()) emit("onReasoningComplete", text);
+            if (webView != null && !text.isEmpty()) emit("onReasoningComplete", text);
         } else if (primaryEvent && "item/completed".equals(method) && isCommandItem(params)) {
             JSONObject item = params.optJSONObject("item");
             // handleNotification runs on the app-server reader thread. Strip large streams
             // here so the main thread receives only command metadata and an output reference.
-            emit("onCommandComplete", NativeCommandOutputStore.compactCommandItem(item));
+            if (webView != null) emit("onCommandComplete", NativeCommandOutputStore.compactCommandItem(item));
         } else if (primaryEvent && "item/completed".equals(method) && isToolDetailItem(params)) {
             JSONObject item = params.optJSONObject("item");
-            emit("onToolComplete", NativeLargePayloadStore.compactToolItem(item));
+            if (webView != null) emit("onToolComplete", NativeLargePayloadStore.compactToolItem(item));
         } else if (primaryEvent && "item/completed".equals(method) && isAgentMessageItem(params)) {
             JSONObject item = params == null ? null : params.optJSONObject("item");
             boolean finalAnswer = isFinalAgentMessage(params);
@@ -1332,20 +1400,38 @@ final class CodexAppServerBridge {
             // Seal a commentary/missing-phase item without ending the turn; idle status below
             // is the protocol-level completion signal. This also repairs a detached Activity.
             String completedText = extractAgentMessageText(item);
-            if (!completedText.isEmpty()) {
+            if (webView != null && !completedText.isEmpty()) {
                 emit(finalAnswer ? "onFinalAnswer" : "onAssistantItemComplete", completedText);
             }
             if (finalAnswer) scheduleMissingTurnCompletion(params);
         } else if (primaryEvent && ("item/reasoning/summaryTextDelta".equals(method) || "item/reasoning/textDelta".equals(method)) && params != null) {
-            emit("onReasoningDelta", params.optString("delta", ""));
+            String delta = params.optString("delta", "");
+            emitProtocolDeltaEvent("reasoningDelta", params, delta);
+            if (webView != null) emit("onReasoningDelta", delta);
         } else if (primaryEvent && "item/commandExecution/outputDelta".equals(method) && params != null) {
-            emit("onCommandDelta", params.optString("delta", ""));
+            emitProtocolCommandDelta(params);
+            if (webView != null) emit("onCommandDelta", params.optString("delta", ""));
         } else if (primaryEvent && "item/started".equals(method) && params != null) {
             JSONObject item = params.optJSONObject("item");
             if (item != null) emit("onItem", item.optString("type", "item"));
-        } else if (primaryEvent && "thread/tokenUsage/updated".equals(method) && params != null) {
+        } else if (primaryEvent && params != null
+                && "threadtokenusageupdated".equals(normalizeProtocolName(method))) {
             JSONObject usage = params.optJSONObject("tokenUsage");
-            emit("onTokenUsage", usage == null ? "{}" : usage.toString());
+            if (usage == null) usage = params.optJSONObject("token_usage");
+            JSONObject usagePayload = usage == null ? new JSONObject() : new JSONObject(usage.toString());
+            // Threshold/context metadata has appeared both beside and inside tokenUsage across
+            // app-server releases. Preserve it without inventing turn/start parameters.
+            String[] usageKeys = new String[] {
+                "autoCompactTokenLimit", "auto_compact_token_limit", "contextWindow", "context_window",
+                "autoCompactTokenLimitTokens", "auto_compact_token_limit_tokens",
+                "modelAutoCompactTokenLimit", "model_auto_compact_token_limit",
+                "modelContextWindow", "model_context_window", "contextTokens", "context_tokens",
+                "currentContextTokens", "current_context_tokens", "contextUsageReliable", "context_usage_reliable",
+                "usageReliable", "usage_reliable", "estimated", "isEstimated",
+            };
+            for (String key : usageKeys) if (!usagePayload.has(key) && params.has(key)) usagePayload.put(key, params.opt(key));
+            emitProtocolLifecycleEvent("tokenUsageUpdated", params, usagePayload);
+            if (webView != null) emit("onTokenUsage", usagePayload.toString());
         } else if ("thread/status/changed".equals(method) && isIdleThreadStatus(params)) {
             completeVisibleTurnFromIdle(params);
         } else if ("turn/completed".equals(method)) {
@@ -1357,7 +1443,10 @@ final class CodexAppServerBridge {
                 JSONObject completedTurn = params.optJSONObject("turn");
                 if (completedTurn != null) completedThread = completedTurn.optString("threadId", "");
             }
-            if (primaryEvent && !uiAlreadyCompleted) emit("onTurnComplete", "");
+            if (primaryEvent && !uiAlreadyCompleted) {
+                emitProtocolLifecycleEvent("turnCompleted", params, params == null ? null : params.optJSONObject("turn"));
+                emit("onTurnComplete", "");
+            }
             if (isPrimaryTurn(params)) {
                 boolean failed = turnFailed(params);
                 JSONObject completedTurnObject = params == null ? null : params.optJSONObject("turn");
@@ -1371,6 +1460,7 @@ final class CodexAppServerBridge {
             // Error notifications with willRetry=true are part of one turn. Keep their protocol
             // metadata so the native UI can update one retry card in place and, when a goal is
             // active, continue after the server's bounded internal retry budget is exhausted.
+            emitProtocolLifecycleEvent("error", params, params);
             emit("onTurnError", params.toString());
         }
     }
@@ -1412,24 +1502,210 @@ final class CodexAppServerBridge {
     private static boolean isToolDetailItem(JSONObject params) {
         JSONObject item = params == null ? null : params.optJSONObject("item");
         if (item == null) return false;
-        String type = item.optString("type", "");
-        return "fileChange".equals(type) || "mcpToolCall".equals(type) || "webSearch".equals(type)
-            || "collabAgentToolCall".equals(type) || "imageView".equals(type) || "view_image".equals(type);
+        String type = normalizeItemType(item.optString("type", item.optString("item_type", "")));
+        return "filechange".equals(type) || "mcptoolcall".equals(type) || "websearch".equals(type)
+            || "collabagenttoolcall".equals(type) || "subagentactivity".equals(type)
+            || "imageview".equals(type) || "viewimage".equals(type);
     }
 
     private static boolean isPlanItem(JSONObject params) {
         JSONObject item = params == null ? null : params.optJSONObject("item");
-        return item != null && "plan".equals(item.optString("type"));
+        return item != null && "plan".equals(normalizeItemType(item.optString("type", item.optString("item_type", ""))));
     }
 
     private static boolean isReasoningItem(JSONObject params) {
         JSONObject item = params == null ? null : params.optJSONObject("item");
-        return item != null && "reasoning".equals(item.optString("type"));
+        return item != null && "reasoning".equals(normalizeItemType(item.optString("type", item.optString("item_type", ""))));
     }
 
     private static boolean isCommandItem(JSONObject params) {
         JSONObject item = params == null ? null : params.optJSONObject("item");
-        return item != null && "commandExecution".equals(item.optString("type"));
+        return item != null && "commandexecution".equals(normalizeItemType(item.optString("type", item.optString("item_type", ""))));
+    }
+
+    private static String normalizeItemType(String value) {
+        return value == null ? "" : value.replace("_", "").replace("-", "")
+            .toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static boolean isContextCompactionItem(JSONObject params) {
+        JSONObject item = params == null ? null : params.optJSONObject("item");
+        String type = item == null
+            ? (params == null ? "" : params.optString("itemType",
+                params.optString("item_type", params.optString("type", ""))))
+            : item.optString("type", item.optString("item_type", ""));
+        String normalized = normalizeProtocolName(type);
+        return "contextcompaction".equals(normalized) || "contextcompacted".equals(normalized);
+    }
+
+    private static boolean isContextCompactionLifecycleMethod(String method) {
+        String normalized = normalizeProtocolName(method);
+        return normalized.contains("contextcompaction") &&
+            (normalized.endsWith("started") || normalized.endsWith("start")
+                || normalized.endsWith("completed") || normalized.endsWith("complete")
+                || normalized.endsWith("failed") || normalized.endsWith("cancelled") || normalized.endsWith("canceled"));
+    }
+
+    private void emitProtocolCompactionLifecycle(String method, JSONObject params) {
+        if (webView != null || params == null) return;
+        try {
+            JSONObject copy = new JSONObject(params.toString());
+            JSONObject item = copy.optJSONObject("item");
+            if (item == null) {
+                item = new JSONObject().put("type", "contextCompaction");
+                String itemId = protocolItemId(copy);
+                if (!itemId.isEmpty()) item.put("id", itemId);
+                copy.put("item", item);
+            } else if (item.optString("type").isEmpty()) item.put("type", "contextCompaction");
+            String normalized = normalizeProtocolName(method);
+            boolean completed = normalized.endsWith("completed") || normalized.endsWith("complete")
+                || normalized.endsWith("failed") || normalized.endsWith("cancelled") || normalized.endsWith("canceled");
+            emitProtocolItemEvent(completed ? "item/completed" : "item/started", copy);
+        } catch (Exception ignored) {}
+    }
+
+    private static String protocolThreadId(JSONObject params) {
+        if (params == null) return "";
+        String value = params.optString("threadId", params.optString("thread_id", ""));
+        JSONObject turn = params.optJSONObject("turn");
+        JSONObject item = params.optJSONObject("item");
+        if (value.isEmpty() && turn != null) value = turn.optString("threadId", turn.optString("thread_id", ""));
+        if (value.isEmpty() && item != null) value = item.optString("threadId", item.optString("thread_id", ""));
+        if (value.isEmpty() && item != null) value = item.optString("senderThreadId", item.optString("sender_thread_id", ""));
+        return value;
+    }
+
+    private static String protocolTurnId(JSONObject params) {
+        if (params == null) return "";
+        String value = params.optString("turnId", params.optString("turn_id", ""));
+        JSONObject turn = params.optJSONObject("turn");
+        if (value.isEmpty() && turn != null) value = turn.optString("id", turn.optString("turnId", turn.optString("turn_id", "")));
+        JSONObject item = params.optJSONObject("item");
+        if (value.isEmpty() && item != null) value = item.optString("turnId", item.optString("turn_id", ""));
+        return value;
+    }
+
+    private static String protocolItemId(JSONObject params) {
+        if (params == null) return "";
+        String value = params.optString("itemId", params.optString("item_id", ""));
+        JSONObject item = params.optJSONObject("item");
+        if (value.isEmpty() && item != null) value = item.optString("id", item.optString("itemId", item.optString("item_id", "")));
+        return value;
+    }
+
+    private static String normalizeProtocolName(String value) {
+        return value == null ? "" : value
+            .replace("_", "")
+            .replace("-", "")
+            .replace("/", "")
+            .replace(".", "")
+            .toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private void emitProtocolItemEvent(String method, JSONObject params) {
+        if (webView != null || params == null) return;
+        try {
+            JSONObject item = params.optJSONObject("item");
+            String itemType = item == null ? "" : item.optString("type", item.optString("item_type", ""));
+            String normalizedItemType = normalizeItemType(itemType);
+            String lifecycle = "item/started".equals(method) ? "started" : "completed";
+            String kind;
+            if (isContextCompactionItem(params)) kind = "contextCompaction" + capitalize(lifecycle);
+            else if (isCommandItem(params)) kind = "command" + capitalize(lifecycle);
+            else if (isReasoningItem(params)) kind = "reasoning" + capitalize(lifecycle);
+            else if (isPlanItem(params)) kind = "plan" + capitalize(lifecycle);
+            else if (isAgentMessageItem(params)) kind = "assistant" + capitalize(lifecycle);
+            else if (item != null && ("subagentactivity".equals(normalizedItemType) || "collabagenttoolcall".equals(normalizedItemType))) kind = "subagentUpdated";
+            else kind = "tool" + capitalize(lifecycle);
+
+            JSONObject safeItem = item == null ? new JSONObject() : new JSONObject(item.toString());
+            if ("commandexecution".equals(normalizedItemType) && "completed".equals(lifecycle)) {
+                safeItem = new JSONObject(NativeCommandOutputStore.compactCommandItem(item));
+            } else if ("completed".equals(lifecycle) && isToolDetailItem(params)) {
+                safeItem = new JSONObject(NativeLargePayloadStore.compactToolItem(item));
+            } else if ("agentmessage".equals(normalizedItemType)) {
+                String text = extractAgentMessageText(item);
+                safeItem.remove("content");
+                safeItem.put("text", text);
+            }
+            if ("subagentactivity".equals(normalizedItemType)
+                    || "collabagenttoolcall".equals(normalizedItemType)) {
+                String status = safeItem.optString("status", "").trim();
+                String normalizedStatus = normalizeProtocolName(status);
+                if ("started".equals(lifecycle)) {
+                    safeItem.put("status", "working");
+                } else if (status.isEmpty() || "working".equals(normalizedStatus)
+                        || "running".equals(normalizedStatus) || "inprogress".equals(normalizedStatus)) {
+                    safeItem.put("status", "done");
+                }
+            }
+            JSONObject payload = new JSONObject()
+                .put("kind", kind)
+                .put("method", method)
+                .put("threadId", protocolThreadId(params))
+                .put("turnId", protocolTurnId(params))
+                .put("itemId", protocolItemId(params))
+                .put("itemType", itemType)
+                .put("sequence", nativeProtocolSequence.incrementAndGet())
+                .put("timestampMs", System.currentTimeMillis())
+                .put("item", safeItem);
+            emit("onProtocolEvent", payload.toString());
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to normalize protocol item event " + method, error);
+        }
+    }
+
+    private void emitProtocolCommandDelta(JSONObject params) {
+        if (webView != null || params == null) return;
+        try {
+            emit("onCommandDeltaV2", new JSONObject()
+                .put("kind", "commandOutput")
+                .put("threadId", protocolThreadId(params))
+                .put("turnId", protocolTurnId(params))
+                .put("itemId", protocolItemId(params))
+                .put("sequence", nativeProtocolSequence.incrementAndGet())
+                .put("timestampMs", System.currentTimeMillis())
+                .put("delta", params.optString("delta", ""))
+                .toString() + "\n");
+        } catch (Exception ignored) {}
+    }
+
+    /** High-frequency normalized delta. It carries the same identity metadata as lifecycle items
+     * and is batched by emit(), so the native reducer never has to infer an item from text order. */
+    private void emitProtocolDeltaEvent(String kind, JSONObject params, String delta) {
+        if (webView != null || params == null || delta == null || delta.isEmpty()) return;
+        try {
+            JSONObject item = params.optJSONObject("item");
+            emit("onProtocolDelta", new JSONObject()
+                .put("kind", kind)
+                .put("threadId", protocolThreadId(params))
+                .put("turnId", protocolTurnId(params))
+                .put("itemId", protocolItemId(params))
+                .put("itemPhase", item == null ? params.optString("phase", "") : item.optString("phase", ""))
+                .put("sequence", nativeProtocolSequence.incrementAndGet())
+                .put("timestampMs", System.currentTimeMillis())
+                .put("delta", delta)
+                .toString() + "\n");
+        } catch (Exception ignored) {}
+    }
+
+    private void emitProtocolLifecycleEvent(String kind, JSONObject params, JSONObject details) {
+        if (webView != null) return;
+        try {
+            JSONObject payload = new JSONObject()
+                .put("kind", kind)
+                .put("threadId", protocolThreadId(params))
+                .put("turnId", protocolTurnId(params))
+                .put("itemId", protocolItemId(params))
+                .put("sequence", nativeProtocolSequence.incrementAndGet())
+                .put("timestampMs", System.currentTimeMillis());
+            if (details != null) payload.put("details", details);
+            emit("onProtocolEvent", payload.toString());
+        } catch (Exception ignored) {}
+    }
+
+    private static String capitalize(String value) {
+        return value.isEmpty() ? value : Character.toUpperCase(value.charAt(0)) + value.substring(1);
     }
 
     private static String extractReasoningText(JSONObject item) {
@@ -1684,6 +1960,7 @@ final class CodexAppServerBridge {
         StringBuilder command = new StringBuilder();
         JSONArray tools = new JSONArray();
         java.util.Map<String, JSONObject> calls = new java.util.HashMap<>();
+        java.util.Map<String, Integer> historicalCompactionIndices = new java.util.LinkedHashMap<>();
         JSONObject pendingUserMessage = null;
         boolean sawEventMessage = false;
         int lastProcessIndex = -1;
@@ -1698,6 +1975,25 @@ final class CodexAppServerBridge {
                 long recordAtMs = parseRecordTimestampMs(record.optString("timestamp", ""));
                 boolean eventMessageRecord = "event_msg".equals(record.optString("type"));
                 if (eventMessageRecord) sawEventMessage = true;
+                JSONObject historicalCompaction = historicalCompactionItem(record, payload, recordAtMs);
+                if (historicalCompaction != null) {
+                    String compactionKey = historicalCompaction.optString("serverItemId", "");
+                    if (compactionKey.isEmpty()) compactionKey = historicalCompaction.optString("id", "");
+                    Integer existingIndex = historicalCompactionIndices.get(compactionKey);
+                    String encoded = encodeHistoricalCompaction(historicalCompaction);
+                    if (existingIndex != null && existingIndex >= 0 && existingIndex < messages.length()) {
+                        JSONObject previous = messages.optJSONObject(existingIndex);
+                        if (previous != null) {
+                            previous.put("content", encoded);
+                            previous.put("role", "activity");
+                            messages.put(existingIndex, previous);
+                        }
+                    } else {
+                        historicalCompactionIndices.put(compactionKey, messages.length());
+                        messages.put(new JSONObject().put("role", "activity").put("content", encoded));
+                    }
+                    continue;
+                }
                 if (eventMessageRecord && "user_message".equals(payload.optString("type"))) {
                     JSONObject confirmed = confirmedHistoryUserMessage(pendingUserMessage, payload);
                     if (confirmed != null) messages.put(confirmed);
@@ -1845,34 +2141,84 @@ final class CodexAppServerBridge {
         return messages;
     }
 
-    private static final java.util.regex.Pattern PROPOSED_PLAN_BLOCK = java.util.regex.Pattern.compile(
-        "(?is)<propose(?:d)?_plan(?:\\s[^>]*)?>\\s*(.*?)\\s*</propose(?:d)?_plan\\s*>"
-    );
-    private static final java.util.regex.Pattern PROPOSED_PLAN_TAG = java.util.regex.Pattern.compile(
-        "(?is)</?propose(?:d)?_plan(?:\\s[^>]*)?>"
-    );
-
-    /** Split persisted plan-mode output into normal assistant text and plan Markdown. */
+    /** Split persisted plan-mode output into normal assistant text and plan Markdown.
+     *
+     * Keep history on the same stateful scanner as the live stream. The old implementation used
+     * one closed-block regex, which leaked tags when a provider persisted an unclosed block and
+     * could not recognize the newer <plan> spelling.
+     */
     static JSONArray splitHistoricalAssistantContent(String value) throws Exception {
-        String source = value == null ? "" : value;
         JSONArray parts = new JSONArray();
-        java.util.regex.Matcher matcher = PROPOSED_PLAN_BLOCK.matcher(source);
-        int cursor = 0;
-        boolean foundPlan = false;
-        while (matcher.find()) {
-            appendHistoricalContentPart(parts, "assistant", source.substring(cursor, matcher.start()));
-            appendHistoricalContentPart(parts, "plan", matcher.group(1));
-            foundPlan = true;
-            cursor = matcher.end();
-        }
-        if (foundPlan) {
-            appendHistoricalContentPart(parts, "assistant", source.substring(cursor));
-        } else {
-            // Malformed/legacy blocks should still render as Markdown rather than being
-            // swallowed as an unknown HTML element by Markwon.
-            appendHistoricalContentPart(parts, "assistant", PROPOSED_PLAN_TAG.matcher(source).replaceAll(""));
+        java.util.List<NativePlanContentPart> scanned = NativePlanStreamParser.splitComplete(value);
+        for (NativePlanContentPart part : scanned) {
+            appendHistoricalContentPart(parts, part.getRole(), part.getText());
         }
         return parts;
+    }
+
+    private static JSONObject historicalCompactionItem(JSONObject record, JSONObject payload, long recordAtMs) throws Exception {
+        if (payload == null) return null;
+        JSONObject item = payload.optJSONObject("item");
+        if (item == null) item = payload;
+        String type = normalizeItemType(item.optString("type", item.optString("item_type", payload.optString("type", ""))));
+        String method = normalizeItemType(payload.optString("method", payload.optString("event", record.optString("type", ""))))
+            .replace("/", "").replace(".", "");
+        boolean compaction = type.contains("contextcompaction") || type.contains("contextcompacted")
+            || method.contains("contextcompaction") || method.contains("contextcompacted")
+            || method.contains("contextcompacted");
+        if (!compaction) return null;
+
+        String thread = payload.optString("threadId", payload.optString("thread_id", ""));
+        if (thread.isEmpty()) thread = item.optString("threadId", item.optString("thread_id", ""));
+        JSONObject turn = payload.optJSONObject("turn");
+        String turnId = payload.optString("turnId", payload.optString("turn_id", ""));
+        if (turnId.isEmpty() && turn != null) turnId = turn.optString("id", turn.optString("turnId", ""));
+        String serverItemId = payload.optString("itemId", payload.optString("item_id", ""));
+        if (serverItemId.isEmpty()) serverItemId = item.optString("id", item.optString("itemId", item.optString("item_id", "")));
+
+        String rawStatus = item.optString("status", item.optString("state", payload.optString("status", payload.optString("state", ""))));
+        String normalizedStatus = normalizeItemType(rawStatus);
+        String status;
+        if (normalizedStatus.contains("cancel")) status = "cancelled";
+        else if (normalizedStatus.contains("fail") || normalizedStatus.contains("error")) status = "failed";
+        else if (normalizedStatus.contains("start") || normalizedStatus.contains("run") || normalizedStatus.contains("progress")) status = "running";
+        else status = "completed";
+        String error = item.optString("error", payload.optString("error", payload.optString("message", "")));
+        if (error.isEmpty() && "failed".equals(status)) error = rawStatus;
+        long timestamp = recordAtMs > 0L ? recordAtMs : System.currentTimeMillis();
+        long createdAt = item.optLong("createdAtMs", item.optLong("created_at_ms", timestamp));
+        if (createdAt <= 0L) createdAt = timestamp;
+        String id = "history-compaction:" + (thread.isEmpty() ? "thread" : thread) + ":"
+            + (serverItemId.isEmpty() ? (turnId.isEmpty() ? String.valueOf(createdAt) : turnId) : serverItemId);
+        String sourceRaw = payload.optString("source", payload.optString("origin", item.optString("source", item.optString("origin", ""))));
+        boolean automatic = payload.has("automatic")
+            ? payload.optBoolean("automatic", true)
+            : item.optBoolean("automatic", !"manual".equalsIgnoreCase(sourceRaw));
+        // `event_msg/context_compacted` is a legacy notification, not a second automatic
+        // request. Keep its source explicit so a journal record with the later server item id can
+        // be merged into the same timeline divider during history restore.
+        boolean legacyNotification = serverItemId.isEmpty() && sourceRaw.isEmpty()
+            && !payload.has("automatic") && !item.has("automatic")
+            && (type.contains("contextcompacted") || type.contains("contextcompaction"));
+        String source = legacyNotification ? "legacy"
+            : ("manual".equalsIgnoreCase(sourceRaw) || !automatic ? "manual" : "automatic");
+        return new JSONObject()
+            .put("id", id)
+            .put("threadId", thread)
+            .put("turnId", turnId.isEmpty() ? JSONObject.NULL : turnId)
+            .put("itemId", serverItemId.isEmpty() ? JSONObject.NULL : serverItemId)
+            .put("source", source)
+            .put("status", status)
+            .put("error", error)
+            .put("requestId", payload.optString("requestId", payload.optString("request_id", "")))
+            .put("createdAtMs", createdAt)
+            .put("updatedAtMs", timestamp)
+            .put("sequence", 0L);
+    }
+
+    private static String encodeHistoricalCompaction(JSONObject item) {
+        return "COMPACTION|" + android.util.Base64.encodeToString(
+            item.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
     }
 
     private static void appendHistoricalContentPart(JSONArray parts, String role, String value) throws Exception {
@@ -2094,12 +2440,17 @@ final class CodexAppServerBridge {
 
     static boolean isAgentMessageItem(JSONObject params) {
         JSONObject item = params == null ? null : params.optJSONObject("item");
-        return item != null && "agentMessage".equals(item.optString("type"));
+        return item != null && "agentmessage".equals(normalizeItemType(item.optString("type", item.optString("item_type", ""))));
     }
 
     static boolean isFinalAgentMessage(JSONObject params) {
         if (!isAgentMessageItem(params)) return false;
-        return "final_answer".equals(params.optJSONObject("item").optString("phase"));
+        JSONObject item = params.optJSONObject("item");
+        String phase = item.optString("phase", item.optString("itemPhase", item.optString("item_phase", "")))
+            .replace("-", "_").replace(" ", "_").toLowerCase(java.util.Locale.ROOT);
+        return "final_answer".equals(phase) || "finalanswer".equals(phase)
+            || "final".equals(phase) || "answer".equals(phase)
+            || item.optBoolean("final", false) || item.optBoolean("isFinal", false);
     }
 
     static boolean isIdleThreadStatus(JSONObject params) {
@@ -2269,30 +2620,80 @@ final class CodexAppServerBridge {
             }
         }
         String prompt = params.optString("prompt", params.optString("message", ""));
-        return prompt.isEmpty() ? "Codex 任务" : prompt;
+        return prompt.isEmpty() ? "Codex task" : prompt;
     }
 
     static boolean isVisibleThreadEvent(JSONObject params, String visibleThread) {
         if (visibleThread == null || visibleThread.isEmpty()) return false;
         if (params == null) return true;
-        String candidate = params.optString("threadId", "");
+        String candidate = params.optString("threadId", params.optString("thread_id", ""));
         if (candidate.isEmpty()) {
             JSONObject turn = params.optJSONObject("turn");
-            if (turn != null) candidate = turn.optString("threadId", "");
+            if (turn != null) candidate = turn.optString("threadId", turn.optString("thread_id", ""));
+        }
+        if (candidate.isEmpty()) {
+            JSONObject item = params.optJSONObject("item");
+            if (item != null) candidate = item.optString("threadId", item.optString("thread_id", item.optString("senderThreadId", item.optString("sender_thread_id", ""))));
         }
         return candidate.isEmpty() || candidate.equals(visibleThread);
     }
 
     private boolean isPrimaryEvent(JSONObject params) {
-        return visibleRouteReady && isVisibleThreadEvent(params, visibleThreadId);
+        return shouldAcceptVisibleProtocolEvent(params, visibleRouteReady, visibleThreadId, activeTurnId);
+    }
+
+    private boolean isPrimaryEvent(String method, JSONObject params) {
+        return shouldAcceptVisibleProtocolEvent(
+            params,
+            visibleRouteReady,
+            visibleThreadId,
+            activeTurnId,
+            isContextCompactionSignal(method, params)
+        );
+    }
+
+    /**
+     * Context compaction may be represented by a dedicated server turn even while the user's
+     * primary turn is still active. It still belongs to the visible thread and must reach the
+     * compaction reducer; ordinary reasoning/tool events from another turn remain rejected.
+     */
+    static boolean shouldAcceptVisibleProtocolEvent(JSONObject params, boolean routeReady,
+                                                     String visibleThread, String activeTurn) {
+        return shouldAcceptVisibleProtocolEvent(
+            params, routeReady, visibleThread, activeTurn, isContextCompactionItem(params));
+    }
+
+    static boolean shouldAcceptVisibleProtocolEvent(JSONObject params, boolean routeReady,
+                                                     String visibleThread, String activeTurn,
+                                                     boolean compactionSignal) {
+        if (!routeReady || !isVisibleThreadEvent(params, visibleThread)) return false;
+        // Some notifications omit threadId but still carry turnId.  Once the visible turn is
+        // known, reject a child/background turn instead of allowing its reasoning/tool stream to
+        // enter the primary chat merely because the thread field was absent.
+        if (activeTurn != null && !activeTurn.isEmpty()) {
+            String candidateTurn = protocolTurnId(params);
+            if (!candidateTurn.isEmpty() && !candidateTurn.equals(activeTurn)
+                    && !compactionSignal) return false;
+        }
+        return true;
+    }
+
+    private static boolean isContextCompactionSignal(String method, JSONObject params) {
+        if (isContextCompactionItem(params)) return true;
+        String normalized = normalizeProtocolName(method);
+        return normalized.contains("contextcompaction") || normalized.contains("contextcompacted");
     }
 
     private boolean isPrimaryTurn(JSONObject params) {
         if (params == null) return false;
-        String candidate = params.optString("threadId", "");
+        String candidate = params.optString("threadId", params.optString("thread_id", ""));
         if (candidate.isEmpty()) {
             JSONObject turn = params.optJSONObject("turn");
-            if (turn != null) candidate = turn.optString("threadId", "");
+            if (turn != null) candidate = turn.optString("threadId", turn.optString("thread_id", ""));
+        }
+        if (candidate.isEmpty()) {
+            JSONObject item = params.optJSONObject("item");
+            if (item != null) candidate = item.optString("threadId", item.optString("thread_id", item.optString("senderThreadId", item.optString("sender_thread_id", ""))));
         }
         return !candidate.isEmpty() && (primaryThreadIds.contains(candidate) || candidate.equals(threadId));
     }
@@ -2327,7 +2728,8 @@ final class CodexAppServerBridge {
 
     private static boolean isHighFrequencyEmission(String function) {
         return "onDelta".equals(function) || "onPlanDelta".equals(function)
-            || "onReasoningDelta".equals(function) || "onCommandDelta".equals(function);
+            || "onReasoningDelta".equals(function) || "onCommandDelta".equals(function)
+            || "onCommandDeltaV2".equals(function) || "onProtocolDelta".equals(function);
     }
 
     private void dispatchNativeEvent(String function, String value) {

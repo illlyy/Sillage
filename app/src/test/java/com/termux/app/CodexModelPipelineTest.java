@@ -1144,6 +1144,28 @@ public class CodexModelPipelineTest {
     }
 
     @Test
+    public void dedicatedCompactionTurnIsAcceptedForVisibleThread() throws Exception {
+        JSONObject compaction = new JSONObject()
+            .put("threadId", "thread-a")
+            .put("turnId", "compaction-turn")
+            .put("item", new JSONObject().put("id", "compact-1").put("type", "contextCompaction"));
+        JSONObject command = new JSONObject()
+            .put("threadId", "thread-a")
+            .put("turnId", "child-turn")
+            .put("item", new JSONObject().put("id", "command-1").put("type", "commandExecution"));
+
+        assertTrue(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+            compaction, true, "thread-a", "primary-turn"));
+        assertTrue(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+            new JSONObject().put("threadId", "thread-a").put("turnId", "compaction-turn"),
+            true, "thread-a", "primary-turn", true));
+        assertFalse(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+            command, true, "thread-a", "primary-turn"));
+        assertFalse(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+            compaction, true, "thread-b", "primary-turn"));
+    }
+
+    @Test
     public void completedGoalIsRecognizedForAutomaticClear() throws Exception {
         assertTrue(CodexAppServerBridge.isCompletedGoal(new JSONObject().put("status", "complete")));
         assertFalse(CodexAppServerBridge.isCompletedGoal(new JSONObject().put("status", "active")));

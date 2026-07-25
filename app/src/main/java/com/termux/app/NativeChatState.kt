@@ -1,6 +1,5 @@
 package com.termux.app
 
-import android.util.Base64
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -8,6 +7,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.util.LinkedHashMap
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
@@ -36,6 +36,37 @@ internal class NativeChatState {
     val subagentHistoryErrors = mutableStateMapOf<String, String>()
     val loadingSubagentHistories = mutableStateListOf<String>()
     val queuedFollowUps = mutableStateListOf<NativeQueuedFollowUp>()
+    /** Stable domain snapshots shared by live and historical renderers. */
+    val activityGroups = mutableStateListOf<NativeActivityGroup>()
+    val compactionItems = mutableStateListOf<NativeCompactionItem>()
+    private val activityReducer = NativeActivityReducer()
+    private val compactionReducer = NativeCompactionReducer()
+    private val planStreamParser = NativePlanStreamParser()
+    private val dedicatedPlanParser = NativePlanStreamParser()
+    private var historicalActivityGroups: List<NativeActivityGroup> = emptyList()
+    private var historicalCompactions: List<NativeCompactionItem> = emptyList()
+    private var localProtocolSequence = 0L
+    private var parsedAssistantText = ""
+    /** Remains active even while a tag-only prefix has not produced visible assistant text. */
+    private var assistantParserActive = false
+    /**
+     * Completion barriers are not guaranteed to be unique across app-server versions: a
+     * normalized item/completed event may be followed by the retained legacy final-answer
+     * callback.  Keep a per-turn terminal identity/text guard so that race cannot append a second
+     * visually identical assistant bubble.  This is deliberately reset at turn boundaries, so
+     * two intentional identical replies in different turns remain visible.
+     */
+    private val terminalAssistantItemIds = HashSet<String>()
+    private var terminalAssistantText = ""
+    /** Scope used for proposed-plan message keys during the current user turn. */
+    private var activePlanScopeKey = ""
+    /**
+     * Reasoning may complete before the next command starts. That is not an assistant-message
+     * boundary; only visible assistant body should split an exploration segment.
+     */
+    private var assistantBodySeenInPhase = false
+    var conversationRenderModel by mutableStateOf(NativeConversationRenderModel())
+        private set
     var followUpSubmitAction by mutableStateOf(NativeFollowUpSubmitAction.STEER)
     var input by mutableStateOf("")
     var connectionLabel by mutableStateOf("正在启动 Codex…")
@@ -79,18 +110,25 @@ internal class NativeChatState {
     var planExplanation by mutableStateOf("")
     var planPanelAdded by mutableStateOf(false)
     private var activeProposedPlanItemId = ""
+    private var activeProposedPlanDedicated = false
     var revision by mutableIntStateOf(0)
     // The active assistant answer is intentionally not stored in messages on every token batch.
     // Keeping the LazyColumn backing list structurally stable prevents all visible history items
     // from being reconsidered whenever the growing answer changes.
     var liveAssistantMessageId by mutableStateOf("")
         private set
+    /** Protocol item identity for the currently streamed assistant item. */
+    private var activeAssistantItemId = ""
     private val liveAssistantMarkdown = NativeStreamingMarkdownAccumulator()
     /** Full text is materialized only for completion/actions/tests, never by the live Composable. */
     val liveAssistantText: String
         get() {
             liveAssistantSnapshot
-            return liveAssistantMarkdown.materialize()
+            val assistant = liveAssistantMarkdown.materialize()
+            // Keep the historical testing/export contract (which exposed the raw stream as one
+            // string) while the renderer uses the parser's separated assistant/plan messages.
+            val plan = planStreamParser.planText
+            return assistant + plan
         }
     var liveAssistantSnapshot by mutableStateOf(
         NativeStreamingMarkdownSnapshot(emptyList(), "", stableChars = 0, sourceChars = 0),
@@ -114,13 +152,281 @@ internal class NativeChatState {
     var commandText by mutableStateOf("")
     var liveCommandJson by mutableStateOf("")
     private val commandOutputBuffer = StringBuilder()
+    /**
+     * App-server can run several command items in parallel. The legacy fields above remain as
+     * the currently selected preview for old callbacks, while this map is the authoritative
+     * private buffer used by normalized itemId-aware events. Keeping full output out of Compose
+     * state preserves the bounded preview/reference contract even when commands overlap.
+     */
+    private data class LiveCommandBuffer(
+        var raw: String,
+        val output: StringBuilder = StringBuilder(),
+    )
+    private val liveCommandBuffers = LinkedHashMap<String, LiveCommandBuffer>()
+    private var activeCommandKey = ""
     var currentThreadId by mutableStateOf("")
+    var currentTurnId by mutableStateOf("")
     var turnStartedAt by mutableStateOf(0L)
     var turnMessageStartIndex by mutableIntStateOf(0)
     var phaseStartedAt by mutableStateOf(0L)
     var phaseMessageStartIndex by mutableIntStateOf(0)
     private var retryStatusMessageId = ""
     private var retryStatusAttempts = 0
+
+    private fun nextProtocolSequence(): Long = ++localProtocolSequence
+
+    private fun publishDomainSnapshot() {
+        val liveActivities = activityReducer.groups()
+        val activities = historicalActivityGroups + liveActivities
+        val compactions = NativeHistoryAdapter.mergeCompactionTimeline(
+            historicalCompactions + compactionReducer.items(currentThreadId.takeIf { it.isNotBlank() }),
+        )
+        activityGroups.clear()
+        activityGroups.addAll(liveActivities)
+        compactionItems.clear()
+        compactionItems.addAll(compactions)
+        val assistantMessages = messages.filter { it.role == NativeChatRole.ASSISTANT }
+            .map { NativeConversationTextMessage(it.id, it.content, it.streaming, currentTurnId.takeIf { id -> id.isNotBlank() }) }
+        val userMessages = messages.filter { it.role == NativeChatRole.USER }
+            .map { NativeConversationTextMessage(it.id, it.content, it.streaming, null) }
+        val plans = messages.asSequence()
+            .filter { it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) }
+            .map { NativePlanRenderItem(it.id, decodeNativeProposedPlan(it.content), it.streaming, dedicated = true) }
+            .toList()
+        val subagents = liveSubagents.mapNotNull { raw ->
+            runCatching {
+                val item = JSONObject(raw)
+                NativeSubagentVisualFactory.create(
+                    agentThreadId = item.optString("agentThreadId", item.optString("agent_thread_id")),
+                    callId = item.optString("callId", item.optString("call_id", item.optString("id"))),
+                    name = item.optString("agentName", item.optString("agentNickname", item.optString("name"))),
+                    status = item.optString("status", "waiting"),
+                )
+            }.getOrNull()
+        }
+        conversationRenderModel = NativeConversationRenderModel(
+            threadId = currentThreadId,
+            activities = activities,
+            compactions = compactions,
+            plans = plans,
+            subagents = NativeSubagentVisualFactory.mergeAll(subagents),
+            assistantMessages = assistantMessages,
+            userMessages = userMessages,
+            errors = messages.filter { it.role == NativeChatRole.ERROR }.map { it.content },
+            lastSequence = localProtocolSequence,
+        )
+    }
+
+    /**
+     * Completed exploration rows are already durable PROCESS/PROCESS2 messages. Rebuild that
+     * small history projection before a replacement/new turn, then clear only the live reducer.
+     * This prevents an early legacy event without turnId from attaching to the previous turn
+     * while keeping the renderer-neutral conversation model complete.
+     */
+    private fun resetLiveActivityReducerForTurn() {
+        historicalActivityGroups = NativeHistoryAdapter.renderModel(currentThreadId, messages).activities
+        activityReducer.reset()
+        activityGroups.clear()
+    }
+
+    /** Entry point for normalized bridge events. Legacy callbacks continue to call the same reducers. */
+    fun acceptProtocolEvent(event: NativeProtocolEvent) {
+        if (event.threadId.isNotBlank() && currentThreadId.isNotBlank() && event.threadId != currentThreadId) return
+        if (!event.turnId.isNullOrBlank()) currentTurnId = event.turnId.orEmpty()
+        if (event.sequence > localProtocolSequence) localProtocolSequence = event.sequence
+        activityReducer.accept(event)
+        val compaction = compactionReducer.accept(event)
+        if (compaction != null) upsertCompactionMessage(compaction)
+        publishDomainSnapshot()
+    }
+
+    /**
+     * Applies a normalized event to the live stream as well as to the domain reducers.
+     *
+     * Older bridges still emit the legacy callbacks consumed by CodexChatActivity; that path
+     * intentionally calls [acceptProtocolEvent] only (domain update). Newer normalized events use
+     * this entry point, so a protocol replay or a bridge that omits legacy callbacks still paints
+     * reasoning, assistant, plan, command and tool output correctly.
+     */
+    fun acceptNormalizedProtocolEvent(event: NativeProtocolEvent) {
+        if (event.threadId.isNotBlank() && currentThreadId.isNotBlank() && event.threadId != currentThreadId) return
+        // Plan start callbacks frequently arrive before their first delta. Capture the turn
+        // identity before item-specific handlers create a message key so all deltas share one
+        // scope.
+        if (!event.turnId.isNullOrBlank()) currentTurnId = event.turnId.orEmpty()
+        when (event) {
+            is NativeProtocolEvent.ReasoningDelta -> {
+                beginReasoningAfterAnswerIfNeeded()
+                phase = NativeTurnPhase.REASONING
+                processingLabel = "正在思考"
+                appendReasoning(event.delta)
+            }
+            is NativeProtocolEvent.ReasoningCompleted -> {
+                if (event.text.isNotBlank() && event.text.length > reasoningText.length) replaceReasoning(event.text)
+                finishReasoning()
+            }
+            is NativeProtocolEvent.AssistantDelta -> {
+                if (event.delta.isNotBlank()) {
+                    finishReasoning()
+                    appendAssistant(event.delta, event.itemId)
+                }
+            }
+            is NativeProtocolEvent.AssistantCompleted -> {
+                finishReasoning()
+                if (event.finalAnswer) appendAssistantFinal(event.text, event.itemId)
+                else completeAssistantItem(event.text, event.itemId)
+            }
+            is NativeProtocolEvent.CommandStarted -> {
+                beginReasoningAfterAnswerIfNeeded()
+                startCommand(event.payload.ifBlank {
+                    JSONObject().put("id", event.itemId ?: JSONObject.NULL)
+                        .put("command", event.command).put("cwd", event.cwd).toString()
+                }, event.itemId)
+            }
+            is NativeProtocolEvent.CommandOutput -> appendCommandOutput(event.delta, event.itemId)
+            is NativeProtocolEvent.CommandCompleted -> completeCommand(event.payload.ifBlank {
+                JSONObject().put("id", event.itemId ?: JSONObject.NULL)
+                    .put("command", event.command).put("status", event.status)
+                    .apply { event.exitCode?.let { put("exitCode", it) } }
+                    .put(NativeCommandOutputStore.OUTPUT_REF, event.outputRef)
+                    .toString()
+            }, event.itemId)
+            is NativeProtocolEvent.ToolCompleted -> {
+                beginReasoningAfterAnswerIfNeeded()
+                val payload = event.payload.ifBlank {
+                    JSONObject().put("id", event.itemId ?: JSONObject.NULL)
+                        .put("type", event.type).put("tool", event.title)
+                        .put("status", event.status).toString()
+                }
+                upsertToolDetail(payload)
+            }
+            is NativeProtocolEvent.PlanStarted -> {
+                closeActivityBoundary()
+                startProposedPlan(
+                    JSONObject().put("itemId", event.itemId ?: JSONObject.NULL).toString(),
+                )
+                phaseMessageStartIndex = messages.size
+            }
+            is NativeProtocolEvent.PlanDelta -> {
+                finishReasoning()
+                appendProposedPlanDelta(
+                    JSONObject().put("itemId", event.itemId ?: JSONObject.NULL).put("delta", event.delta).toString(),
+                )
+            }
+            is NativeProtocolEvent.PlanCompleted -> completeProposedPlan(
+                JSONObject().put("itemId", event.itemId ?: JSONObject.NULL).put("text", event.text).toString(),
+            )
+            is NativeProtocolEvent.SubagentUpdated -> {
+                beginReasoningAfterAnswerIfNeeded()
+                updateSubagent(
+                    JSONObject().put("agentThreadId", event.agentThreadId)
+                        .put("callId", event.callId).put("agentName", event.name).put("status", event.status)
+                        .put("id", event.itemId ?: JSONObject.NULL).toString(),
+                )
+            }
+            is NativeProtocolEvent.CompactionStarted -> closeActivityBoundary()
+            is NativeProtocolEvent.TokenUsageUpdated -> updateTokenUsage(
+                JSONObject().put("inputTokens", event.inputTokens)
+                    .put("cachedInputTokens", event.cachedInputTokens)
+                    .put("outputTokens", event.outputTokens)
+                    .put("reasoningOutputTokens", event.reasoningTokens)
+                    .put("contextWindow", event.contextWindow)
+                    .put("contextTokens", event.currentContextTokens)
+                    .put("autoCompactTokenLimit", event.autoCompactTokenLimit)
+                    .put("contextUsageReliable", event.contextUsageReliable)
+                    .put("estimated", event.estimated).toString(),
+            )
+            else -> Unit
+        }
+        acceptProtocolEvent(event)
+        if (event is NativeProtocolEvent.CompactionStarted) {
+            // The divider is appended by acceptProtocolEvent. Future activity snapshots must be
+            // anchored after it so the next exploration cannot be inserted before the divider.
+            phaseMessageStartIndex = messages.size
+        }
+    }
+
+    fun beginManualCompaction(requestId: String? = null): NativeCompactionItem {
+        if (phase.active) closeActivityBoundary()
+        val item = compactionReducer.createManualPending(
+            threadId = currentThreadId,
+            turnId = currentTurnId.takeIf { it.isNotBlank() },
+            requestId = requestId,
+        )
+        upsertCompactionMessage(item)
+        if (phase.active) phaseMessageStartIndex = messages.size
+        publishDomainSnapshot()
+        return item
+    }
+
+    fun beginAutomaticCompaction(requestId: String? = null): NativeCompactionItem {
+        if (phase.active) closeActivityBoundary()
+        val item = compactionReducer.createAutomaticPending(
+            threadId = currentThreadId,
+            turnId = currentTurnId.takeIf { it.isNotBlank() },
+            requestId = requestId,
+        )
+        upsertCompactionMessage(item)
+        if (phase.active) phaseMessageStartIndex = messages.size
+        publishDomainSnapshot()
+        return item
+    }
+
+    fun completeManualCompactionRpc(
+        requestId: String? = null,
+        success: Boolean,
+        cancelled: Boolean = false,
+        error: String = "",
+        threadId: String? = null,
+    ): NativeCompactionItem? {
+        val item = compactionReducer.onRpcResult(
+            threadId = threadId?.takeIf { it.isNotBlank() } ?: currentThreadId,
+            requestId = requestId,
+            success = success,
+            cancelled = cancelled,
+            error = error,
+        ) ?: return null
+        upsertCompactionMessage(item)
+        publishDomainSnapshot()
+        return item
+    }
+
+    fun restoreCompactions(items: Iterable<NativeCompactionItem>) {
+        items.forEach { item ->
+            if (item.threadId.isNotBlank() && currentThreadId.isNotBlank() && item.threadId != currentThreadId) return@forEach
+            val restored = compactionReducer.restore(item)
+            historicalCompactions = NativeHistoryAdapter.mergeCompactionTimeline(historicalCompactions + restored)
+            val canonical = historicalCompactions.firstOrNull { candidate ->
+                candidate.id == restored.id ||
+                    (!restored.serverItemId.isNullOrBlank() && candidate.serverItemId == restored.serverItemId) ||
+                    (!restored.requestId.isNullOrBlank() && candidate.requestId == restored.requestId) ||
+                    NativeHistoryAdapter.mergeCompactionTimeline(listOf(candidate, restored)).size == 1
+            } ?: restored
+            upsertCompactionMessage(canonical)
+        }
+        publishDomainSnapshot()
+    }
+
+    private fun upsertCompactionMessage(item: NativeCompactionItem) {
+        val content = NativeHistoryAdapter.encodeCompaction(item)
+        val index = messages.indexOfFirst { message ->
+            if (message.id == item.id) return@indexOfFirst true
+            val existing = NativeHistoryAdapter.decodeCompaction(message.content) ?: return@indexOfFirst false
+            if (!item.serverItemId.isNullOrBlank() && existing.serverItemId == item.serverItemId) return@indexOfFirst true
+            // A legacy history notification may have no server id; collapse it into the journal
+            // record when the timeline merger identifies the same short-lived lifecycle.
+            NativeHistoryAdapter.mergeCompactionTimeline(listOf(existing, item)).size == 1
+        }
+        val updated = NativeChatMessage(
+            id = item.id,
+            role = NativeChatRole.ACTIVITY,
+            content = content,
+            streaming = !item.isTerminal,
+            revealStartedAt = item.createdAtMs.takeIf { it > 0L } ?: System.currentTimeMillis(),
+        )
+        if (index >= 0) messages[index] = updated else messages.add(updated)
+        revision++
+    }
 
     fun resetConversation() {
         historyLoading = false
@@ -129,6 +435,8 @@ internal class NativeChatState {
         planExplanation = ""
         planPanelAdded = false
         activeProposedPlanItemId = ""
+        activeProposedPlanDedicated = false
+        activePlanScopeKey = ""
         activeGoalObjective = ""
         activeGoalStatus = "active"
         retryStatusMessageId = ""
@@ -160,9 +468,8 @@ internal class NativeChatState {
         clearReasoning()
         reasoningComplete = false
         reasoningCompletedAt = 0L
-        commandText = ""
-        liveCommandJson = ""
-        commandOutputBuffer.setLength(0)
+        assistantBodySeenInPhase = false
+        clearLiveCommandBuffers()
         pendingTurnUsage = null
         clearLiveAssistantBuffer()
         toolDetails.clear()
@@ -173,6 +480,19 @@ internal class NativeChatState {
         subagentHistoryErrors.clear()
         loadingSubagentHistories.clear()
         queuedFollowUps.clear()
+        activityReducer.reset()
+        compactionReducer.reset()
+        planStreamParser.reset()
+        dedicatedPlanParser.reset()
+        historicalActivityGroups = emptyList()
+        historicalCompactions = emptyList()
+        parsedAssistantText = ""
+        localProtocolSequence = 0L
+        resetTerminalAssistantDeduplication()
+        activityGroups.clear()
+        compactionItems.clear()
+        conversationRenderModel = NativeConversationRenderModel(threadId = currentThreadId)
+        currentTurnId = ""
         turnStartedAt = 0L
         turnMessageStartIndex = 0
         phaseStartedAt = 0L
@@ -208,18 +528,29 @@ internal class NativeChatState {
         val message = NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList())
         messages.add(message)
         turnMessageStartIndex = messages.size
+        resetLiveActivityReducerForTurn()
         phase = NativeTurnPhase.WAITING
         processingLabel = "处理中"
         clearReasoning()
         reasoningComplete = false
         reasoningCompletedAt = 0L
-        commandText = ""
-        liveCommandJson = ""
-        commandOutputBuffer.setLength(0)
+        assistantBodySeenInPhase = false
+        clearLiveCommandBuffers()
         pendingTurnUsage = null
         clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
+        planStreamParser.reset()
+        dedicatedPlanParser.reset()
+        parsedAssistantText = ""
+        resetTerminalAssistantDeduplication()
+        activeProposedPlanItemId = ""
+        activeProposedPlanDedicated = false
+        activePlanScopeKey = ""
+        // The new user message starts a fresh protocol turn.  Keeping the previous turn id here
+        // can make an early legacy token-usage callback latch automatic compaction to the old
+        // turn before app-server sends its first item/started event.
+        currentTurnId = ""
         turnStartedAt = System.currentTimeMillis()
         phaseStartedAt = turnStartedAt
         phaseMessageStartIndex = turnMessageStartIndex
@@ -227,14 +558,124 @@ internal class NativeChatState {
         return message
     }
 
+    /** Reset transient live state when editing/retrying without appending another user row. */
+    fun prepareReplacementTurn() {
+        turnMessageStartIndex = messages.size
+        resetLiveActivityReducerForTurn()
+        phase = NativeTurnPhase.WAITING
+        processingLabel = "处理中"
+        clearReasoning()
+        reasoningComplete = false
+        reasoningCompletedAt = 0L
+        assistantBodySeenInPhase = false
+        clearLiveCommandBuffers()
+        pendingTurnUsage = null
+        clearLiveAssistantBuffer()
+        toolDetails.clear()
+        liveSubagents.clear()
+        activeProposedPlanItemId = ""
+        activeProposedPlanDedicated = false
+        activePlanScopeKey = ""
+        resetTerminalAssistantDeduplication()
+        currentTurnId = ""
+        turnStartedAt = System.currentTimeMillis()
+        phaseStartedAt = turnStartedAt
+        phaseMessageStartIndex = turnMessageStartIndex
+        publishDomainSnapshot()
+        revision++
+    }
+
+    private fun resetTerminalAssistantDeduplication() {
+        terminalAssistantItemIds.clear()
+        terminalAssistantText = ""
+    }
+
+    private fun isDuplicateTerminalAssistant(text: String, itemId: String?): Boolean {
+        val normalized = text.trim()
+        if (normalized.isBlank()) return false
+        val identity = itemId?.trim()?.takeIf { it.isNotBlank() }
+        if (identity != null && identity in terminalAssistantItemIds) return true
+        // Legacy callbacks have no item id.  Only suppress an exact terminal match in the current
+        // turn; a prefix/extension is still a legitimate completion update and must be merged.
+        if (identity == null && normalized == terminalAssistantText) return true
+        val existing = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
+            .firstOrNull { index ->
+                val message = messages[index]
+                message.role == NativeChatRole.ASSISTANT && !message.streaming &&
+                    message.content.trim() == normalized
+            }
+        return existing != null && identity == null
+    }
+
+    private fun rememberTerminalAssistant(text: String, itemId: String?) {
+        text.trim().takeIf { it.isNotBlank() }?.let { terminalAssistantText = it }
+        itemId?.trim()?.takeIf { it.isNotBlank() }?.let(terminalAssistantItemIds::add)
+    }
+
+    private fun commandBufferKey(raw: String = "", itemId: String? = null): String {
+        val explicit = itemId?.takeIf { it.isNotBlank() }
+        if (explicit != null) return "item:$explicit"
+        val parsed = runCatching { JSONObject(raw) }.getOrNull()
+            ?.optString("id")?.takeIf { it.isNotBlank() }
+        return parsed?.let { "item:$it" } ?: "legacy"
+    }
+
+    private fun syncActiveCommandPreview() {
+        val active = liveCommandBuffers[activeCommandKey]
+        if (active == null) {
+            liveCommandJson = ""
+            commandOutputBuffer.setLength(0)
+            commandText = ""
+            return
+        }
+        liveCommandJson = active.raw
+        commandOutputBuffer.setLength(0)
+        commandOutputBuffer.append(active.output)
+        commandText = NativeCommandOutputStore.livePreview(active.output)
+    }
+
+    private fun clearLiveCommandBuffers() {
+        liveCommandBuffers.clear()
+        activeCommandKey = ""
+        liveCommandJson = ""
+        commandOutputBuffer.setLength(0)
+        commandText = ""
+    }
+
+    /** Compatibility entry point for Activity flows that restart a turn without a new message. */
+    fun resetLiveCommandState() {
+        clearLiveCommandBuffers()
+        revision++
+    }
+
+    private fun upsertToolDetail(raw: String) {
+        if (raw.isBlank()) return
+        val incoming = runCatching { JSONObject(raw) }.getOrNull()
+        val incomingId = incoming?.optString("id")?.takeIf { it.isNotBlank() }
+        val incomingType = incoming?.optString("type").orEmpty()
+        val index = toolDetails.indexOfFirst { existingRaw ->
+            if (existingRaw == raw) return@indexOfFirst true
+            if (incomingId == null) return@indexOfFirst false
+            val existing = runCatching { JSONObject(existingRaw) }.getOrNull() ?: return@indexOfFirst false
+            existing.optString("id") == incomingId &&
+                (incomingType.isBlank() || existing.optString("type").isBlank() || existing.optString("type") == incomingType)
+        }
+        if (index >= 0) toolDetails[index] = raw else toolDetails.add(raw)
+    }
+
+    fun addToolDetail(raw: String) {
+        upsertToolDetail(raw)
+        revision++
+    }
+
     private fun processPayload(): String {
         val tools = JSONArray()
         toolDetails.forEach { raw -> tools.put(runCatching { JSONObject(raw) }.getOrElse { raw }) }
-        if (liveCommandJson.isNotBlank()) {
-            runCatching { JSONObject(liveCommandJson) }.getOrNull()?.let { item ->
+        liveCommandBuffers.values.forEach { live ->
+            runCatching { JSONObject(live.raw) }.getOrNull()?.let { item ->
                 item.put("type", "commandExecution")
                 item.put("status", item.optString("status", "inProgress"))
-                val compact = NativeCommandOutputStore.compactCommandItem(item, commandOutputBuffer.toString())
+                val compact = NativeCommandOutputStore.compactCommandItem(item, live.output.toString())
                 tools.put(JSONObject(compact))
             }
         }
@@ -254,29 +695,78 @@ internal class NativeChatState {
             .toString()
     }
 
+    /**
+     * Compatibility projection for legacy callbacks that update the retained state fields before
+     * their normalized protocol event reaches the reducer. The UI still consumes the same domain
+     * DTO and renderer; this adapter is not a second presentation path.
+     */
+    fun legacyLiveActivityGroup(): NativeActivityGroup? {
+        val hasActivity = reasoningText.isNotBlank() || liveCommandBuffers.isNotEmpty() ||
+            toolDetails.isNotEmpty() || liveSubagents.isNotEmpty()
+        if (!hasActivity && !phase.active) return null
+        val keyTurn = currentTurnId.ifBlank { "pending" }
+        return NativeHistoryAdapter.processGroup(
+            messageId = "live-fallback:$keyTurn",
+            threadId = currentThreadId,
+            payload = JSONObject(processPayload()),
+            createdAtMs = phaseStartedAt.takeIf { it > 0L } ?: turnStartedAt,
+        ).copy(
+            key = "live-fallback:${currentThreadId.ifBlank { "thread" }}:$keyTurn",
+            turnId = currentTurnId.takeIf { it.isNotBlank() },
+            running = phase.active,
+            expandedByDefault = phase.active,
+            completedAtMs = if (phase.active) 0L else System.currentTimeMillis(),
+        )
+    }
+
     private fun sealCurrentPhase() {
-        if (reasoningText.isBlank() && commandText.isBlank() && liveCommandJson.isBlank() && toolDetails.isEmpty() && liveSubagents.isEmpty()) return
-        val process = "PROCESS2|" + Base64.encodeToString(processPayload().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        if (reasoningText.isBlank() && liveCommandBuffers.isEmpty() && toolDetails.isEmpty() && liveSubagents.isEmpty()) return
+        val process = "PROCESS2|" + NativeBase64.encode(processPayload().toByteArray(Charsets.UTF_8))
         val insertAt = (phaseMessageStartIndex until messages.size)
-            .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT || messages[it].content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) }
+            .firstOrNull {
+                messages[it].role == NativeChatRole.ASSISTANT ||
+                    messages[it].content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) ||
+                    NativeHistoryAdapter.decodeCompaction(messages[it].content) != null
+            }
             ?: messages.size
         messages.add(insertAt, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process, revealStartedAt = System.currentTimeMillis()))
     }
 
     fun beginReasoningAfterAnswerIfNeeded() {
-        if (!reasoningComplete) return
+        // A reasoning completion is only a stream phase hint. Commands and tools emitted before
+        // the first assistant body still belong to the same exploration group; the visible
+        // assistant message is the actual boundary.
+        if (!assistantBodySeenInPhase) return
         sealCurrentPhase()
         val lastAssistant = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT && it.streaming }
         if (lastAssistant >= 0) sealLiveAssistant(lastAssistant)
         clearReasoning()
         reasoningComplete = false
         reasoningCompletedAt = 0L
-        commandText = ""
-        liveCommandJson = ""
-        commandOutputBuffer.setLength(0)
+        clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        assistantBodySeenInPhase = false
         processingLabel = "\u6b63\u5728\u601d\u8003"
+        phaseStartedAt = System.currentTimeMillis()
+        phaseMessageStartIndex = messages.size
+        revision++
+    }
+
+    /** Close the current exploration before a dedicated plan or compaction lifecycle item. */
+    fun closeActivityBoundary() {
+        val liveAssistant = messages.indexOfLast {
+            it.role == NativeChatRole.ASSISTANT && it.streaming && it.id == liveAssistantMessageId
+        }
+        if (liveAssistant >= 0) sealLiveAssistant(liveAssistant)
+        sealCurrentPhase()
+        clearReasoning()
+        reasoningComplete = false
+        reasoningCompletedAt = 0L
+        clearLiveCommandBuffers()
+        toolDetails.clear()
+        liveSubagents.clear()
+        assistantBodySeenInPhase = false
         phaseStartedAt = System.currentTimeMillis()
         phaseMessageStartIndex = messages.size
         revision++
@@ -306,15 +796,61 @@ internal class NativeChatState {
         revision++
     }
 
-    private fun proposedPlanMessageId(itemId: String): String = "proposed-plan:${itemId.ifBlank { "current" }}"
+    private fun planScopeKey(): String {
+        if (activePlanScopeKey.isBlank()) {
+            activePlanScopeKey = currentTurnId.takeIf { it.isNotBlank() }
+                ?: "local-${turnMessageStartIndex.coerceAtLeast(0)}"
+        }
+        return activePlanScopeKey
+    }
 
-    private fun upsertProposedPlan(itemId: String, text: String, append: Boolean, streaming: Boolean) {
+    private fun proposedPlanMessageId(itemId: String): String =
+        "proposed-plan:${planScopeKey()}:${itemId.ifBlank { "current" }}"
+
+    private fun upsertProposedPlan(
+        itemId: String,
+        text: String,
+        append: Boolean,
+        streaming: Boolean,
+        dedicated: Boolean = false,
+    ) {
         val resolvedItemId = itemId.ifBlank { activeProposedPlanItemId.ifBlank { "current" } }
         activeProposedPlanItemId = resolvedItemId
-        val messageId = proposedPlanMessageId(resolvedItemId)
-        val existingIndex = messages.indexOfFirst { it.id == messageId && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) }
+        if (dedicated) activeProposedPlanDedicated = true
+        val requestedMessageId = proposedPlanMessageId(resolvedItemId)
+        val normalizedIncoming = text.trim().replace(Regex("\\s+"), " ")
+        val currentTurnStart = turnMessageStartIndex.coerceIn(0, messages.size)
+        val exactIndex = (currentTurnStart until messages.size).firstOrNull { index ->
+            val candidate = messages[index]
+            candidate.id == requestedMessageId && candidate.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+        } ?: -1
+        val semanticIndex = if (exactIndex >= 0) exactIndex else (currentTurnStart until messages.size).lastOrNull { index ->
+            val candidate = messages[index]
+            if (!candidate.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)) return@lastOrNull false
+            val existing = decodeNativeProposedPlan(candidate.content).trim().replace(Regex("\\s+"), " ")
+            existing.isNotBlank() && normalizedIncoming.isNotBlank() &&
+                (existing == normalizedIncoming || existing.contains(normalizedIncoming) || normalizedIncoming.contains(existing))
+        } ?: if (dedicated) {
+            // The dedicated protocol item is authoritative. Reuse a tag-fallback row from the
+            // same turn even when an early partial delta is not textually similar yet.
+            (currentTurnStart until messages.size).lastOrNull { index ->
+                messages[index].content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+            } ?: -1
+        } else -1
+        val existingIndex = semanticIndex
+        // A dedicated plan item can start before its first delta. Keep the parser active, but do
+        // not add an empty visual row to the transcript.
+        if (existingIndex < 0 && normalizedIncoming.isBlank()) return
+        if (!dedicated && activeProposedPlanDedicated && existingIndex >= 0) return
+        val messageId = if (existingIndex >= 0) messages[existingIndex].id else requestedMessageId
         val previous = if (existingIndex >= 0) decodeNativeProposedPlan(messages[existingIndex].content) else ""
-        val next = if (append) previous + text else text.ifEmpty { previous }
+        val next = if (append) previous + text else when {
+            text.isEmpty() -> previous
+            previous.isEmpty() -> text
+            text.startsWith(previous) -> text
+            previous.startsWith(text) -> previous
+            else -> text
+        }
         val message = NativeChatMessage(
             id = messageId, role = NativeChatRole.ACTIVITY, content = encodeNativeProposedPlan(next), streaming = streaming,
             revealStartedAt = if (existingIndex >= 0) messages[existingIndex].revealStartedAt else System.currentTimeMillis(),
@@ -327,18 +863,40 @@ internal class NativeChatState {
     fun startProposedPlan(raw: String) {
         val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
         val item = payload.optJSONObject("item") ?: payload
-        upsertProposedPlan(item.optString("id", payload.optString("itemId")), item.optString("text"), false, true)
+        val itemId = item.optString("id", payload.optString("itemId"))
+        dedicatedPlanParser.start(itemId, dedicated = true)
+        val parsed = dedicatedPlanParser.append(item.optString("text"), itemId, dedicated = true)
+        upsertProposedPlan(itemId, parsed.planText, false, true, dedicated = true)
     }
 
     fun appendProposedPlanDelta(raw: String) {
         val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
-        upsertProposedPlan(payload.optString("itemId", payload.optString("item_id")), payload.optString("delta"), true, true)
+        val itemId = payload.optString("itemId", payload.optString("item_id"))
+        if (activeProposedPlanItemId.isBlank() ||
+            (itemId.isNotBlank() && activeProposedPlanItemId != itemId)
+        ) {
+            // Several app-server versions omit item/started. The first dedicated delta is still
+            // an independent boundary and must not leave the preceding reasoning/commands live
+            // beside the plan card.
+            closeActivityBoundary()
+        }
+        val parsed = dedicatedPlanParser.append(payload.optString("delta"), itemId, dedicated = true)
+        upsertProposedPlan(itemId, parsed.planText, false, true, dedicated = true)
     }
 
     fun completeProposedPlan(raw: String) {
         val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
         val item = payload.optJSONObject("item") ?: payload
-        upsertProposedPlan(item.optString("id", payload.optString("itemId")), item.optString("text"), false, false)
+        val itemId = item.optString("id", payload.optString("itemId"))
+        if (activeProposedPlanItemId.isBlank() ||
+            (itemId.isNotBlank() && activeProposedPlanItemId != itemId)
+        ) {
+            // A completion-only dedicated item is common in replayed/older histories. Close the
+            // current exploration before adding it, just as an explicit PlanStarted would.
+            closeActivityBoundary()
+        }
+        val parsed = dedicatedPlanParser.complete(item.optString("text"), itemId, dedicated = true)
+        upsertProposedPlan(itemId, parsed.planText, false, false, dedicated = true)
     }
 
     private fun finishProposedPlanIfStreaming() {
@@ -371,6 +929,11 @@ internal class NativeChatState {
         liveAssistantMessageId = ""
         liveAssistantSnapshot = NativeStreamingMarkdownSnapshot(emptyList(), "", stableChars = 0, sourceChars = 0)
         liveAssistantPresentedChars = 0
+        parsedAssistantText = ""
+        activeAssistantItemId = ""
+        planStreamParser.reset()
+        dedicatedPlanParser.reset()
+        assistantParserActive = false
     }
 
     fun markLiveAssistantPresented(messageId: String, sourceChars: Int) {
@@ -406,18 +969,58 @@ internal class NativeChatState {
         return full
     }
 
-    fun appendAssistant(delta: String) {
+    /**
+     * The first visible assistant body is the WebUI boundary between exploration and response.
+     * Seal reasoning, commands and tools immediately instead of waiting for turn/completed; this
+     * keeps the live layout identical to the eventual history layout and prevents the fallback
+     * panel from drawing the old reasoning inside the answer bubble.
+     */
+    private fun sealExplorationBeforeAssistantBody() {
+        if (assistantBodySeenInPhase) return
+        sealCurrentPhase()
+        clearReasoning()
+        reasoningComplete = false
+        reasoningCompletedAt = 0L
+        clearLiveCommandBuffers()
+        toolDetails.clear()
+        liveSubagents.clear()
+        assistantBodySeenInPhase = true
+        phaseStartedAt = System.currentTimeMillis()
+        phaseMessageStartIndex = messages.size
+    }
+
+    fun appendAssistant(delta: String, itemId: String? = null) {
         if (delta.isEmpty()) return
-        if (!planPanelAdded && delta.contains("<propose_plan", ignoreCase = true)) {
-            messages.add(NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "PLAN_PANEL|"))
-            planPanelAdded = true
+        val normalizedItemId = itemId.orEmpty()
+        if (!assistantParserActive ||
+            (normalizedItemId.isNotBlank() && activeAssistantItemId.isNotBlank() && normalizedItemId != activeAssistantItemId)
+        ) {
+            planStreamParser.reset(normalizedItemId.takeIf { it.isNotBlank() })
+            parsedAssistantText = ""
+            assistantParserActive = true
         }
-        val cleanedDelta = cleanProtocolMarkup(delta)
-        if (cleanedDelta.isEmpty()) return
+        if (normalizedItemId.isNotBlank()) activeAssistantItemId = normalizedItemId
+        val parsed = planStreamParser.append(delta, normalizedItemId.takeIf { it.isNotBlank() })
+        if (parsed.hasPlan) {
+            upsertProposedPlan(activeProposedPlanItemId.ifBlank { "tagged-plan" }, parsed.planText, false, true)
+        }
+        val fullAssistant = parsed.assistantText
+        val cleanedDelta = when {
+            fullAssistant.startsWith(parsedAssistantText) -> fullAssistant.substring(parsedAssistantText.length)
+            parsedAssistantText.startsWith(fullAssistant) -> ""
+            else -> fullAssistant
+        }
+        if (cleanedDelta.isEmpty()) {
+            parsedAssistantText = fullAssistant
+            return
+        }
+        sealExplorationBeforeAssistantBody()
         phase = NativeTurnPhase.ANSWERING
         val last = messages.lastOrNull()
         if (last == null || last.role != NativeChatRole.ASSISTANT || !last.streaming || last.id != liveAssistantMessageId) {
-            clearLiveAssistantBuffer()
+            liveAssistantMarkdown.reset()
+            liveAssistantSnapshot = NativeStreamingMarkdownSnapshot(emptyList(), "", stableChars = 0, sourceChars = 0)
+            liveAssistantPresentedChars = 0
             val message = NativeChatMessage(
                 role = NativeChatRole.ASSISTANT,
                 content = "",
@@ -429,11 +1032,29 @@ internal class NativeChatState {
         }
         // Compose receives immutable blocks plus a bounded tail. The complete growing String stays
         // private, avoiding an O(total answer length) copy for every published token batch.
-        liveAssistantSnapshot = liveAssistantMarkdown.append(cleanedDelta)
+        if (!fullAssistant.startsWith(parsedAssistantText) && parsedAssistantText.isNotBlank()) {
+            liveAssistantMarkdown.reset()
+            liveAssistantSnapshot = liveAssistantMarkdown.append(fullAssistant)
+        } else {
+            liveAssistantSnapshot = liveAssistantMarkdown.append(cleanedDelta)
+        }
+        parsedAssistantText = fullAssistant
     }
 
-    fun completeAssistantItem(text: String) {
-        val cleanedText = cleanProtocolMarkup(text)
+    fun completeAssistantItem(text: String, itemId: String? = null) {
+        val normalizedItemId = itemId.orEmpty().takeIf { it.isNotBlank() }
+        val parsed = planStreamParser.complete(text, normalizedItemId)
+        if (parsed.hasPlan) {
+            upsertProposedPlan(activeProposedPlanItemId.ifBlank { "tagged-plan" }, parsed.planText, false, false)
+        }
+        val cleanedText = parsed.assistantText
+        if (isDuplicateTerminalAssistant(cleanedText, normalizedItemId)) {
+            assistantParserActive = false
+            clearLiveAssistantBuffer()
+            revision++
+            return
+        }
+        if (cleanedText.isNotBlank()) sealExplorationBeforeAssistantBody()
         val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
             .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT && messages[it].streaming }
         if (existingIndex != null) {
@@ -450,11 +1071,25 @@ internal class NativeChatState {
                 ),
             )
         }
+        rememberTerminalAssistant(cleanedText, normalizedItemId)
+        assistantParserActive = false
         revision++
     }
 
-    fun appendAssistantFinal(text: String) {
-        val cleanedText = cleanProtocolMarkup(text)
+    fun appendAssistantFinal(text: String, itemId: String? = null) {
+        val normalizedItemId = itemId.orEmpty().takeIf { it.isNotBlank() }
+        val parsed = planStreamParser.complete(text, normalizedItemId)
+        if (parsed.hasPlan) {
+            upsertProposedPlan(activeProposedPlanItemId.ifBlank { "tagged-plan" }, parsed.planText, false, false)
+        }
+        val cleanedText = parsed.assistantText
+        if (isDuplicateTerminalAssistant(cleanedText, normalizedItemId)) {
+            phase = NativeTurnPhase.COMPLETED
+            clearLiveAssistantBuffer()
+            revision++
+            return
+        }
+        if (cleanedText.isNotBlank()) sealExplorationBeforeAssistantBody()
         val streamingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
             .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT && messages[it].streaming }
         if (streamingIndex != null) {
@@ -483,6 +1118,7 @@ internal class NativeChatState {
                 )
             }
         }
+        rememberTerminalAssistant(cleanedText, normalizedItemId)
         phase = NativeTurnPhase.COMPLETED
         clearLiveAssistantBuffer()
         revision++
@@ -491,6 +1127,11 @@ internal class NativeChatState {
     fun replaceHistory(value: String) = applyHistorySnapshot(NativeHistoryParser.parse(value))
 
     fun applyHistorySnapshot(snapshot: NativeHistorySnapshot) {
+        if (!busy) {
+            activityReducer.reset()
+            compactionReducer.reset()
+            localProtocolSequence = 0L
+        }
         clearLiveAssistantBuffer()
         pendingTurnUsage = null
         val cachedPlanJson = planJson
@@ -499,6 +1140,8 @@ internal class NativeChatState {
         planExplanation = snapshot.planExplanation
         planPanelAdded = false
         activeProposedPlanItemId = ""
+        activeProposedPlanDedicated = false
+        activePlanScopeKey = ""
         val parsed = ArrayList<NativeChatMessage>(snapshot.messages.size + 1)
         parsed.addAll(snapshot.messages)
         var planPanelIndex = snapshot.planPanelIndex
@@ -519,31 +1162,63 @@ internal class NativeChatState {
         // snapshot-list replacement regardless of history size.
         messages.clear()
         messages.addAll(parsed)
+        val historyModel = NativeHistoryAdapter.renderModel(currentThreadId, parsed)
+        historicalActivityGroups = historyModel.activities
+        historicalCompactions = historyModel.compactions
+        historyModel.compactions.forEach(compactionReducer::restore)
+        conversationRenderModel = historyModel
+        publishDomainSnapshot()
         revision++
     }
 
-    fun startCommand(raw: String) {
-        liveCommandJson = raw
-        commandOutputBuffer.setLength(0)
-        commandText = ""
+    /** Java/legacy bridge compatibility overload. */
+    fun startCommand(raw: String) = startCommand(raw, null)
+
+    fun startCommand(raw: String, itemId: String?) {
+        val key = commandBufferKey(raw, itemId)
+        val existing = liveCommandBuffers[key]
+        val buffer = existing ?: LiveCommandBuffer(raw)
+        if (raw.isNotBlank()) buffer.raw = raw
+        liveCommandBuffers[key] = buffer
+        activeCommandKey = key
+        syncActiveCommandPreview()
         phase = NativeTurnPhase.TOOL_RUNNING
         processingLabel = "\u6b63\u5728\u8fd0\u884c\u547d\u4ee4"
         revision++
     }
 
-    fun appendCommandOutput(delta: String) {
+    /** Java/legacy bridge compatibility overload. */
+    fun appendCommandOutput(delta: String) = appendCommandOutput(delta, null)
+
+    fun appendCommandOutput(delta: String, itemId: String?) {
         if (delta.isEmpty()) return
-        commandOutputBuffer.append(delta)
-        commandText = NativeCommandOutputStore.livePreview(commandOutputBuffer)
+        val key = commandBufferKey(liveCommandJson, itemId).let { candidate ->
+            if (itemId.isNullOrBlank() && activeCommandKey.isNotBlank()) activeCommandKey else candidate
+        }
+        val seedRaw = if (!itemId.isNullOrBlank()) {
+            JSONObject().put("id", itemId).put("type", "commandExecution").toString()
+        } else liveCommandJson
+        val buffer = liveCommandBuffers.getOrPut(key) { LiveCommandBuffer(seedRaw) }
+        buffer.output.append(delta)
+        activeCommandKey = key
+        syncActiveCommandPreview()
         // commandText is independently observable; bumping the global revision here made the
         // work panel recompute its message scans on every terminal chunk.
     }
 
-    fun commandOutputLength(): Int = commandOutputBuffer.length
+    fun commandOutputLength(): Int = liveCommandBuffers[activeCommandKey]?.output?.length
+        ?: commandOutputBuffer.length
 
-    fun completeCommand(raw: String) {
+    /** Java/legacy bridge compatibility overload. */
+    fun completeCommand(raw: String) = completeCommand(raw, null)
+
+    fun completeCommand(raw: String, itemId: String?) {
         val item = runCatching { JSONObject(raw) }.getOrNull() ?: JSONObject()
-        val started = runCatching { JSONObject(liveCommandJson) }.getOrNull()
+        val key = commandBufferKey(raw, itemId).let { candidate ->
+            if (itemId.isNullOrBlank() && item.optString("id").isBlank() && activeCommandKey.isNotBlank()) activeCommandKey else candidate
+        }
+        val live = liveCommandBuffers[key]
+        val started = runCatching { JSONObject(live?.raw.orEmpty()) }.getOrNull()
         if (started != null) {
             started.keys().forEach { key ->
                 val completedValue = item.opt(key)
@@ -558,11 +1233,11 @@ internal class NativeChatState {
         // full-size String from the live buffer on the main thread in that common path.
         val needsFallback = item.optString(NativeCommandOutputStore.OUTPUT_REF).isBlank() &&
             item.optString(NativeCommandOutputStore.STDERR_REF).isBlank()
-        val fallback = if (needsFallback) commandOutputBuffer.toString() else ""
-        toolDetails.add(NativeCommandOutputStore.compactCommandItem(item, fallback))
-        liveCommandJson = ""
-        commandOutputBuffer.setLength(0)
-        commandText = ""
+        val fallback = if (needsFallback) live?.output?.toString().orEmpty() else ""
+        upsertToolDetail(NativeCommandOutputStore.compactCommandItem(item, fallback))
+        liveCommandBuffers.remove(key)
+        activeCommandKey = liveCommandBuffers.keys.lastOrNull().orEmpty()
+        syncActiveCommandPreview()
         processingLabel = "\u5df2\u6267\u884c\u547d\u4ee4"
         revision++
     }
@@ -619,6 +1294,7 @@ internal class NativeChatState {
             ?: merged.optString("agentThreadId", "").takeUnless { it.equals("null", true) }.orEmpty()
         val status = normalizedSubagentStatus(merged.optString("status", ""))
         if (thread.isNotBlank() && status.isNotBlank()) subagentStatuses[thread] = status
+        publishDomainSnapshot()
         revision++
         return thread
     }
@@ -626,18 +1302,22 @@ internal class NativeChatState {
     fun completeTurn() {
         finishReasoning()
         finishProposedPlanIfStreaming()
-        if (liveCommandJson.isNotBlank()) {
-            val unfinished = runCatching { JSONObject(liveCommandJson) }.getOrNull() ?: JSONObject()
-            unfinished.put("status", "completed")
-            completeCommand(unfinished.toString())
+        if (liveCommandBuffers.isNotEmpty()) {
+            // Seal every still-open command, not only the last legacy pointer. This matters when
+            // parallel command items finish after the turn-level completion barrier.
+            val openKeys = liveCommandBuffers.keys.toList()
+            openKeys.forEach { key ->
+                val unfinished = runCatching { JSONObject(liveCommandBuffers[key]?.raw.orEmpty()) }.getOrNull() ?: JSONObject()
+                unfinished.put("status", "completed")
+                completeCommand(unfinished.toString(), key.removePrefix("item:").takeIf { key.startsWith("item:") })
+            }
         }
         sealCurrentPhase()
         clearReasoning()
-        commandText = ""
-        liveCommandJson = ""
-        commandOutputBuffer.setLength(0)
+        clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        assistantBodySeenInPhase = false
         phaseMessageStartIndex = messages.size
         // A turn can contain commentary, a proposed plan and a final answer. Close every
         // live item created by this turn; only sealing the last assistant leaves plan/commentary

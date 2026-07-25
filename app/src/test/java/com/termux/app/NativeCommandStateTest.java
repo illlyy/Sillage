@@ -55,4 +55,31 @@ public class NativeCommandStateTest {
             storedItem.getString(NativeCommandOutputStore.OUTPUT_REF)));
     }
 
+    @Test
+    public void parallelOutputBeforeStartDoesNotBorrowAnotherCommandMetadata() throws Exception {
+        NativeChatState state = new NativeChatState();
+        state.startCommand(new JSONObject().put("id", "command-a").put("command", "echo a").toString(), "command-a");
+        state.appendCommandOutput("b output", "command-b");
+        state.completeCommand(new JSONObject().put("id", "command-b").put("status", "completed").toString(), "command-b");
+
+        assertEquals(1, state.getToolDetails().size());
+        JSONObject completed = new JSONObject(state.getToolDetails().get(0));
+        assertEquals("command-b", completed.getString("id"));
+        assertFalse("echo a".equals(completed.optString("command")));
+        assertEquals("b output", NativeCommandOutputStore.get(
+            completed.getString(NativeCommandOutputStore.OUTPUT_REF)));
+    }
+
+    @Test
+    public void duplicateCommandCompletionUpdatesOneStoredItem() throws Exception {
+        NativeChatState state = new NativeChatState();
+        String started = new JSONObject().put("id", "same").put("command", "echo once").toString();
+        String completed = new JSONObject().put("id", "same").put("command", "echo once").put("status", "completed").toString();
+        state.startCommand(started, "same");
+        state.completeCommand(completed, "same");
+        state.completeCommand(completed, "same");
+
+        assertEquals(1, state.getToolDetails().size());
+    }
+
 }
