@@ -28,7 +28,8 @@ jobs:
 
       - name: Install Android platform and NDK
         shell: bash
-        run: sdkmanager "platforms;android-37" "ndk;22.1.7171670"
+        # Android 37 is currently published by the SDK repository as 37.0.
+        run: sdkmanager "platforms;android-37.0" "ndk;22.1.7171670"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
