@@ -70,6 +70,7 @@ jobs:
           FCODE_STORE_PASSWORD: ${{ secrets.FCODE_STORE_PASSWORD }}
           FCODE_KEY_ALIAS: ${{ secrets.FCODE_KEY_ALIAS }}
           FCODE_KEY_PASSWORD: ${{ secrets.FCODE_KEY_PASSWORD }}
+          TERMUX_SPLIT_APKS_FOR_DEBUG_BUILDS: "0"
           TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS: "0"
         shell: bash
         run: ./gradlew testDebugUnitTest assembleRelease --console=plain
