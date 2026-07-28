@@ -58,8 +58,8 @@ implementation "androidx.annotation:annotation:1.3.0"
         applicationId "com.ilyop.codex"
         minSdk project.properties.minSdkVersion.toInteger()
         targetSdk project.properties.targetSdkVersion.toInteger()
-        versionCode 1003
-        versionName "0.118.4"
+        versionCode 1004
+        versionName "0.2.0"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)

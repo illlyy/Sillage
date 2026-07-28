@@ -339,14 +339,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onDeveloper = { navigator.navigate(SettingsPage.DEVELOPER) },
                             environmentRevision = resumeRevision,
                             prefs = prefs,
-                            onCheckUpdates = {
-                                AppUpdateManager.checkForUpdates(
-                                    this@NativeSettingsActivity,
-                                    lang,
-                                    userInitiated = true,
-                                )
-                            },
-                            onAbout = { dialog = "about" },
+                            onAbout = { navigator.navigate(SettingsPage.ABOUT) },
                         )
                         SettingsPage.APPEARANCE -> AppearanceSettingsPage(
                             lang = lang,
@@ -498,6 +491,28 @@ class NativeSettingsActivity : ComponentActivity() {
                             onClearCache = { resetWebUiPreferences(lang) },
                         )
                         SettingsPage.DEVELOPER -> DeveloperSettingsPage(lang, navigateBack)
+                        SettingsPage.ABOUT -> AboutSettingsPage(
+                            lang = lang,
+                            onBack = navigateBack,
+                            onCheckUpdates = {
+                                AppUpdateManager.checkForUpdates(
+                                    this@NativeSettingsActivity,
+                                    lang,
+                                    userInitiated = true,
+                                )
+                            },
+                            onOpenRepository = {
+                                runCatching {
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(FcodeAboutInfo.REPOSITORY_URL)))
+                                }.onFailure {
+                                    Toast.makeText(
+                                        this@NativeSettingsActivity,
+                                        tr(lang, "无法打开 GitHub 仓库", "Unable to open the GitHub repository"),
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                            },
+                        )
                     }
                 }
                 val chatPreview = if (predictiveBackToChat) NativeSettingsBackPreview.current() else null
@@ -646,11 +661,6 @@ class NativeSettingsActivity : ComponentActivity() {
                     "typography" -> InfoDialog(
                         tr(lang, "文字与 Markdown", "Typography & Markdown"),
                         tr(lang, "已支持 Markdown、代码块、表格、列表和公式渲染。字号与行距沿用系统无障碍显示设置。", "Markdown, code blocks, tables, lists and math are supported. Font scale follows system accessibility settings."),
-                        lang, { dialog = null },
-                    )
-                    "about" -> InfoDialog(
-                        "Sillage",
-                        tr(lang, "版本 ${BuildConfig.VERSION_NAME}\n原生 Compose 对话与设置\n独立 WebUI、Goal、Plan 与多任务支持", "Version ${BuildConfig.VERSION_NAME}\nNative Compose chat and settings\nIndependent WebUI, Goal, Plan and multitasking support"),
                         lang, { dialog = null },
                     )
                 }
@@ -2814,7 +2824,6 @@ private fun SettingsRootPage(
     onDeveloper: () -> Unit,
     environmentRevision: Int,
     prefs: SharedPreferences,
-    onCheckUpdates: () -> Unit,
     onAbout: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -2917,14 +2926,130 @@ private fun SettingsRootPage(
             }
             item {
                 NavigationSettingsRow(
+                    HugeIcons.Settings03,
+                    tr(lang, "关于应用", "About app"),
+                    tr(lang, "版本、更新、作者与 GitHub 仓库", "Version, updates, author and GitHub repository"),
+                    onAbout,
+                )
+            }
+            item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun AboutSettingsPage(
+    lang: String,
+    onBack: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onOpenRepository: () -> Unit,
+) {
+    SettingsScaffold(
+        tr(lang, "关于应用", "About app"),
+        tr(lang, "版本、更新与项目维护信息", "Version, updates and project information"),
+        onBack,
+    ) { contentPadding ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
+            item { AboutAppCard(lang) }
+            item { SettingsSection(tr(lang, "版本与更新", "Version & updates")) }
+            item {
+                AboutInfoRow(
+                    HugeIcons.Settings03,
+                    tr(lang, "当前版本", "Current version"),
+                    "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                )
+            }
+            item {
+                NavigationSettingsRow(
                     HugeIcons.Refresh03,
                     tr(lang, "检查更新", "Check for updates"),
-                    "${tr(lang, "当前版本", "Current version")} ${BuildConfig.VERSION_NAME}",
+                    tr(lang, "从 GitHub Releases 获取最新正式版", "Get the latest stable release from GitHub Releases"),
                     onCheckUpdates,
                 )
             }
-            item { NavigationSettingsRow(HugeIcons.Settings03, tr(lang, "关于 Fcode", "About Fcode"), "${tr(lang, "版本", "Version")} ${BuildConfig.VERSION_NAME}", onAbout) }
+            item { SettingsSection(tr(lang, "项目信息", "Project information")) }
+            item {
+                AboutInfoRow(
+                    HugeIcons.Sparkles,
+                    tr(lang, "作者", "Author"),
+                    "${FcodeAboutInfo.AUTHOR} · @${FcodeAboutInfo.GITHUB_HANDLE}",
+                )
+            }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.Code,
+                    tr(lang, "GitHub 仓库", "GitHub repository"),
+                    FcodeAboutInfo.REPOSITORY_LABEL,
+                    onOpenRepository,
+                )
+            }
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+                ) {
+                    Text(
+                        tr(lang, "为移动端 Codex 工作流打造。更新包会在安装前校验版本、包名、签名证书和 SHA-256。", "Built for mobile Codex workflows. Update packages are verified for version, package name, signing certificate and SHA-256 before installation."),
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun AboutAppCard(lang: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Surface(Modifier.size(72.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.primary) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(HugeIcons.Sparkles, null, Modifier.size(34.dp), tint = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+            Text(
+                FcodeAboutInfo.APP_NAME,
+                modifier = Modifier.padding(top = 18.dp),
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Text(
+                "${FcodeAboutInfo.PROJECT_NAME} · ${tr(lang, "Codex Mobile 工作环境", "Codex Mobile workspace")}",
+                modifier = Modifier.padding(top = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .76f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutInfoRow(icon: ImageVector, title: String, value: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            SettingsIcon(icon)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

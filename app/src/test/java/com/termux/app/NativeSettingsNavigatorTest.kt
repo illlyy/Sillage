@@ -36,4 +36,16 @@ class NativeSettingsNavigatorTest {
         assertEquals(SettingsPage.MCP_EDITOR, navigator.page)
         assertNull(navigator.editingMcpKey)
     }
+
+    @Test
+    fun aboutPageIsAFirstLevelSettingsDestination() {
+        val navigator = NativeSettingsNavigator()
+
+        navigator.navigate(SettingsPage.ABOUT)
+
+        assertEquals(1, SettingsPage.ABOUT.navigationDepth)
+        assertEquals(SettingsPage.ROOT, SettingsPage.ABOUT.previousPage)
+        assertTrue(navigator.navigateBack())
+        assertEquals(SettingsPage.ROOT, navigator.page)
+    }
 }
