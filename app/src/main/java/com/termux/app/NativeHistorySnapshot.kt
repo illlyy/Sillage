@@ -13,6 +13,8 @@ data class NativeHistorySnapshot(
     val planPanelIndex: Int = -1,
     val estimatedChars: Int = 0,
     val contentFingerprint: Long = 0L,
+    /** Completed protocol items already represented by this immutable history snapshot. */
+    val completedProtocolItemIds: Set<String> = emptySet(),
 ) {
     fun hasSameContent(other: NativeHistorySnapshot): Boolean =
         contentFingerprint != 0L && contentFingerprint == other.contentFingerprint
@@ -32,9 +34,12 @@ internal object NativeHistoryParser {
         var planPanelIndex = -1
         var estimatedChars = 0L
         var pendingLegacyCompactionIndex = -1
+        val completedProtocolItemIds = LinkedHashSet<String>()
 
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
+            item.optString("protocolItemId").trim().takeIf { it.isNotEmpty() }
+                ?.let(completedProtocolItemIds::add)
             val role = when (item.optString("role")) {
                 "user" -> NativeChatRole.USER
                 "assistant" -> NativeChatRole.ASSISTANT
@@ -191,6 +196,7 @@ internal object NativeHistoryParser {
             planPanelIndex = planPanelIndex,
             estimatedChars = estimatedChars.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             contentFingerprint = contentFingerprint,
+            completedProtocolItemIds = completedProtocolItemIds.toSet(),
         )
     }
 

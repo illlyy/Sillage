@@ -3190,6 +3190,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 }
             }
             "onNativeError" -> {
+                // History and backend failures must leave the loading shell immediately; keeping
+                // this true can make a useful error look like the same blank route that failed.
+                chatState.historyLoading = false
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
                 flushReasoningDeltas(force = true)
                 flushAnswerDeltas(force = true)

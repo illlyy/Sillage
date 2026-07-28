@@ -93,6 +93,10 @@ final class CodexAppServerBridge {
     private static final long NATIVE_STREAM_BATCH_MS = 32L;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final NativeStreamEventBatcher nativeStreamBatcher = new NativeStreamEventBatcher();
+    /** Keeps live events behind the history snapshot without losing route or protocol identity. */
+    private final NativeRouteEventGate nativeRouteEventGate = new NativeRouteEventGate();
+    /** Route identity captured on the app-server reader thread before any later navigation. */
+    private final ThreadLocal<NativeRouteEventGate.RouteToken> nativeRouteEmission = new ThreadLocal<>();
     private final AtomicBoolean nativeStreamDrainScheduled = new AtomicBoolean();
     private final Runnable nativeStreamDrain = this::drainNativeStreamEvents;
 
@@ -441,8 +445,7 @@ final class CodexAppServerBridge {
         int generation = navigationGeneration.incrementAndGet();
         clearDeferredResume();
         threadId = null;
-        visibleThreadId = null;
-        visibleRouteReady = false;
+        resetVisibleRoute(null, false);
         activeTurnId = null;
         NativeChatDiagnostics.record(appContext, "conversation_route", navigationDetails(generation, "new"));
         try { sendThreadStart(requestedCwd); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
@@ -464,8 +467,9 @@ final class CodexAppServerBridge {
         // Change the visible route synchronously, before history I/O and thread/resume.
         // Events from the previously displayed background turn are rejected immediately.
         threadId = requestedThread;
-        visibleThreadId = requestedThread;
-        visibleRouteReady = false;
+        resetVisibleRoute(requestedThread, false);
+        final NativeRouteEventGate.RouteToken routeToken =
+            nativeRouteEventGate.captureRouteToken(requestedThread);
         primaryThreadIds.add(requestedThread);
         activeTurnId = null;
         NativeChatDiagnostics.record(appContext, "conversation_route", navigationDetails(generation, shortId(requestedThread)));
@@ -486,10 +490,20 @@ final class CodexAppServerBridge {
                     if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
                     // JSON, Base64 and message DTO parsing completed on the resume worker.
                     // Main only swaps one immutable snapshot before opening the event gate.
-                    if (eventListener != null) {
-                        eventListener.onHistoryPrepared(requestedThread, generation, historySnapshot);
+                    try {
+                        if (eventListener != null) eventListener.onHistoryPrepared(
+                            requestedThread, generation, historySnapshot);
+                    } catch (Exception historyApplyError) {
+                        Log.e(TAG, "Unable to apply prepared conversation history", historyApplyError);
+                        failOpenVisibleRoute(routeToken);
+                        emit("onNativeError", "Unable to display conversation history: "
+                            + historyApplyError.getMessage());
+                        return;
                     }
-                    visibleRouteReady = true;
+                    // The history snapshot must be installed before live events are released.
+                    // Otherwise a queued delta can be painted briefly and then overwritten by the
+                    // disk snapshot on the next main-loop turn.
+                    markVisibleRouteReadyAndReplay(routeToken, historySnapshot);
                     if (retainInMemoryThread) {
                         NativeChatDiagnostics.record(appContext, "retained_empty_thread_restored",
                             navigationDetails(generation, shortId(requestedThread)));
@@ -510,7 +524,24 @@ final class CodexAppServerBridge {
                     }
                 });
             } catch (Exception e) {
-                if (navigationGeneration.get() == generation) emit("onNativeError", e.getMessage());
+                final String historyError = e.getClass().getSimpleName() + ": "
+                    + (e.getMessage() == null ? "Unable to read conversation history" : e.getMessage());
+                final NativeHistorySnapshot emptySnapshot = NativeHistoryParser.parse(new JSONArray());
+                mainHandler.post(() -> {
+                    if (navigationGeneration.get() != generation
+                            || !requestedThread.equals(visibleThreadId)) return;
+                    // Finish the Activity's loading state even when disk history is unavailable.
+                    // Live output is more useful than a permanently blank route, so fail-open the
+                    // gate before surfacing the explicit history error.
+                    try {
+                        if (eventListener != null) eventListener.onHistoryPrepared(
+                            requestedThread, generation, emptySnapshot);
+                    } catch (Exception callbackError) {
+                        Log.w(TAG, "Unable to apply empty history fallback", callbackError);
+                    }
+                    failOpenVisibleRoute(routeToken);
+                    emit("onNativeError", historyError);
+                });
             }
         }, "CodexConversationResume").start();
         return generation;
@@ -964,6 +995,11 @@ final class CodexAppServerBridge {
             }
             if (unexpected) {
                 android.util.Log.w(TAG, "app-server exited with code " + exitCode);
+                if (webView == null) {
+                    CodexTaskStore.markInterruptedTasks(appContext);
+                    emit("onNativeError", "Codex backend disconnected unexpectedly (exit code "
+                        + exitCode + "). The current task has stopped.");
+                }
                 Activity boundActivity = boundActivity();
                 if (boundActivity instanceof CodexHomeActivity) {
                     mainHandler.post(() -> ((CodexHomeActivity) boundActivity).onCodexAppServerExited(exitCode));
@@ -1231,8 +1267,7 @@ final class CodexAppServerBridge {
                     && (visibleThreadId == null || visibleThreadId.equals(resultThreadId)));
                 if (acceptForNative) {
                     threadId = resultThreadId;
-                    visibleThreadId = resultThreadId;
-                    visibleRouteReady = true;
+                    resetVisibleRoute(resultThreadId, true);
                     emit("onReady", resultThreadId);
                 } else {
                     NativeChatDiagnostics.record(appContext, "ignored_navigation_result", new JSONObject()
@@ -1243,7 +1278,12 @@ final class CodexAppServerBridge {
         }
         String method = message.optString("method", "");
         JSONObject params = message.optJSONObject("params");
-        boolean primaryEvent = isPrimaryEvent(method, params);
+        NativeRouteEventGate.RouteToken notificationRoute =
+            nativeRouteEventGate.captureRouteToken(protocolThreadId(params));
+        boolean primaryEvent = shouldAcceptNotificationForRoute(method, params, notificationRoute);
+        nativeRouteEmission.remove();
+        if (primaryEvent) nativeRouteEmission.set(notificationRoute);
+        try {
         logCollabAgentEvent(method, params);
         if ("thread/goal/updated".equals(method) && params != null) {
             publishNativeGoalState(params.optString("threadId", ""), params.optJSONObject("goal"));
@@ -1462,6 +1502,9 @@ final class CodexAppServerBridge {
             // active, continue after the server's bounded internal retry budget is exhausted.
             emitProtocolLifecycleEvent("error", params, params);
             emit("onTurnError", params.toString());
+        }
+        } finally {
+            nativeRouteEmission.remove();
         }
     }
 
@@ -1962,6 +2005,8 @@ final class CodexAppServerBridge {
         java.util.Map<String, JSONObject> calls = new java.util.HashMap<>();
         java.util.Map<String, Integer> historicalCompactionIndices = new java.util.LinkedHashMap<>();
         JSONObject pendingUserMessage = null;
+        String pendingHistoricalPlan = "";
+        String pendingHistoricalPlanId = "";
         boolean sawEventMessage = false;
         int lastProcessIndex = -1;
         long reasoningStartedAtMs = 0L;
@@ -1994,7 +2039,19 @@ final class CodexAppServerBridge {
                     }
                     continue;
                 }
+                JSONObject historicalPlanItem = completedHistoricalPlanItem(record, payload);
+                if (historicalPlanItem != null) {
+                    String planText = normalizedHistoricalPlanText(extractAgentMessageText(historicalPlanItem));
+                    if (!planText.isEmpty()) {
+                        pendingHistoricalPlan = planText;
+                        pendingHistoricalPlanId = historicalProtocolItemId(historicalPlanItem);
+                    }
+                    continue;
+                }
                 if (eventMessageRecord && "user_message".equals(payload.optString("type"))) {
+                    appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
+                    pendingHistoricalPlan = "";
+                    pendingHistoricalPlanId = "";
                     JSONObject confirmed = confirmedHistoryUserMessage(pendingUserMessage, payload);
                     if (confirmed != null) messages.put(confirmed);
                     pendingUserMessage = null;
@@ -2068,6 +2125,8 @@ final class CodexAppServerBridge {
                 if (!"message".equals(payloadType)) continue;
                 String role = payload.optString("role", "");
                 if (!"user".equals(role) && !"assistant".equals(role)) continue;
+                String assistantProtocolItemId = "assistant".equals(role)
+                    ? historicalProtocolItemId(payload) : "";
                 JSONArray content = payload.optJSONArray("content");
                 if (content == null) continue;
                 StringBuilder text = new StringBuilder();
@@ -2097,6 +2156,9 @@ final class CodexAppServerBridge {
                 }
                 String value = text.toString().trim();
                 if ("user".equals(role)) {
+                    appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
+                    pendingHistoricalPlan = "";
+                    pendingHistoricalPlanId = "";
                     if (pendingUserMessage != null && !sawEventMessage
                             && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
                         messages.put(pendingUserMessage);
@@ -2129,11 +2191,23 @@ final class CodexAppServerBridge {
                 }
                 if (!value.isEmpty()) {
                     if ("assistant".equals(role)) {
-                        appendHistoricalAssistantContent(messages, value);
+                        appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
+                        appendHistoricalAssistantContent(
+                            messages, value, pendingHistoricalPlan, assistantProtocolItemId);
                     }
+                }
+                if ("assistant".equals(role)) {
+                    // A dedicated Plan can be persisted without a trailing assistant mirror.
+                    // Flush it here even when that mirror is empty.
+                    if (value.isEmpty()) {
+                        appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
+                    }
+                    pendingHistoricalPlan = "";
+                    pendingHistoricalPlanId = "";
                 }
             }
         }
+        appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
         if (pendingUserMessage != null && !sawEventMessage
                 && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
             messages.put(pendingUserMessage);
@@ -2154,6 +2228,74 @@ final class CodexAppServerBridge {
             appendHistoricalContentPart(parts, part.getRole(), part.getText());
         }
         return parts;
+    }
+
+    /** Return a completed dedicated Plan item from rollout history, across app-server schemas. */
+    private static JSONObject completedHistoricalPlanItem(JSONObject record, JSONObject payload) {
+        if (record == null || payload == null) return null;
+        String recordType = normalizeItemType(record.optString("type", ""));
+        String payloadType = normalizeItemType(payload.optString("type", payload.optString("item_type", "")));
+        JSONObject item = payload.optJSONObject("item");
+        if (item == null && "responseitem".equals(recordType) && "plan".equals(payloadType)) item = payload;
+        if (item == null) return null;
+        String itemType = normalizeItemType(item.optString("type", item.optString("item_type", "")));
+        if (!"plan".equals(itemType)) return null;
+
+        // response_item/plan is already a terminal persisted item. event_msg histories also
+        // contain item_started records, which must not create a second partial card.
+        if ("responseitem".equals(recordType)) return item;
+        String status = normalizeItemType(item.optString("status", payload.optString("status", "")));
+        boolean completed = payloadType.contains("completed") || payloadType.contains("complete")
+            || "completed".equals(status) || "complete".equals(status);
+        return completed ? item : null;
+    }
+
+    private static String normalizedHistoricalPlanText(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) return "";
+        StringBuilder plan = new StringBuilder();
+        for (NativePlanContentPart part : NativePlanStreamParser.splitComplete(text)) {
+            if ("plan".equals(part.getRole())) plan.append(part.getText());
+        }
+        return plan.length() > 0 ? plan.toString().trim() : text;
+    }
+
+    private static boolean historicalPlansEquivalent(String left, String right) {
+        String a = normalizedHistoricalPlanForComparison(left);
+        String b = normalizedHistoricalPlanForComparison(right);
+        if (a.isEmpty() || b.isEmpty()) return false;
+        return a.equals(b) || a.contains(b) || b.contains(a);
+    }
+
+    private static boolean historicalPlanMirror(String assistantText, String planText) {
+        String assistant = normalizedHistoricalPlanForComparison(assistantText);
+        String plan = normalizedHistoricalPlanForComparison(planText);
+        return !assistant.isEmpty() && assistant.equals(plan);
+    }
+
+    private static String normalizedHistoricalPlanForComparison(String value) {
+        return value == null ? "" : value.trim().replaceAll("\\s+", " ")
+            .toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static void appendHistoricalProposedPlan(JSONArray messages, String text, String itemId) throws Exception {
+        if (text == null || text.trim().isEmpty()) return;
+        JSONObject message = new JSONObject()
+            .put("role", "activity")
+            .put("content", "PROPOSED_PLAN|" + text.trim());
+        if (itemId != null && !itemId.isEmpty()) {
+            message.put("id", "history-proposed-plan:" + itemId);
+            message.put("protocolItemId", itemId);
+        }
+        messages.put(message);
+    }
+
+    private static String historicalProtocolItemId(JSONObject item) {
+        if (item == null) return "";
+        String value = item.optString("id", "").trim();
+        if (value.isEmpty()) value = item.optString("itemId", "").trim();
+        if (value.isEmpty()) value = item.optString("item_id", "").trim();
+        return value;
     }
 
     private static JSONObject historicalCompactionItem(JSONObject record, JSONObject payload, long recordAtMs) throws Exception {
@@ -2228,17 +2370,41 @@ final class CodexAppServerBridge {
 
     /** Convert pure parsed parts to the transport format consumed by NativeChatState. */
     static void appendHistoricalAssistantContent(JSONArray messages, String value) throws Exception {
+        appendHistoricalAssistantContent(messages, value, "", "");
+    }
+
+    private static void appendHistoricalAssistantContent(JSONArray messages, String value,
+                                                         String pendingHistoricalPlan,
+                                                         String protocolItemId) throws Exception {
         JSONArray parts = splitHistoricalAssistantContent(value);
+        if (parts.length() == 1) {
+            JSONObject only = parts.getJSONObject(0);
+            if ("assistant".equals(only.optString("role"))
+                    && historicalPlanMirror(only.optString("content"), pendingHistoricalPlan)) {
+                // Some app-server versions persist the dedicated Plan item and then repeat its
+                // untagged text as an assistant message. The Plan item is authoritative.
+                return;
+            }
+        }
         for (int i = 0; i < parts.length(); i++) {
             JSONObject part = parts.getJSONObject(i);
             String content = part.getString("content");
             if ("plan".equals(part.getString("role"))) {
+                if (historicalPlansEquivalent(content, pendingHistoricalPlan)) continue;
                 // The surrounding messages array is already JSON encoded; a second Base64
                 // layer only creates full-plan allocations on every native stream update.
-                messages.put(new JSONObject().put("role", "activity")
-                    .put("content", "PROPOSED_PLAN|" + content));
+                JSONObject message = new JSONObject().put("role", "activity")
+                    .put("content", "PROPOSED_PLAN|" + content);
+                if (protocolItemId != null && !protocolItemId.isEmpty()) {
+                    message.put("protocolItemId", protocolItemId);
+                }
+                messages.put(message);
             } else {
-                messages.put(new JSONObject().put("role", "assistant").put("content", content));
+                JSONObject message = new JSONObject().put("role", "assistant").put("content", content);
+                if (protocolItemId != null && !protocolItemId.isEmpty()) {
+                    message.put("protocolItemId", protocolItemId);
+                }
+                messages.put(message);
             }
         }
     }
@@ -2639,17 +2805,133 @@ final class CodexAppServerBridge {
     }
 
     private boolean isPrimaryEvent(JSONObject params) {
-        return shouldAcceptVisibleProtocolEvent(params, visibleRouteReady, visibleThreadId, activeTurnId);
+        return shouldAcceptVisibleProtocolEvent(
+            params, visibleRouteReady || canBufferVisibleRouteEvents(), visibleThreadId, activeTurnId);
     }
 
     private boolean isPrimaryEvent(String method, JSONObject params) {
         return shouldAcceptVisibleProtocolEvent(
             params,
-            visibleRouteReady,
+            visibleRouteReady || canBufferVisibleRouteEvents(),
             visibleThreadId,
             activeTurnId,
             isContextCompactionSignal(method, params)
         );
+    }
+
+    private boolean shouldAcceptNotificationForRoute(
+            String method, JSONObject params, NativeRouteEventGate.RouteToken routeToken) {
+        if (routeToken == null) return false;
+        boolean mayBufferLoadingRoute = canBufferVisibleRouteEvents(
+            webView == null,
+            eventListener != null,
+            routeToken.getSourceThreadId(),
+            routeToken.isReady());
+        return shouldAcceptVisibleProtocolEvent(
+            params,
+            routeToken.isReady() || mayBufferLoadingRoute,
+            routeToken.getSourceThreadId(),
+            activeTurnId,
+            isContextCompactionSignal(method, params));
+    }
+
+    /**
+     * A resumed native conversation has a visible thread identity before its disk history is
+     * ready.  Accepting that thread's protocol events during the gap lets emit() queue them for
+     * replay instead of silently dropping the live answer.
+     */
+    private boolean canBufferVisibleRouteEvents() {
+        return canBufferVisibleRouteEvents(
+            webView == null, eventListener != null, visibleThreadId, visibleRouteReady);
+    }
+
+    static boolean canBufferVisibleRouteEvents(boolean nativeUi, boolean listenerAttached,
+                                                String visibleThread, boolean routeReady) {
+        return nativeUi && listenerAttached && visibleThread != null
+            && !visibleThread.isEmpty() && !routeReady;
+    }
+
+    private void resetVisibleRoute(String thread, boolean ready) {
+        visibleThreadId = thread;
+        visibleRouteReady = ready;
+        nativeRouteEventGate.resetRoute(navigationGeneration.get(), thread, ready);
+        // A delayed main-loop drain from route A must never mutate the newly selected route B.
+        mainHandler.removeCallbacks(nativeStreamDrain);
+        nativeStreamDrainScheduled.set(false);
+        nativeStreamBatcher.clear();
+    }
+
+    private void markVisibleRouteReadyAndReplay(NativeRouteEventGate.RouteToken routeToken,
+                                                NativeHistorySnapshot historySnapshot) {
+        if (webView != null) {
+            visibleRouteReady = true;
+            return;
+        }
+        if (!nativeRouteEventGate.isCurrent(routeToken)) return;
+        java.util.List<NativeRouteEventGate.Event> pending = nativeRouteEventGate.markReadyAndReplay(
+            routeToken, historySnapshot == null ? java.util.Collections.emptySet()
+                : historySnapshot.getCompletedProtocolItemIds());
+        visibleRouteReady = true;
+        replayVisibleRouteEvents(routeToken, pending);
+    }
+
+    private void failOpenVisibleRoute(NativeRouteEventGate.RouteToken routeToken) {
+        if (webView != null || !nativeRouteEventGate.isCurrent(routeToken)) return;
+        java.util.List<NativeRouteEventGate.Event> pending = nativeRouteEventGate.failOpen(routeToken);
+        visibleRouteReady = true;
+        replayVisibleRouteEvents(routeToken, pending);
+    }
+
+    private void replayVisibleRouteEvents(NativeRouteEventGate.RouteToken routeToken,
+                                          java.util.List<NativeRouteEventGate.Event> pending) {
+        if (!pending.isEmpty()) {
+            try {
+                NativeChatDiagnostics.record(appContext, "route_events_replayed", new JSONObject()
+                    .put("thread", shortId(routeToken.getSourceThreadId()))
+                    .put("generation", routeToken.getNavigationGeneration())
+                    .put("events", pending.size()));
+            } catch (Exception ignored) {}
+        }
+        for (NativeRouteEventGate.Event event : pending) enqueueAdmittedNativeEvent(
+            event.function, event.value, routeToken);
+    }
+
+    static boolean isVisibleRouteFunction(String function) {
+        if (function == null) return false;
+        switch (function) {
+            case "onProtocolEvent":
+            case "onProtocolDelta":
+            case "onCommandDeltaV2":
+            case "onDelta":
+            case "onAssistantItemComplete":
+            case "onFinalAnswer":
+            case "onReasoningDelta":
+            case "onReasoningComplete":
+            case "onCommandStarted":
+            case "onCommandDelta":
+            case "onCommandComplete":
+            case "onToolComplete":
+            case "onPlanStarted":
+            case "onPlanDelta":
+            case "onPlanComplete":
+            case "onPlanUpdated":
+            case "onItem":
+            case "onSubagentEvent":
+            case "onTokenUsage":
+            case "onTurnComplete":
+            case "onTurnError":
+            case "onCompactionRpcResult":
+            case "onCompactStatus":
+            case "onApprovalRequest":
+            case "onUserInputRequest":
+            case "onUserInputResolved":
+            case "onGoalUpdated":
+            case "onGoalCleared":
+            case "onSteerResult":
+                return true;
+            default:
+                return false;
+        }
     }
 
     /**
@@ -2732,16 +3014,56 @@ final class CodexAppServerBridge {
             || "onCommandDeltaV2".equals(function) || "onProtocolDelta".equals(function);
     }
 
-    private void dispatchNativeEvent(String function, String value) {
+    private void dispatchNativeEvent(String function, String value,
+                                     NativeRouteEventGate.RouteToken routeToken) {
+        if (routeToken != null && !nativeRouteEventGate.isCurrent(routeToken)) return;
         EventListener listener = eventListener;
         if (listener != null) listener.onEvent(function, value);
     }
 
+    private void dispatchNativeEvent(String function, String value) {
+        dispatchNativeEvent(function, value, null);
+    }
+
+    private void dispatchNativeEvents(java.util.List<NativeStreamEventBatcher.Event> events) {
+        for (NativeStreamEventBatcher.Event event : events) {
+            dispatchNativeEvent(event.function, event.value, event.routeToken);
+        }
+    }
+
     private void drainNativeStreamEvents() {
         nativeStreamDrainScheduled.set(false);
-        for (NativeStreamEventBatcher.Event event : nativeStreamBatcher.drain()) {
-            dispatchNativeEvent(event.function, event.value);
+        dispatchNativeEvents(nativeStreamBatcher.drain());
+    }
+
+    private NativeRouteEventGate.RouteToken routeTokenForEmission() {
+        NativeRouteEventGate.RouteToken captured = nativeRouteEmission.get();
+        return captured != null ? captured : nativeRouteEventGate.captureRouteToken();
+    }
+
+    /** Queue an event already admitted by NativeRouteEventGate. */
+    private void enqueueAdmittedNativeEvent(String function, String value,
+                                            NativeRouteEventGate.RouteToken routeToken) {
+        if (isHighFrequencyEmission(function)) {
+            boolean drainNow = nativeStreamBatcher.offer(function, value, routeToken);
+            if (nativeStreamDrainScheduled.compareAndSet(false, true)) {
+                mainHandler.postDelayed(nativeStreamDrain, drainNow ? 0L : NATIVE_STREAM_BATCH_MS);
+            } else if (drainNow) {
+                mainHandler.removeCallbacks(nativeStreamDrain);
+                mainHandler.post(nativeStreamDrain);
+            }
+            return;
         }
+
+        // Freeze the preceding delta batch now. A later delta must never jump across this
+        // completion/tool/lifecycle barrier merely because both main-loop tasks are still queued.
+        mainHandler.removeCallbacks(nativeStreamDrain);
+        nativeStreamDrainScheduled.set(false);
+        java.util.List<NativeStreamEventBatcher.Event> beforeBarrier = nativeStreamBatcher.drain();
+        mainHandler.post(() -> {
+            dispatchNativeEvents(beforeBarrier);
+            dispatchNativeEvent(function, value, routeToken);
+        });
     }
 
     private void emit(String function, String value) {
@@ -2750,23 +3072,17 @@ final class CodexAppServerBridge {
         }
         final String safeValue = value == null ? "" : value;
         if (webView == null) {
-            if (isHighFrequencyEmission(function)) {
-                boolean drainNow = nativeStreamBatcher.offer(function, safeValue);
-                if (nativeStreamDrainScheduled.compareAndSet(false, true)) {
-                    mainHandler.postDelayed(nativeStreamDrain, drainNow ? 0L : NATIVE_STREAM_BATCH_MS);
-                } else if (drainNow) {
-                    mainHandler.removeCallbacks(nativeStreamDrain);
-                    mainHandler.post(nativeStreamDrain);
-                }
-                return;
+            if (isVisibleRouteFunction(function)) {
+                NativeRouteEventGate.RouteToken routeToken = routeTokenForEmission();
+                NativeRouteEventGate.Admission admission = nativeRouteEventGate.offer(
+                    routeToken, function, safeValue);
+                if (admission != NativeRouteEventGate.Admission.DISPATCH_NOW) return;
+                enqueueAdmittedNativeEvent(function, safeValue, routeToken);
+            } else {
+                // Backend/history failures are deliberately global and immediate: a closed route
+                // gate must never hide the only explanation for an otherwise blank screen.
+                enqueueAdmittedNativeEvent(function, safeValue, null);
             }
-            // Completion/tool/lifecycle events are ordering barriers. Flush every earlier delta
-            // in the same main-loop task before delivering the barrier event.
-            mainHandler.removeCallbacks(nativeStreamDrain);
-            mainHandler.post(() -> {
-                drainNativeStreamEvents();
-                dispatchNativeEvent(function, safeValue);
-            });
             return;
         }
 
@@ -2784,8 +3100,7 @@ final class CodexAppServerBridge {
         // process after a new start() has already completed.
         serverGeneration.incrementAndGet();
         threadId = null;
-        visibleThreadId = null;
-        visibleRouteReady = false;
+        resetVisibleRoute(null, false);
         activeTurnId = null;
         initializeRequestId = -1;
         mcpStatusRequestId = -1;

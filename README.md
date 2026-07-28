@@ -1,149 +1,107 @@
-# Fcode for Android
+<h1 align="center">Sillage</h1>
 
-Fcode 是一个基于 Termux Android 工程的非官方应用，集成 Codex Web/native UI、终端能力和 Mihomo 资源。它不是 OpenAI、Termux、Mihomo、MetaCubeX 或 RikkaHub 的官方产品。
+<p align="center"><strong>Android 上的 AI 编程与移动开发工作区</strong></p>
 
-仓库已公开维护，当前默认分支是 `fcode-main`。如果你只是想安装应用，请直接前往 [GitHub Releases](https://github.com/illlyy/Fcode/releases)；如果你要参与开发，请先阅读下面的构建和许可证说明。
+<p align="center">在手机或平板上与 AI 协作、管理项目、运行终端并完成开发任务。</p>
 
-## 主要功能
+<p align="center">
+  <img alt="Android 7.0+" src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?logo=android&amp;logoColor=white">
+  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Compose-7F52FF?logo=kotlin&amp;logoColor=white">
+  <a href="./LICENSE.md"><img alt="GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-blue.svg"></a>
+</p>
 
-- 在 Android 上运行 Codex Web/native 对话界面。
-- 保留 Termux 的终端和会话能力，应用包名为 `com.ilyop.codex`。
-- 集成 Mihomo/MetaCubeXD 资源和 Fcode 自定义 UI。
-- 从 GitHub Releases 检查更新，并使用默认浏览器打开正式 APK 下载链接。
+<p align="center">
+  <a href="../../releases/latest">下载最新版</a> ·
+  <a href="./CHANGELOG.md">更新日志</a> ·
+  <a href="../../issues">问题反馈</a>
+</p>
 
-## 下载与安装
+## 关于 Sillage
 
-- [下载最新正式版](https://github.com/illlyy/Fcode/releases/latest)
-- [查看全部版本和更新说明](https://github.com/illlyy/Fcode/releases)
+Sillage 是一款为 Android 设计的 AI 编程应用，将原生 AI 对话、项目工作区、Git、Termux 终端和扩展工具整合在一起。
 
-正式版 APK 由 GitHub Actions 构建并附带 `update.json`、`sha256sums.txt` 和 R8 mapping。应用内更新读取的地址是：
+你可以直接在移动设备上打开项目、向 AI 描述任务、查看执行过程、审批操作、检查代码变更，并继续完成后续开发工作。
 
-```text
-https://github.com/illlyy/Fcode/releases/latest/download/update.json
-```
+Sillage 不提供模型账号或 API 额度，使用前需要配置自己的兼容 API 服务。
 
-Fcode 使用独立的应用包名和签名，不能覆盖官方 `com.termux`。首次从开发签名切换到生产签名时，也不能直接覆盖安装；请先备份 `$HOME`、`$PREFIX` 和应用配置，再卸载旧包并安装正式版。不要把生产 keystore、密码、API key、Token 或代理订阅地址提交到 Git。
+## 功能介绍
 
-## 项目结构
+- **原生 AI 对话**：支持流式回复、Markdown、代码块、表格、公式、推理摘要以及图片和文件附件。
+- **Agent 任务协作**：支持执行计划、操作审批、用户追问、子代理任务和任务状态提醒。
+- **模型与 API 配置**：可保存多套 API 配置，自定义服务地址、API Key、模型、推理强度和模型能力。
+- **项目与 Git**：查看项目状态和代码差异，暂存文件、推送分支、使用独立 Worktree，并创建工作区快照。
+- **MCP 与 Skills**：添加 MCP 服务，管理工具权限，并安装或卸载 Skills。
+- **Termux 开发环境**：内置终端，可安装 Codex CLI、Git、Node.js、Python、Rust、Go、Java、C/C++、SSH、Tmux 等工具。
+- **Codex WebUI**：除原生聊天外，也可以使用内置 WebUI 处理项目和对话。
+- **Android 系统集成**：支持从其他应用分享文本、图片和文件，提供悬浮球、后台任务和系统通知。
+- **个性化界面**：支持浅色、深色和跟随系统模式，提供 Material 与 Liquid Glass 风格、主题配色和自定义聊天背景。
+- **应用内代理**：可选安装 Mihomo，管理订阅和节点，仅代理 Sillage 自身请求，不影响其他应用。
 
-```text
-app/                         Android 应用和 Fcode UI
-terminal-emulator/           终端模拟器模块
-terminal-view/               终端视图模块
-termux-shared/               Termux 共用库
-vendor/codex-web/            Codex Web 源码快照及 Android bridge
-vendor/rikkahub-native/      RikkaHub native UI 参考快照
-app/src/main/assets/         运行时 WebView、Mihomo 等固定资源
-tools/                       WebView 资源构建和维护脚本
-```
+## 快速开始
 
-根目录不再保存 ADB dump、截图、logcat 和性能采样；这些文件属于本地 QA 产物，已通过 `.gitignore` 排除。
+1. 前往 [Releases](../../releases/latest) 下载并安装最新 APK。
+2. 首次启动后，在“设置 → 开发工具与环境”中安装 Codex CLI 和需要的开发工具。
+3. 在“设置 → 模型与 API”中添加服务地址、API Key 和模型。
+4. 新建对话，选择项目目录和模型，然后输入你的任务。
 
-## 本地构建
+## 系统要求
 
-要求：Android SDK、Java 17、NDK `22.1.7171670`。先在根目录创建被忽略的 `local.properties`，填写本机 SDK 路径：
+- Android 7.0 或更高版本；
+- 无需 Root；
+- 需要用户自行准备兼容的模型 API；
+- 内置 Mihomo 当前仅支持 ARM64 设备；
+- Liquid Glass 折射效果需要 Android 12 或更高版本，旧系统会自动使用普通样式。
+
+## 从源码构建
+
+构建环境：
+
+- JDK 17；
+- Android SDK Platform 37.0；
+- Android NDK `22.1.7171670`。
+
+在项目根目录配置 `local.properties`：
 
 ```properties
-sdk.dir=C:\\Android\\Sdk
+sdk.dir=D\:\\path\\to\\android-sdk
 ```
 
-Windows PowerShell：
+Windows：
 
 ```powershell
 .\gradlew.bat testDebugUnitTest
 .\gradlew.bat assembleDebug
 ```
 
-Linux/macOS：
+Linux / macOS：
 
 ```bash
 ./gradlew testDebugUnitTest
 ./gradlew assembleDebug
 ```
 
-如需重新生成 Codex Web 快照，先阅读 [`vendor/codex-web/UPSTREAM.md`](vendor/codex-web/UPSTREAM.md)，再运行：
+生成的 Debug APK 位于 `app/build/outputs/apk/debug/`。
 
-```powershell
-.\tools\build-codex-web-assets.ps1
-```
+## 参与贡献
 
-脚本默认只生成候选资源，确认后再使用 `-Apply` 写入 APK assets。
+欢迎提交 [Issue](../../issues) 或 Pull Request。反馈问题时，请提供应用版本、Android 版本、设备架构和复现步骤，并确保日志中不包含 API Key、Token、订阅地址或私人项目内容。
 
-## 发布正式版
+## 开源项目
 
-版本号由 [`app/build.gradle`](app/build.gradle) 中的 `versionCode` 和 `versionName` 控制。每次发布按以下顺序操作：
+Sillage 使用或参考了以下项目：
 
-1. 同时递增版本号，更新 [`RELEASE_NOTES.md`](RELEASE_NOTES.md) 和 [`CHANGELOG.md`](CHANGELOG.md)。
-2. 提交变更并创建与 `versionName` 完全一致的标签，例如 `v0.118.4`。
-3. 推送提交和标签：
+- [Termux](https://github.com/termux/termux-app)
+- [codex-web](https://github.com/0xcaff/codex-web)
+- [Mihomo](https://github.com/MetaCubeX/mihomo)
+- [MetaCubeXD](https://github.com/MetaCubeX/metacubexd)
+- [RikkaHub](https://github.com/rikkahub/rikkahub)
 
-   ```bash
-   git push origin fcode-main
-   git push origin v0.118.4
-   ```
-
-4. [`Publish signed release`](.github/workflows/release.yml) 会运行测试、构建 R8 release APK、验证签名，生成 `update.json` 和 SHA-256 校验文件，并创建 GitHub Release。
-
-首次配置仓库时，在 GitHub Actions Secrets 中设置：
-
-- `FCODE_KEYSTORE_BASE64`
-- `FCODE_STORE_PASSWORD`
-- `FCODE_KEY_ALIAS`
-- `FCODE_KEY_PASSWORD`
-
-生产 keystore 必须只保存在安全的密码管理器和 GitHub Secrets 中。若把发布资产放到另一个公开仓库，可设置 Actions Variable `FCODE_RELEASE_REPOSITORY`（例如 `illlyy/Fcode-Releases`），并为工作流提供具有 Contents write 权限的 `FCODE_RELEASE_TOKEN`。默认情况下，发布到当前仓库。
-
-### 更新说明怎么写
-
-每个版本都把面向用户的变化写进 `RELEASE_NOTES.md`，再同步到 `CHANGELOG.md`。只写用户能感知或维护者需要知道的内容，建议使用下面的结构：
-
-```markdown
-## 新增
-- 新增了什么功能，用户在哪里可以找到它。
-
-## 修复
-- 修复了什么问题，什么场景不再出错。
-
-## 变更
-- 行为、兼容性或配置是否发生变化。
-
-## 安全
-- 签名、权限、凭据处理等重要变化。
-
-## 已知问题
-- 当前版本仍存在的限制，以及临时解决办法。
-```
-
-不要把内部 commit hash、测试截图或未经确认的功能计划当作已发布功能；这些内容留在 issue 或开发记录中。
-
-## 应用内更新协议
-
-`update.json` 至少包含以下字段：
-
-| 字段 | 作用 |
-| --- | --- |
-| `versionCode` | 必须大于已安装版本的整数版本号 |
-| `versionName` | 展示给用户的语义化版本 |
-| `minSdk` | APK 支持的最低 Android API |
-| `force` | 是否强制更新 |
-| `apkUrl` | 必须是 HTTPS 下载地址 |
-| `sha256` | APK 的 64 位十六进制 SHA-256 |
-| `changelog` | 弹窗和 Release 中显示的更新内容 |
-
-客户端只信任 HTTPS 清单，并依据 `versionCode` 判断是否存在新版本；确认更新后会用默认浏览器打开 `apkUrl`。下载完成后由 Android 安装器校验应用签名，Release 同时提供 SHA-256 供手动核对。没有正式 Release 时，`update.json` 不存在是正常的；发布第一个匹配版本的 tag 后，地址才会生效。
-
-## 分支策略
-
-分支历史是线性的：`main` → `fcode-main` → `feat/rikka-compose-ui`。因此不需要三方 merge。当前功能分支已经包含默认分支的全部提交，维护时以 `fcode-main` 为唯一发布分支；`feat/rikka-compose-ui` 仅作为迁移期间的备份，确认新 Release 正常后再删除远程备份分支。
-
-## 安全与隐私
-
-- Codex Web 和 Mihomo 控制器默认只监听 loopback，不要绑定到 `0.0.0.0` 或直接暴露公网。
-- 不要提交 API key、Bearer token、GitHub token、代理凭据、订阅 URL、生产签名材料或真实用户日志。
-- 公开仓库中的第三方源码、WebView 快照、字体、图标和二进制资源仍受其各自许可证约束；请阅读 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 及资源目录中的许可证文件。
+本项目不是 OpenAI、Termux、Mihomo、MetaCubeX、codex-web 或 RikkaHub 的官方产品。
 
 ## 许可证
 
-Android 基础工程按 GPLv3-only 发布，模块例外和第三方许可证以各目录中的原始文件为准。详见 [`LICENSE.md`](LICENSE.md) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。上游 Termux 文档和项目说明见 [termux/termux-app](https://github.com/termux/termux-app)。
+Android 基础工程采用 [GPL-3.0-only](LICENSE.md) 许可证。第三方组件和资源遵循各自许可证，详情请查看 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-问题反馈和功能讨论请使用 [GitHub Issues](https://github.com/illlyy/Fcode/issues)。
+---
+
+<p align="center">由 <a href="https://github.com/illlyy">ILY_op</a> 维护</p>

@@ -44,4 +44,37 @@ public class NativeStreamEventBatcherTest {
         batcher.clear();
         assertTrue(batcher.drain().isEmpty());
     }
+
+    @Test
+    public void standaloneLifecyclePayloadsAreNeverConcatenated() {
+        NativeStreamEventBatcher batcher = new NativeStreamEventBatcher();
+        batcher.offerSeparate("onProtocolEvent", "{\"kind\":\"assistantCompleted\"}");
+        batcher.offerSeparate("onProtocolEvent", "{\"kind\":\"turnCompleted\"}");
+
+        List<NativeStreamEventBatcher.Event> events = batcher.drain();
+        assertEquals(2, events.size());
+        assertEquals("{\"kind\":\"assistantCompleted\"}", events.get(0).value);
+        assertEquals("{\"kind\":\"turnCompleted\"}", events.get(1).value);
+    }
+
+    @Test
+    public void adjacentDeltasNeverMergeAcrossRouteEpochs() {
+        NativeRouteEventGate gate = new NativeRouteEventGate();
+        gate.resetRoute(1, "thread-a", true);
+        NativeRouteEventGate.RouteToken routeA = gate.captureRouteToken("thread-a");
+
+        NativeStreamEventBatcher batcher = new NativeStreamEventBatcher();
+        batcher.offer("onProtocolDelta", "old", routeA);
+
+        gate.resetRoute(2, "thread-b", true);
+        NativeRouteEventGate.RouteToken routeB = gate.captureRouteToken("thread-b");
+        batcher.offer("onProtocolDelta", "new", routeB);
+
+        List<NativeStreamEventBatcher.Event> events = batcher.drain();
+        assertEquals(2, events.size());
+        assertEquals("old", events.get(0).value);
+        assertEquals("new", events.get(1).value);
+        assertFalse(gate.isCurrent(events.get(0).routeToken));
+        assertTrue(gate.isCurrent(events.get(1).routeToken));
+    }
 }

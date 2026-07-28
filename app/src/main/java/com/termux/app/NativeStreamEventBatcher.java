@@ -15,19 +15,24 @@ final class NativeStreamEventBatcher {
     static final class Event {
         final String function;
         final String value;
+        final NativeRouteEventGate.RouteToken routeToken;
 
-        Event(String function, String value) {
+        Event(String function, String value, NativeRouteEventGate.RouteToken routeToken) {
             this.function = function;
             this.value = value;
+            this.routeToken = routeToken;
         }
     }
 
     private static final class PendingEvent {
         final String function;
         final StringBuilder value = new StringBuilder();
+        final NativeRouteEventGate.RouteToken routeToken;
 
-        PendingEvent(String function, String initialValue) {
+        PendingEvent(String function, String initialValue,
+                     NativeRouteEventGate.RouteToken routeToken) {
             this.function = function;
+            this.routeToken = routeToken;
             value.append(initialValue);
         }
     }
@@ -36,12 +41,34 @@ final class NativeStreamEventBatcher {
     private int pendingChars;
 
     synchronized boolean offer(String function, String value) {
+        return offer(function, value, null, true);
+    }
+
+    synchronized boolean offer(String function, String value,
+                               NativeRouteEventGate.RouteToken routeToken) {
+        return offer(function, value, routeToken, true);
+    }
+
+    /** Add an ordering barrier whose payload must remain a standalone event. */
+    synchronized boolean offerSeparate(String function, String value) {
+        return offer(function, value, null, false);
+    }
+
+    synchronized boolean offerSeparate(String function, String value,
+                                       NativeRouteEventGate.RouteToken routeToken) {
+        return offer(function, value, routeToken, false);
+    }
+
+    private boolean offer(String function, String value, NativeRouteEventGate.RouteToken routeToken,
+                          boolean mergeAdjacent) {
         String safeValue = value == null ? "" : value;
         int lastIndex = pending.size() - 1;
-        if (lastIndex >= 0 && pending.get(lastIndex).function.equals(function)) {
-            pending.get(lastIndex).value.append(safeValue);
+        PendingEvent previous = lastIndex >= 0 ? pending.get(lastIndex) : null;
+        if (mergeAdjacent && previous != null && previous.function.equals(function)
+                && sameRoute(previous.routeToken, routeToken)) {
+            previous.value.append(safeValue);
         } else {
-            pending.add(new PendingEvent(function, safeValue));
+            pending.add(new PendingEvent(function, safeValue, routeToken));
         }
         pendingChars += safeValue.length();
         return pendingChars >= 4096;
@@ -51,7 +78,7 @@ final class NativeStreamEventBatcher {
         if (pending.isEmpty()) return java.util.Collections.emptyList();
         ArrayList<Event> result = new ArrayList<>(pending.size());
         for (PendingEvent event : pending) {
-            result.add(new Event(event.function, event.value.toString()));
+            result.add(new Event(event.function, event.value.toString(), event.routeToken));
         }
         pending.clear();
         pendingChars = 0;
@@ -65,5 +92,11 @@ final class NativeStreamEventBatcher {
     synchronized void clear() {
         pending.clear();
         pendingChars = 0;
+    }
+
+    private static boolean sameRoute(NativeRouteEventGate.RouteToken left,
+                                     NativeRouteEventGate.RouteToken right) {
+        if (left == null || right == null) return left == right;
+        return left.belongsToSameRoute(right);
     }
 }

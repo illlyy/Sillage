@@ -1842,6 +1842,11 @@ private fun Modifier.interactiveLiquidAction(
     tint: Color,
     onClick: () -> Unit,
 ): Modifier {
+    // pointerInput is intentionally keyed only by enabled so unrelated recompositions do not
+    // cancel an in-progress press. Keep the action itself current, though: the composer can move
+    // from "send this draft" to "stop the active turn" while both states remain enabled. Capturing
+    // the original lambda here would let an empty composer resend the previous draft.
+    val latestOnClick by rememberUpdatedState(onClick)
     var pressed by remember { mutableStateOf(false) }
     var pointer by remember { mutableStateOf(Offset.Zero) }
     var startPointer by remember { mutableStateOf(Offset.Zero) }
@@ -1910,7 +1915,7 @@ private fun Modifier.interactiveLiquidAction(
         )
         .semantics {
             role = Role.Button
-            onClick { if (enabled) onClick(); enabled }
+            onClick { if (enabled) latestOnClick(); enabled }
         }
         .pointerInput(enabled) {
             if (!enabled) return@pointerInput
@@ -1931,7 +1936,7 @@ private fun Modifier.interactiveLiquidAction(
                     active = change.pressed
                 }
                 pressed = false
-                if (!moved && !canceled) onClick()
+                if (!moved && !canceled) latestOnClick()
             }
         }
 }
@@ -7015,10 +7020,27 @@ private fun ComposerActionButton(
     liquidGlassTint: Color = Color.Transparent,
 ) {
     val inputText = textState.text.toString()
-    val hasDraft = inputText.isNotBlank() || hasAttachments
-    val stopMode = loading && !hasDraft
-    val canActivate = stopMode || (enabled && hasDraft)
-    val activate = if (stopMode) onStop else ({ onSend(inputText) })
+    val action = nativeComposerAction(inputText, hasAttachments, enabled, loading)
+    val stopMode = action == NativeComposerAction.STOP
+    val canActivate = action != NativeComposerAction.DISABLED
+    val latestEnabled by rememberUpdatedState(enabled)
+    val latestLoading by rememberUpdatedState(loading)
+    val latestHasAttachments by rememberUpdatedState(hasAttachments)
+    val latestOnStop by rememberUpdatedState(onStop)
+    val latestOnSend by rememberUpdatedState(onSend)
+    val activate: () -> Unit = remember(textState) {
+        {
+            // The field is the source of truth at gesture completion. In particular, a steer send
+            // clears it while the active-turn action stays enabled and changes meaning to Stop.
+            // Never let a pointer callback captured before that transition reuse the old draft.
+            val currentInput = textState.text.toString()
+            when (nativeComposerAction(currentInput, latestHasAttachments, latestEnabled, latestLoading)) {
+                NativeComposerAction.SEND -> latestOnSend(currentInput)
+                NativeComposerAction.STOP -> latestOnStop()
+                NativeComposerAction.DISABLED -> Unit
+            }
+        }
+    }
     val actionModifier = if (liquidGlass && backdrop != null && glassConfig != null) {
         modifier.interactiveLiquidAction(
             enabled = canActivate,

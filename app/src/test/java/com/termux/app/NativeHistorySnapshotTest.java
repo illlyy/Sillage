@@ -67,6 +67,47 @@ public class NativeHistorySnapshotTest {
     }
 
     @Test
+    public void dedicatedPlanCardSuppressesDuplicateInlinePlanPanelOnRestore() throws Exception {
+        JSONObject plan = new JSONObject()
+            .put("plan", new JSONArray().put(new JSONObject().put("step", "Inspect").put("status", "pending")))
+            .put("explanation", "First inspect the project");
+        JSONArray history = new JSONArray()
+            .put(new JSONObject().put("role", "user").put("content", "make a plan"))
+            .put(new JSONObject().put("role", "activity").put("content", encoded("PLAN|", plan)))
+            .put(new JSONObject().put("role", "activity").put("content", "PROPOSED_PLAN|# Plan\n- Inspect"));
+
+        NativeChatState state = new NativeChatState();
+        state.applyHistorySnapshot(NativeHistoryParser.parse(history));
+
+        assertEquals(2, state.getMessages().size());
+        assertEquals(1, state.getMessages().stream()
+            .filter(message -> message.getContent().startsWith("PROPOSED_PLAN|"))
+            .count());
+        assertFalse(state.getMessages().stream()
+            .anyMatch(message -> message.getContent().startsWith("PLAN_PANEL|")));
+        assertEquals("First inspect the project", state.getPlanExplanation());
+    }
+
+    @Test
+    public void collectsUniqueCompletedProtocolItemIdsFromHistoryMessages() throws Exception {
+        JSONArray history = new JSONArray()
+            .put(new JSONObject().put("role", "assistant").put("content", "answer")
+                .put("protocolItemId", " assistant-1 "))
+            .put(new JSONObject().put("role", "activity").put("content", "PROPOSED_PLAN|# Plan")
+                .put("protocolItemId", "plan-1"))
+            .put(new JSONObject().put("role", "assistant").put("content", "duplicate id")
+                .put("protocolItemId", "assistant-1"))
+            .put(new JSONObject().put("role", "assistant").put("content", "legacy message")
+                .put("protocolItemId", "   "));
+
+        NativeHistorySnapshot snapshot = NativeHistoryParser.parse(history);
+
+        assertEquals(2, snapshot.getCompletedProtocolItemIds().size());
+        assertTrue(snapshot.getCompletedProtocolItemIds().contains("assistant-1"));
+        assertTrue(snapshot.getCompletedProtocolItemIds().contains("plan-1"));
+    }
+
+    @Test
     public void compactsLegacyCommandOutputWhileParsingProcessHistory() throws Exception {
         String output = "terminal-line\n".repeat(20_000);
         JSONObject command = new JSONObject()
@@ -162,7 +203,8 @@ public class NativeHistorySnapshotTest {
     }
 
     private static NativeHistorySnapshot snapshot(int estimatedChars) {
-        return new NativeHistorySnapshot(Collections.emptyList(), "[]", "", -1, estimatedChars, 0L);
+        return new NativeHistorySnapshot(
+            Collections.emptyList(), "[]", "", -1, estimatedChars, 0L, Collections.emptySet());
     }
 
     private static String encoded(String prefix, JSONObject value) {

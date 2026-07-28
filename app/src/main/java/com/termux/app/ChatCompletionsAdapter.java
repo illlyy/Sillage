@@ -376,6 +376,93 @@ final class ChatCompletionsAdapter {
         return value.startsWith("data:") || value.startsWith("event:") || value.startsWith(":");
     }
 
+    /**
+     * Converts provider-specific cumulative text snapshots back into strict deltas.
+     * Some Chat Completions-compatible endpoints replay all text generated so far in
+     * every chunk, while others replay a short suffix before continuing. The adapter
+     * must expose only the novel suffix to the Responses streaming protocol.
+     */
+    private static final class TextDeltaNormalizer {
+        private static final int MIN_REPLAY_OVERLAP = 2;
+
+        private final StringBuilder accumulated;
+        private boolean cumulativeSnapshots;
+
+        TextDeltaNormalizer(StringBuilder accumulated) {
+            this.accumulated = accumulated;
+        }
+
+        String accept(Object value) {
+            String incoming = valueText(value);
+            if (incoming.isEmpty()) return "";
+
+            String novel = incoming;
+            int currentLength = accumulated.length();
+            if (currentLength > 0) {
+                if (incoming.contentEquals(accumulated)) {
+                    if (cumulativeSnapshots) novel = "";
+                } else if (startsWith(incoming, accumulated)) {
+                    // Preserve an ambiguous repeated short delta such as "ha" + "ha".
+                    if (!isDoubledValue(incoming, accumulated)) {
+                        cumulativeSnapshots = true;
+                        novel = incoming.substring(currentLength);
+                    }
+                } else {
+                    int overlap = replayOverlap(accumulated, incoming);
+                    if (overlap >= MIN_REPLAY_OVERLAP) novel = incoming.substring(overlap);
+                }
+            }
+            accumulated.append(novel);
+            return novel;
+        }
+
+        private static boolean startsWith(String value, CharSequence prefix) {
+            return matchesAt(value, 0, prefix);
+        }
+
+        private static boolean isDoubledValue(String value, CharSequence prefix) {
+            int length = prefix.length();
+            return value.length() - length == length && matchesAt(value, length, prefix);
+        }
+
+        private static boolean matchesAt(String value, int offset, CharSequence expected) {
+            if (offset < 0 || value.length() - offset < expected.length()) return false;
+            for (int i = 0; i < expected.length(); i++) {
+                if (value.charAt(offset + i) != expected.charAt(i)) return false;
+            }
+            return true;
+        }
+
+        private static int replayOverlap(CharSequence current, String incoming) {
+            // A replay must still contain novel text; a suffix-only chunk is too
+            // ambiguous to distinguish from a legitimate repeated delta.
+            int maximum = Math.min(current.length(), incoming.length() - 1);
+            for (int overlap = maximum; overlap >= MIN_REPLAY_OVERLAP; overlap--) {
+                if (!suffixMatches(current, incoming, overlap)) continue;
+                if (Character.isWhitespace(incoming.charAt(overlap - 1))) continue;
+                if (containsLetterOrDigit(incoming, overlap)) return overlap;
+            }
+            return 0;
+        }
+
+        private static boolean suffixMatches(CharSequence current, String incoming, int overlap) {
+            int currentOffset = current.length() - overlap;
+            for (int i = 0; i < overlap; i++) {
+                if (current.charAt(currentOffset + i) != incoming.charAt(i)) return false;
+            }
+            return true;
+        }
+
+        private static boolean containsLetterOrDigit(String value, int end) {
+            for (int offset = 0; offset < end;) {
+                int codePoint = value.codePointAt(offset);
+                if (Character.isLetterOrDigit(codePoint)) return true;
+                offset += Character.charCount(codePoint);
+            }
+            return false;
+        }
+    }
+
     private static final class ChatStreamState {
         private final String responseId = "resp_" + shortId();
         private final Set<String> customTools;
@@ -384,6 +471,8 @@ final class ChatCompletionsAdapter {
         private final StreamStats stats;
         private final StringBuilder text = new StringBuilder();
         private final StringBuilder reasoning = new StringBuilder();
+        private final TextDeltaNormalizer textDeltas = new TextDeltaNormalizer(text);
+        private final TextDeltaNormalizer reasoningDeltas = new TextDeltaNormalizer(reasoning);
         private final Map<Integer,ToolCall> tools = new LinkedHashMap<>();
         private final JSONArray completedOutput = new JSONArray();
         private String model;
@@ -440,9 +529,9 @@ final class ChatCompletionsAdapter {
             if (choice == null) return;
             JSONObject delta = choice.optJSONObject("delta");
             if (delta != null) {
-                String reasoningDelta = valueText(delta.opt("reasoning_content"));
+                String reasoningDelta = reasoningDeltas.accept(delta.opt("reasoning_content"));
                 if (!reasoningDelta.isEmpty()) appendReasoningDelta(reasoningDelta);
-                String textDelta = valueText(delta.opt("content"));
+                String textDelta = textDeltas.accept(delta.opt("content"));
                 if (!textDelta.isEmpty()) appendTextDelta(textDelta);
                 mergeToolCalls(tools, delta.optJSONArray("tool_calls"));
             }
@@ -466,13 +555,9 @@ final class ChatCompletionsAdapter {
         }
 
         private void appendReasoningDelta(String delta) throws Exception {
-            if (reasoningDone) {
-                reasoning.append(delta);
-                return;
-            }
+            if (reasoningDone) return;
             if (messageOpened && !messageDone) closeMessage();
             openReasoning();
-            reasoning.append(delta);
             emitEvent(new JSONObject().put("type", "response.reasoning_summary_text.delta")
                 .put("item_id", reasoningItemId).put("output_index", reasoningOutputIndex)
                 .put("summary_index", 0).put("delta", delta));
@@ -513,12 +598,8 @@ final class ChatCompletionsAdapter {
 
         private void appendTextDelta(String delta) throws Exception {
             if (reasoningOpened && !reasoningDone) closeReasoning();
-            if (messageDone) {
-                text.append(delta);
-                return;
-            }
+            if (messageDone) return;
             openMessage();
-            text.append(delta);
             emitEvent(new JSONObject().put("type", "response.output_text.delta")
                 .put("item_id", messageItemId).put("output_index", messageOutputIndex)
                 .put("content_index", 0).put("delta", delta).put("logprobs", new JSONArray()));
@@ -651,11 +732,12 @@ final class ChatCompletionsAdapter {
     static ChatResult chatResponseToResponses(byte[] source, String contentType, String fallbackModel, Set<String> customTools,NamespacedTools namespacedTools) throws Exception {
         String raw=new String(source,StandardCharsets.UTF_8); String model=fallbackModel; String responseId="resp_"+shortId(); StringBuilder text=new StringBuilder(); StringBuilder reasoning=new StringBuilder(); Map<Integer,ToolCall> tools=new LinkedHashMap<>(); JSONObject usage=null;
         if(contentType!=null&&contentType.toLowerCase().contains("text/event-stream")||raw.contains("data:")) {
+            TextDeltaNormalizer textDeltas=new TextDeltaNormalizer(text), reasoningDeltas=new TextDeltaNormalizer(reasoning);
             String[] lines=raw.split("\\r?\\n");
             for(String line:lines) { if(!line.startsWith("data:")) continue; String data=line.substring(5).trim(); if(data.isEmpty()||"[DONE]".equals(data)) continue;
                 JSONObject chunk; try{chunk=new JSONObject(data);}catch(Exception ignored){continue;} if(!chunk.optString("model").isEmpty())model=chunk.optString("model"); if(chunk.optJSONObject("usage")!=null)usage=chunk.optJSONObject("usage");
                 JSONArray choices=chunk.optJSONArray("choices"); if(choices==null||choices.length()==0)continue; JSONObject delta=choices.optJSONObject(0).optJSONObject("delta"); if(delta==null)continue;
-                appendValue(text,delta.opt("content")); appendValue(reasoning,delta.opt("reasoning_content")); mergeToolCalls(tools,delta.optJSONArray("tool_calls"));
+                textDeltas.accept(delta.opt("content")); reasoningDeltas.accept(delta.opt("reasoning_content")); mergeToolCalls(tools,delta.optJSONArray("tool_calls"));
             }
         } else {
             JSONObject root=new JSONObject(raw); if(!root.optString("model").isEmpty())model=root.optString("model"); usage=root.optJSONObject("usage"); JSONArray choices=root.optJSONArray("choices");

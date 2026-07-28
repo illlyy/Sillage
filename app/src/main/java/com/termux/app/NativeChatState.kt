@@ -820,6 +820,21 @@ internal class NativeChatState {
         val requestedMessageId = proposedPlanMessageId(resolvedItemId)
         val normalizedIncoming = text.trim().replace(Regex("\\s+"), " ")
         val currentTurnStart = turnMessageStartIndex.coerceIn(0, messages.size)
+        if (normalizedIncoming.isNotBlank()) {
+            // `turn/plan/updated` may create a temporary checklist card before the final
+            // proposed-plan item arrives. The final card is the one durable conversation
+            // artifact; keep planJson for the work panel, but never show both inline.
+            var removedPanel = false
+            for (index in messages.lastIndex downTo currentTurnStart) {
+                val candidate = messages[index]
+                if (candidate.role == NativeChatRole.ACTIVITY && candidate.content.startsWith("PLAN_PANEL|")) {
+                    messages.removeAt(index)
+                    if (index < phaseMessageStartIndex) phaseMessageStartIndex--
+                    removedPanel = true
+                }
+            }
+            if (removedPanel) planPanelAdded = false
+        }
         val exactIndex = (currentTurnStart until messages.size).firstOrNull { index ->
             val candidate = messages[index]
             candidate.id == requestedMessageId && candidate.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
@@ -905,7 +920,11 @@ internal class NativeChatState {
     }
 
     fun finishPlanPanel(stepCount: Int = 0) {
-        val index = messages.indexOfFirst { it.role == NativeChatRole.ACTIVITY && it.content.startsWith("PLAN_PANEL|") }
+        val currentTurnStart = turnMessageStartIndex.coerceIn(0, messages.size)
+        val index = (messages.lastIndex downTo currentTurnStart).firstOrNull { candidateIndex ->
+            val candidate = messages[candidateIndex]
+            candidate.role == NativeChatRole.ACTIVITY && candidate.content.startsWith("PLAN_PANEL|")
+        } ?: -1
         if (index >= 0) {
             messages[index] = messages[index].copy(content = "PLAN_PANEL|complete|$stepCount")
             revision++
@@ -913,8 +932,22 @@ internal class NativeChatState {
     }
 
     fun ensurePlanPanel() {
-        if (messages.none { it.role == NativeChatRole.ACTIVITY && it.content.startsWith("PLAN_PANEL|") }) {
-            val insertAt = messages.indexOfLast { it.role == NativeChatRole.ASSISTANT }.takeIf { it >= 0 } ?: messages.size
+        val currentTurnStart = turnMessageStartIndex.coerceIn(0, messages.size)
+        val currentTurn = currentTurnStart until messages.size
+        if (currentTurn.any { index ->
+                val message = messages[index]
+                message.role == NativeChatRole.ACTIVITY && message.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+            }) {
+            planPanelAdded = false
+            return
+        }
+        if (currentTurn.none { index ->
+                val message = messages[index]
+                message.role == NativeChatRole.ACTIVITY && message.content.startsWith("PLAN_PANEL|")
+            }) {
+            val insertAt = (messages.lastIndex downTo currentTurnStart).firstOrNull { index ->
+                messages[index].role == NativeChatRole.ASSISTANT
+            } ?: messages.size
             messages.add(insertAt, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = "PLAN_PANEL|"))
         }
         planPanelAdded = true
@@ -1150,7 +1183,10 @@ internal class NativeChatState {
             planExplanation = cachedPlanExplanation
             planPanelIndex = parsed.size
         }
-        if (planJson != "[]") {
+        val hasDedicatedPlanCard = parsed.any { message ->
+            message.role == NativeChatRole.ACTIVITY && message.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
+        }
+        if (planJson != "[]" && !hasDedicatedPlanCard) {
             val count = runCatching { JSONArray(planJson).length() }.getOrDefault(0)
             parsed.add(
                 planPanelIndex.coerceIn(0, parsed.size),

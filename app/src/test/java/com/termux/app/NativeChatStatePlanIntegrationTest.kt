@@ -200,4 +200,25 @@ class NativeChatStatePlanIntegrationTest {
         assertEquals(2, plans.size)
         assertEquals(2, plans.map { it.id }.toSet().size)
     }
+
+    @Test
+    fun dedicatedPlanReplacesTemporaryInlinePlanPanelWithinTheTurn() {
+        val state = NativeChatState()
+        state.currentThreadId = "thread"
+        state.addUser("make a plan")
+        state.ensurePlanPanel()
+        state.finishPlanPanel(2)
+
+        state.startProposedPlan(
+            """{"item":{"type":"plan","id":"plan-1","text":"# Plan\n- inspect\n- implement"}}""",
+        )
+
+        val inlinePlans = state.messages.filter {
+            it.role == NativeChatRole.ACTIVITY &&
+                (it.content.startsWith("PLAN_PANEL|") || it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX))
+        }
+        assertEquals(1, inlinePlans.size)
+        assertTrue(inlinePlans.single().content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX))
+        assertEquals("# Plan\n- inspect\n- implement", decodeNativeProposedPlan(inlinePlans.single().content))
+    }
 }

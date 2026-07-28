@@ -868,10 +868,86 @@ public class CodexModelPipelineTest {
         synchronized (output) { completedBytes = output.toByteArray(); }
         String events = new String(completedBytes, StandardCharsets.UTF_8);
         assertTrue(events.indexOf("\"delta\":\"Hel\"") < events.indexOf("\"delta\":\"lo\""));
+        assertEquals(java.util.Arrays.asList("Hel", "lo"),
+            responseDeltas(completedBytes, "response.output_text.delta"));
         JSONObject completed = completedResponse(completedBytes);
         assertEquals("Hello", completed.getJSONArray("output").getJSONObject(0)
             .getJSONArray("content").getJSONObject(0).getString("text"));
         assertEquals(5, completed.getJSONObject("usage").getInt("total_tokens"));
+    }
+
+    @Test
+    public void chatSseAdapterNormalizesCumulativeTextSnapshots() throws Exception {
+        String sse = sseData(chatChunk(new JSONObject().put("content", "Hel"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "Hello"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "Hello"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "Hello world"), "stop"))
+            + "data: [DONE]\n\n";
+
+        StreamCapture capture = convertChatStream(sse, "text/event-stream", Collections.emptySet());
+
+        assertEquals(java.util.Arrays.asList("Hel", "lo", " world"),
+            responseDeltas(capture.bytes(), "response.output_text.delta"));
+        JSONObject completed = completedResponse(capture.bytes());
+        assertEquals("Hello world", completed.getJSONArray("output").getJSONObject(0)
+            .getJSONArray("content").getJSONObject(0).getString("text"));
+    }
+
+    @Test
+    public void chatSseAdapterNormalizesReasoningAndReplayedTextIndependently() throws Exception {
+        String sse = sseData(chatChunk(
+                new JSONObject().put("reasoning_content", "think"), JSONObject.NULL))
+            + sseData(chatChunk(
+                new JSONObject().put("reasoning_content", "thinking"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "Hello"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "lo world"), "stop"))
+            + "data: [DONE]\n\n";
+
+        StreamCapture capture = convertChatStream(sse, "text/event-stream", Collections.emptySet());
+
+        assertEquals(java.util.Arrays.asList("think", "ing"),
+            responseDeltas(capture.bytes(), "response.reasoning_summary_text.delta"));
+        assertEquals(java.util.Arrays.asList("Hello", " world"),
+            responseDeltas(capture.bytes(), "response.output_text.delta"));
+        JSONArray output = completedResponse(capture.bytes()).getJSONArray("output");
+        assertEquals("thinking", output.getJSONObject(0).getJSONArray("summary")
+            .getJSONObject(0).getString("text"));
+        assertEquals("Hello world", output.getJSONObject(1).getJSONArray("content")
+            .getJSONObject(0).getString("text"));
+    }
+
+    @Test
+    public void chatSseAdapterPreservesLegitimateRepeatedDeltas() throws Exception {
+        String sse = sseData(chatChunk(new JSONObject().put("content", "哈哈哈"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "哈哈哈"), "stop"))
+            + "data: [DONE]\n\n";
+
+        StreamCapture capture = convertChatStream(sse, "text/event-stream", Collections.emptySet());
+
+        assertEquals(java.util.Arrays.asList("哈哈哈", "哈哈哈"),
+            responseDeltas(capture.bytes(), "response.output_text.delta"));
+        assertEquals("哈哈哈哈哈哈", completedResponse(capture.bytes()).getJSONArray("output")
+            .getJSONObject(0).getJSONArray("content").getJSONObject(0).getString("text"));
+    }
+
+    @Test
+    public void bufferedChatSseAdapterUsesTheSameSnapshotNormalization() throws Exception {
+        String sse = sseData(chatChunk(
+                new JSONObject().put("reasoning_content", "think"), JSONObject.NULL))
+            + sseData(chatChunk(
+                new JSONObject().put("reasoning_content", "thinking"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "Hel"), JSONObject.NULL))
+            + sseData(chatChunk(new JSONObject().put("content", "Hello"), "stop"))
+            + "data: [DONE]\n\n";
+
+        JSONObject completed = completedResponse(ChatCompletionsAdapter.chatResponseToResponses(
+            sse.getBytes(StandardCharsets.UTF_8), "text/event-stream", "demo"));
+
+        JSONArray output = completed.getJSONArray("output");
+        assertEquals("thinking", output.getJSONObject(0).getJSONArray("summary")
+            .getJSONObject(0).getString("text"));
+        assertEquals("Hello", output.getJSONObject(1).getJSONArray("content")
+            .getJSONObject(0).getString("text"));
     }
 
     @Test
@@ -1063,6 +1139,17 @@ public class CodexModelPipelineTest {
 
     private static JSONObject completedResponse(ChatCompletionsAdapter.ChatResult result) throws Exception {
         return completedResponse(result.body);
+    }
+
+    private static java.util.List<String> responseDeltas(byte[] body, String type) throws Exception {
+        java.util.List<String> deltas = new java.util.ArrayList<>();
+        String[] lines = new String(body, StandardCharsets.UTF_8).split("\r?\n");
+        for (String line : lines) {
+            if (!line.startsWith("data: ")) continue;
+            JSONObject event = new JSONObject(line.substring(6));
+            if (type.equals(event.optString("type"))) deltas.add(event.optString("delta"));
+        }
+        return deltas;
     }
 
 
