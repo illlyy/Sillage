@@ -3238,9 +3238,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         hideNativeStatusBar = prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)
         applyNativeStatusBarVisibility(hideNativeStatusBar)
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
-        val installUpdateRequested = intent?.getBooleanExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE, false) == true
-        intent?.removeExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE)
-        AppUpdateManager.resumePendingInstall(this, nativeLanguage, userInitiated = installUpdateRequested)
+        AppUpdateManager.clearLegacyDownloadState(this)
         AppUpdateManager.checkAutomatically(this, nativeLanguage)
         bridge?.loadSkills()
         reloadProviderConfigurationIfChanged()
@@ -3256,10 +3254,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE, false)) {
-            intent.removeExtra(AppUpdateManager.EXTRA_INSTALL_UPDATE)
-            AppUpdateManager.resumePendingInstall(this, nativeLanguage, userInitiated = true)
-        }
         val threadId = intent.getStringExtra(NativeTaskNotificationManager.EXTRA_THREAD_ID).orEmpty()
         if (threadId.isBlank()) return
         notificationTargetThreadId = threadId

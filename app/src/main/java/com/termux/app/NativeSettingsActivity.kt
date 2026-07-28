@@ -691,10 +691,7 @@ class NativeSettingsActivity : ComponentActivity() {
         if (hasResumedOnce) resumeRevision++ else hasResumedOnce = true
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
-        AppUpdateManager.resumePendingInstall(
-            this,
-            resolveLanguage(prefs.getString(KEY_LANGUAGE, "system").orEmpty()),
-        )
+        AppUpdateManager.clearLegacyDownloadState(this)
     }
 
     private fun applyNativeStatusBarVisibility(hidden: Boolean) {
@@ -2991,7 +2988,7 @@ private fun AboutSettingsPage(
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
                 ) {
                     Text(
-                        tr(lang, "为移动端 Codex 工作流打造。更新包会在安装前校验版本、包名、签名证书和 SHA-256。", "Built for mobile Codex workflows. Update packages are verified for version, package name, signing certificate and SHA-256 before installation."),
+                        tr(lang, "为移动端 Codex 工作流打造。更新清单来自 GitHub Releases，APK 通过浏览器下载，安装时由 Android 校验应用签名。", "Built for mobile Codex workflows. Update metadata comes from GitHub Releases, APKs download in the browser, and Android verifies the app signature during installation."),
                         modifier = Modifier.padding(16.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -9,7 +9,7 @@ Fcode 是一个基于 Termux Android 工程的非官方应用，集成 Codex Web
 - 在 Android 上运行 Codex Web/native 对话界面。
 - 保留 Termux 的终端和会话能力，应用包名为 `com.ilyop.codex`。
 - 集成 Mihomo/MetaCubeXD 资源和 Fcode 自定义 UI。
-- 从 GitHub Releases 检查更新、下载 APK，并在安装前校验版本、包名、签名证书和 SHA-256。
+- 从 GitHub Releases 检查更新，并使用默认浏览器打开正式 APK 下载链接。
 
 ## 下载与安装
 
@@ -130,7 +130,7 @@ Linux/macOS：
 | `sha256` | APK 的 64 位十六进制 SHA-256 |
 | `changelog` | 弹窗和 Release 中显示的更新内容 |
 
-客户端只信任 HTTPS 清单，并在安装前再次读取 APK 元数据和签名证书。没有正式 Release 时，`update.json` 不存在是正常的；发布第一个匹配版本的 tag 后，地址才会生效。
+客户端只信任 HTTPS 清单，并依据 `versionCode` 判断是否存在新版本；确认更新后会用默认浏览器打开 `apkUrl`。下载完成后由 Android 安装器校验应用签名，Release 同时提供 SHA-256 供手动核对。没有正式 Release 时，`update.json` 不存在是正常的；发布第一个匹配版本的 tag 后，地址才会生效。
 
 ## 分支策略
 
