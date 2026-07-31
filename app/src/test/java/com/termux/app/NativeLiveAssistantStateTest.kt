@@ -103,6 +103,21 @@ class NativeLiveAssistantStateTest {
         assertEquals(10, usage.outputTokens)
         assertTrue(usage.estimated)
     }
+
+    @Test
+    fun recoverableNoticeDoesNotMarkTheTurnFailed() {
+        val state = NativeChatState()
+        state.phase = NativeTurnPhase.WAITING
+        state.connectionLabel = "正在恢复对话…"
+
+        state.addNotice("Conversation history loading timed out")
+
+        assertEquals(NativeTurnPhase.WAITING, state.phase)
+        assertEquals("正在恢复对话…", state.connectionLabel)
+        assertEquals(NativeChatRole.ACTIVITY, state.messages.last().role)
+        assertEquals("NOTICE|Conversation history loading timed out", state.messages.last().content)
+    }
+
     @Test
     fun protocolTagsAreRemovedWithThePrecompiledStreamMatcher() {
         val state = NativeChatState()

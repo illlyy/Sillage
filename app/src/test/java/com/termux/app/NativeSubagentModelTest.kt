@@ -20,6 +20,18 @@ class NativeSubagentModelTest {
     }
 
     @Test
+    fun threadIdAcceptsSnakeCaseAndObjectReceiverShapes() {
+        val snake = JSONObject().put("agent_thread_id", "snake-thread")
+        val objectReceiver = JSONObject().put(
+            "receiver_thread_ids",
+            JSONArray().put(JSONObject().put("thread_id", "receiver-object")),
+        )
+
+        assertEquals("snake-thread", subagentThreadId(snake))
+        assertEquals("receiver-object", subagentThreadId(objectReceiver))
+    }
+
+    @Test
     fun historicalAndLiveItemsMergeByCallOrThreadAndLiveStateWins() {
         val historicalSpawn = JSONObject()
             .put("type", "collabAgentToolCall")
@@ -85,6 +97,28 @@ class NativeSubagentModelTest {
         assertEquals(1, result.size)
         assertEquals("done", jsonText(result.single(), "status"))
         assertEquals("new", jsonText(result.single(), "output"))
+    }
+
+    @Test
+    fun drawerAnchorUsesRichMatchingItemAndFillsVisualIdentity() {
+        val candidate = JSONObject()
+            .put("type", "collabAgentToolCall")
+            .put("callId", "call-7")
+            .put("task", "Inspect the renderer")
+        val visual = NativeSubagentVisualFactory.create(
+            agentThreadId = "thread-7",
+            callId = "call-7",
+            name = "reviewer",
+            status = "running",
+        )
+
+        val anchor = subagentDrawerAnchor(visual, listOf(candidate))
+
+        assertEquals("thread-7", subagentThreadId(anchor))
+        assertEquals("call-7", jsonText(anchor, "callId"))
+        assertEquals("Inspect the renderer", jsonText(anchor, "task"))
+        assertEquals("reviewer", subagentName(anchor))
+        assertEquals("working", normalizedSubagentStatus(jsonText(anchor, "status")))
     }
 
     @Test

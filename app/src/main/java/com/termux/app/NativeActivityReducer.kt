@@ -134,7 +134,12 @@ internal class NativeActivityReducer(
         val previousSequence = lastSequenceByThread[sequenceThread] ?: Long.MIN_VALUE
         if (event.sequence > 0L && event.sequence <= previousSequence) return snapshot()
         if (event.sequence > previousSequence) lastSequenceByThread[sequenceThread] = event.sequence
-        event.turnId?.takeIf { it.isNotBlank() }?.let { lastTurnIdByThread[sequenceThread] = it }
+        if (event !is NativeProtocolEvent.CompactionStarted &&
+            event !is NativeProtocolEvent.CompactionCompleted &&
+            event !is NativeProtocolEvent.CompactionFailed
+        ) {
+            event.turnId?.takeIf { it.isNotBlank() }?.let { lastTurnIdByThread[sequenceThread] = it }
+        }
         // A completion barrier can race a final command/output notification on older servers.
         // Permit that notification to update its already-correlated row, but never allocate a
         // fresh exploration group after the turn has been closed.
@@ -166,6 +171,7 @@ internal class NativeActivityReducer(
             is NativeProtocolEvent.Boundary,
             is NativeProtocolEvent.TurnCompleted,
             is NativeProtocolRawEvent -> handleBoundary(event)
+            is NativeProtocolEvent.TurnStarted -> Unit
             // Usage is metadata, not a visual boundary.  Token notifications are commonly
             // interleaved with reasoning/command deltas; treating them as boundaries recreates
             // the very one-command-per-capsule fragmentation this reducer is meant to remove.
@@ -190,9 +196,18 @@ internal class NativeActivityReducer(
     private fun turnKey(threadId: String, turnId: String?): String =
         threadId.ifBlank { "thread" } + ":" + (turnId.orEmpty().ifBlank { "turn" })
 
-    private fun effectiveTurnId(event: NativeProtocolEvent): String? =
-        event.turnId?.takeIf { it.isNotBlank() }
-            ?: lastTurnIdByThread[event.threadId.ifBlank { "thread" }]
+    private fun effectiveTurnId(event: NativeProtocolEvent): String? {
+        val lastPrimaryTurn = lastTurnIdByThread[event.threadId.ifBlank { "thread" }]
+        return if (event is NativeProtocolEvent.CompactionStarted ||
+            event is NativeProtocolEvent.CompactionCompleted ||
+            event is NativeProtocolEvent.CompactionFailed
+        ) {
+            // A context-compaction item can live in its own auxiliary turn, but visually it is a
+            // boundary inside the active conversation timeline. Correlate it with the last primary
+            // turn without ever teaching the reducer that the auxiliary id became current.
+            lastPrimaryTurn
+        } else event.turnId?.takeIf { it.isNotBlank() } ?: lastPrimaryTurn
+    }
 
     private fun eventTurnKey(event: NativeProtocolEvent): String =
         turnKey(event.threadId, effectiveTurnId(event))

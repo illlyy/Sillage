@@ -730,7 +730,7 @@ public class CodexModelPipelineTest {
     }
 
     @Test
-    public void onlyFinalAnswerAgentMessagesScheduleMissingTurnCompletion() throws Exception {
+    public void finalAnswerClassificationDoesNotTreatCommentaryAsFinal() throws Exception {
         JSONObject params = new JSONObject().put("item", new JSONObject()
             .put("type", "agentMessage").put("phase", "commentary"));
         assertTrue(CodexAppServerBridge.isAgentMessageItem(params));
@@ -749,7 +749,7 @@ public class CodexModelPipelineTest {
     }
 
     @Test
-    public void nestedThreadIdleStatusIsRecognizedAsAuthoritativeCompletion() throws Exception {
+    public void nestedThreadIdleStatusIsRecognizedWithoutMakingItATurnBoundary() throws Exception {
         JSONObject params = new JSONObject().put("threadId", "thread-1")
             .put("status", new JSONObject().put("type", "idle"));
         assertTrue(CodexAppServerBridge.isIdleThreadStatus(params));
@@ -758,17 +758,6 @@ public class CodexModelPipelineTest {
         assertFalse(CodexAppServerBridge.isIdleThreadStatus(params));
         assertFalse(CodexAppServerBridge.isIdleThreadStatus(new JSONObject().put("status", "idle")));
         assertFalse(CodexAppServerBridge.isIdleThreadStatus(null));
-    }
-
-    @Test
-    public void missingTurnFallbackWaitsForUpstreamAndIdleGracePeriod() {
-        int requiredIdleChecks = CodexAppServerBridge.MISSING_TURN_COMPLETION_IDLE_CHECKS;
-        assertTrue(requiredIdleChecks >= 2);
-        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(false, false, requiredIdleChecks));
-        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, true, requiredIdleChecks));
-        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, true, requiredIdleChecks + 100));
-        assertFalse(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, false, requiredIdleChecks - 1));
-        assertTrue(CodexAppServerBridge.shouldSynthesizeMissingTurnCompletion(true, false, requiredIdleChecks));
     }
 
     @Test
@@ -1182,6 +1171,114 @@ public class CodexModelPipelineTest {
         assertEquals("Inspect the project", card.getString("task"));
         assertEquals("Newton", card.getString("agentName"));
         assertEquals("working", card.getString("status"));
+    }
+
+    @Test
+    public void customToolRolloutIsKeptInSubagentProcessTimeline() throws Exception {
+        NativeCommandOutputStore.clear();
+        NativeLargePayloadStore.clear();
+        File session = File.createTempFile("native-custom-tool-history", ".jsonl");
+        try {
+            try (FileWriter writer = new FileWriter(session)) {
+                writeRollout(writer, new JSONObject().put("type", "response_item")
+                    .put("payload", new JSONObject().put("type", "reasoning")
+                        .put("summary", new JSONArray().put(new JSONObject()
+                            .put("type", "summary_text").put("text", "inspect files")))));
+                writeRollout(writer, new JSONObject().put("type", "response_item")
+                    .put("payload", new JSONObject().put("type", "custom_tool_call")
+                        .put("id", "ctc-1").put("call_id", "call-custom-1")
+                        .put("name", "exec")
+                        .put("input", "await tools.shell_command({command: \\\"Get-ChildItem\\\"});")));
+                writeRollout(writer, new JSONObject().put("type", "response_item")
+                    .put("payload", new JSONObject().put("type", "custom_tool_call_output")
+                        .put("call_id", "call-custom-1")
+                        .put("output", new JSONArray()
+                            .put(new JSONObject().put("type", "input_text")
+                                .put("text", "Script completed\n"))
+                            .put(new JSONObject().put("type", "input_text")
+                                .put("text", "Exit code: 0\nOutput:\nfile.txt\n")))));
+                // Inter-agent transport records are not user-visible assistant messages and must
+                // not duplicate commentary in the child detail timeline.
+                writeRollout(writer, new JSONObject().put("type", "response_item")
+                    .put("payload", new JSONObject().put("type", "agent_message")
+                        .put("content", new JSONArray().put(new JSONObject()
+                            .put("type", "input_text").put("text", "transport-only")))));
+                writeRollout(writer, responseMessage("assistant", "inspection complete"));
+            }
+
+            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            assertEquals(2, history.length());
+            JSONObject activity = history.getJSONObject(0);
+            assertEquals("activity", activity.getString("role"));
+            assertTrue(activity.getString("content").startsWith("PROCESS2|"));
+            JSONObject process = new JSONObject(new String(NativeBase64.decode(
+                activity.getString("content").substring("PROCESS2|".length())), StandardCharsets.UTF_8));
+            assertEquals("inspect files", process.getString("reasoning"));
+            JSONObject command = process.getJSONArray("tools").getJSONObject(0);
+            assertEquals("commandExecution", command.getString("type"));
+            assertTrue(command.getString("command").contains("Get-ChildItem"));
+            assertTrue(command.getString(NativeCommandOutputStore.OUTPUT_PREVIEW).contains("file.txt"));
+            assertEquals("inspection complete", history.getJSONObject(1).getString("content"));
+
+            JSONObject compact = new JSONObject(NativeLargePayloadStore.compactSubagentHistoryResult(
+                new JSONObject().put("threadId", "child-thread").put("messages", history)));
+            assertEquals(2, compact.getInt(NativeLargePayloadStore.MESSAGE_COUNT));
+            NativeLargePayloadStore.SubagentPage page = NativeLargePayloadStore.subagentPage(
+                compact.getString(NativeLargePayloadStore.PAYLOAD_REF), Integer.MAX_VALUE, 10);
+            JSONObject storedActivity = new JSONObject(page.getMessages().get(0));
+            assertTrue(storedActivity.getString("content").startsWith("PROCESS2|"));
+        } finally {
+            NativeCommandOutputStore.clear();
+            NativeLargePayloadStore.clear();
+            assertTrue(session.delete() || !session.exists());
+        }
+    }
+
+    @Test
+    public void completedCustomToolWithoutAssistantStillFlushesAtEndOfHistory() throws Exception {
+        NativeCommandOutputStore.clear();
+        File session = File.createTempFile("native-trailing-custom-tool", ".jsonl");
+        try {
+            try (FileWriter writer = new FileWriter(session)) {
+                writeRollout(writer, new JSONObject().put("type", "response_item")
+                    .put("payload", new JSONObject().put("type", "custom_tool_call")
+                        .put("call_id", "call-trailing").put("name", "exec")
+                        .put("input", "await tools.shell_command({command: 'pwd'});")));
+                writeRollout(writer, new JSONObject().put("type", "response_item")
+                    .put("payload", new JSONObject().put("type", "custom_tool_call_output")
+                        .put("call_id", "call-trailing")
+                        .put("output", new JSONArray().put(new JSONObject()
+                            .put("type", "input_text").put("text", "Exit code: 0\nOutput:\n/tmp\n")))));
+            }
+
+            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            assertEquals(1, history.length());
+            JSONObject activity = history.getJSONObject(0);
+            assertEquals("activity", activity.getString("role"));
+            JSONObject process = new JSONObject(new String(NativeBase64.decode(
+                activity.getString("content").substring("PROCESS2|".length())), StandardCharsets.UTF_8));
+            JSONObject command = process.getJSONArray("tools").getJSONObject(0);
+            assertEquals("commandExecution", command.getString("type"));
+            assertTrue(command.getString(NativeCommandOutputStore.OUTPUT_PREVIEW).contains("/tmp"));
+        } finally {
+            NativeCommandOutputStore.clear();
+            assertTrue(session.delete() || !session.exists());
+        }
+    }
+
+    @Test
+    public void historicalCommandCardInfersOnlyReliableFailureOutput() throws Exception {
+        JSONObject failed = CodexAppServerBridge.historyToolCard(
+            new JSONObject().put("name", "exec_command")
+                .put("arguments", new JSONObject().put("command", "restricted-command")),
+            "exec_command failed: Permission denied");
+        JSONObject completed = CodexAppServerBridge.historyToolCard(
+            new JSONObject().put("name", "exec_command")
+                .put("arguments", new JSONObject().put("command", "render docs")),
+            "Documentation example: exec_command failed with error");
+
+        assertEquals("failed", failed.getString("status"));
+        assertEquals("completed", completed.getString("status"));
     }
 
     @Test

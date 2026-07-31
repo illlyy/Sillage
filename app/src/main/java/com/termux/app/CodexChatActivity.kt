@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.termux.R
 import com.termux.app.update.AppUpdateManager
 import com.termux.shared.termux.TermuxConstants
@@ -41,6 +42,7 @@ private const val NATIVE_SHOW_RESPONSE_STATS_PREFERENCE = "native_show_response_
 private const val NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE = "native_show_model_subtitle_v1"
 private const val NATIVE_SHOW_REASONING_TITLES_PREFERENCE = "native_show_reasoning_titles_v1"
 private const val NATIVE_FOLLOW_UP_ACTION_PREFERENCE = "native_follow_up_submit_action_v1"
+private const val CODEX_INSTALL_PROMPT_VIEWED_PREFERENCE = "codex_install_prompt_viewed_v1"
 private data class PendingNativeSteer(
     val messageId: String,
     val followUp: NativeQueuedFollowUp,
@@ -53,6 +55,94 @@ private data class NativeBackendStartRequest(
     val providerFingerprint: String,
     val routeThroughMihomo: Boolean,
 )
+
+internal data class NativeLegacyPendingStreamScope(
+    val threadId: String,
+    val turnId: String,
+    val epoch: Long,
+)
+
+/** Keeps unsequenced compatibility callbacks inside the route/turn that first buffered them. */
+internal class NativeLegacyPendingStreamScopeGate {
+    private var epoch = 0L
+    private var pendingScope: NativeLegacyPendingStreamScope? = null
+
+    val currentEpoch: Long
+        get() = epoch
+
+    fun advanceEpoch() {
+        epoch++
+        pendingScope = null
+    }
+
+    fun capture(threadId: String, turnId: String?): Boolean {
+        val candidate = NativeLegacyPendingStreamScope(threadId.trim(), turnId.orEmpty().trim(), epoch)
+        val existing = pendingScope
+        if (existing == null) {
+            pendingScope = candidate
+            return true
+        }
+        if (existing.epoch != candidate.epoch || existing.threadId != candidate.threadId) return false
+        if (existing.turnId.isNotBlank() && candidate.turnId.isNotBlank() && existing.turnId != candidate.turnId) {
+            return false
+        }
+        if (existing.turnId.isBlank() && candidate.turnId.isNotBlank()) pendingScope = candidate
+        return true
+    }
+
+    fun canDrain(threadId: String, turnId: String?): Boolean {
+        val existing = pendingScope ?: return true
+        val candidateThread = threadId.trim()
+        val candidateTurn = turnId.orEmpty().trim()
+        if (existing.epoch != epoch || existing.threadId != candidateThread) return false
+        return existing.turnId.isBlank() || candidateTurn.isBlank() || existing.turnId == candidateTurn
+    }
+
+    fun clearPending() {
+        pendingScope = null
+    }
+}
+
+/** Tracks only continuation facts emitted by this Activity; unknown/global facts are preserved. */
+internal class NativeContinuationHintRouter {
+    private var routedThreadId = ""
+
+    fun sync(threadId: String, pending: Boolean, emit: (String, Boolean) -> Unit) {
+        val target = threadId.trim()
+        if (target.isNotBlank()) emit(target, pending)
+        routedThreadId = target
+    }
+
+    fun leave(fallbackThreadId: String): String {
+        val target = routedThreadId.ifBlank { fallbackThreadId.trim() }
+        routedThreadId = ""
+        // Keep the last per-thread fact intact. Only a later explicit sync for this same thread may
+        // replace true with false; route visibility alone says nothing about background work.
+        return target
+    }
+}
+
+internal object NativeTurnCompletionDrainGate {
+    fun drainIfOwned(
+        completionThreadId: String,
+        currentThreadId: String?,
+        completionTurnId: String,
+        completionEpoch: Long?,
+        currentEpoch: Long,
+        currentTurnActive: Boolean,
+        acceptTurn: (String) -> Boolean,
+        drain: () -> Unit,
+    ): Boolean {
+        val completedThread = completionThreadId.trim()
+        val currentThread = currentThreadId?.trim()?.takeIf { it.isNotBlank() } ?: return false
+        if (completedThread.isNotBlank() && completedThread != currentThread) return false
+        val completedTurn = completionTurnId.trim()
+        if (completedTurn.isBlank() && currentTurnActive && completionEpoch != currentEpoch) return false
+        if (!acceptTurn(completedTurn)) return false
+        drain()
+        return true
+    }
+}
 
 class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
     companion object {
@@ -78,9 +168,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var protocolSubagentSeen = false
     private var protocolUsageSeen = false
     private var protocolTurnCompletedSeen = false
+    private var lastProtocolCompletedTurnId = ""
+    private val handledTurnCompletionKeys = LinkedHashSet<String>()
     private val protocolEventQueue = NativeOrderedProtocolEventQueue()
+    private val legacyPendingStreamScope = NativeLegacyPendingStreamScopeGate()
+    private val continuationHintRouter = NativeContinuationHintRouter()
     private val flushProtocolEventQueueRunnable = Runnable { flushProtocolEventQueue() }
-    private var pendingAutoCompactionTurn = ""
     private val compactionLifecycleTimeouts = HashMap<String, Runnable>()
     private var bridge: CodexAppServerBridge? = null
     private val pendingNativeSteers = mutableMapOf<Int, PendingNativeSteer>()
@@ -89,8 +182,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var appliedProviderDefaultModel: String = ""
     private var backendConfigurationLoaded = false
     private var pendingBackendConfigurationReload = false
+    private var runtimeStartAttempted = false
     private var pendingCachedHistoryThreadId: String? = null
     private var pendingCachedHistorySnapshot: NativeHistorySnapshot? = null
+    private var lifecycleHandoffRouteThreadId = ""
     private var conversationRefreshGeneration = 0
     private var subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
     private val subagentHistoryAttempts = HashMap<String, Int>()
@@ -103,15 +198,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
     }
     private val streamHandler = Handler(Looper.getMainLooper())
-    private val autoCompactionRunnable = Runnable {
-        val expectedTurn = pendingAutoCompactionTurn
-        pendingAutoCompactionTurn = ""
-        if (expectedTurn.isBlank() || expectedTurn != activeCompactionTurnKey()) return@Runnable
-        val usage = lastReliableUsage ?: return@Runnable
-        val decision = currentCompactionPolicy().evaluate(compactionPolicyInput(usage))
-        if (!decision.shouldTrigger || chatState.compactionItems.any { !it.isTerminal }) return@Runnable
-        requestCompaction(NativeCompactionSource.AUTOMATIC, decision)
-    }
     private val backendScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val backendCatalogPreparer = NativeBackendCatalogPreparer(
         File(File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "ilyop-model-catalog.json"),
@@ -222,6 +308,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private var nativeChatBackground by mutableStateOf(FcodeChatBackgroundStyle.THEME.value)
     private var nativeChatBackgroundImage by mutableStateOf("")
     private var nativeChatBackgroundDim by mutableStateOf(0.32f)
+    private var nativeChatFontScale by mutableStateOf(FcodeAppearancePreferences.DEFAULT_CHAT_FONT_SCALE)
+    private var nativeMaterialTransparency by mutableStateOf(FcodeMaterialTransparencyConfig())
     private var nativeLanguage by mutableStateOf("zh")
     private var streamAnimationsEnabled by mutableStateOf(true)
     private var fixedStreamingViewportEnabled by mutableStateOf(true)
@@ -265,6 +353,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         nativeChatBackground = FcodeChatBackgroundStyle.from(nativePrefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value
         nativeChatBackgroundImage = nativePrefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()
         nativeChatBackgroundDim = nativePrefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
+        nativeChatFontScale = readFcodeChatFontScale(this)
+        nativeMaterialTransparency = readFcodeMaterialTransparencyConfig(this)
         nativeLanguage = nativePrefs.getString("native_language_v1", "system").orEmpty().let { if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh" }
         streamAnimationsEnabled = nativePrefs.getBoolean("native_stream_animations_v1", true)
         fixedStreamingViewportEnabled = nativePrefs.getBoolean("native_stream_fixed_viewport_v1", true)
@@ -293,6 +383,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatBackground = nativeChatBackground,
                 chatBackgroundImage = nativeChatBackgroundImage,
                 chatBackgroundDim = nativeChatBackgroundDim,
+                chatFontScale = nativeChatFontScale,
+                materialTransparency = nativeMaterialTransparency,
                 fixedStreamingViewport = fixedStreamingViewportEnabled,
                 showResponseStats = showResponseStats,
                 showModelSubtitle = showModelSubtitle,
@@ -310,6 +402,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onFollowUpActionChange = ::setFollowUpSubmitAction,
                     onRemoveQueuedFollowUp = ::removeQueuedFollowUp,
                     onNewConversation = ::newConversation,
+                    onNewConversationAtProject = ::newConversationAtProject,
                     onResumeConversation = ::resumeConversation,
                     onUiMotionChanged = ::setUiMotionActive,
                     onLoadSubagentHistory = ::loadSubagentHistory,
@@ -338,7 +431,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     onBackHome = ::openHomeSettings,
                     onOpenLegacyWebUi = ::openLegacyWebUi,
                     onToggleTheme = {
-                        nativeThemeMode = when (nativeThemeMode) { "system" -> "light"; "light" -> "dark"; else -> "system" }
+                        nativeThemeMode = when (nativeThemeMode) {
+                            "system" -> "light"
+                            "light" -> "dark"
+                            else -> "system"
+                        }
                         nativePrefs.edit().putString("native_theme_mode_v1", nativeThemeMode).apply()
                     },
                 )
@@ -365,12 +462,56 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 decor.post {
                     if (decor.viewTreeObserver.isAlive) decor.viewTreeObserver.removeOnDrawListener(this)
                     if (isFinishing || isDestroyed) return@post
+                    runtimeStartAttempted = true
                     refreshConversations()
-                    startBackend()
+                    if (isCodexCliInstalled()) {
+                        startBackend()
+                    } else {
+                        chatState.ready = false
+                        chatState.connectionLabel = nativeText(
+                            nativeLanguage,
+                            "Codex CLI 尚未安装",
+                            "Codex CLI is not installed",
+                        )
+                        maybeOfferCodexInstallOnFirstLaunch()
+                    }
                 }
             }
         }
         decor.viewTreeObserver.addOnDrawListener(listener)
+    }
+
+    private fun isCodexCliInstalled(): Boolean =
+        File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex").canExecute()
+
+    private fun maybeOfferCodexInstallOnFirstLaunch() {
+        if (isCodexCliInstalled() || isFinishing || isDestroyed) return
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val alreadyViewed = prefs.getBoolean(CODEX_INSTALL_PROMPT_VIEWED_PREFERENCE, false) ||
+            prefs.getBoolean("setup_skipped", false)
+        if (alreadyViewed) return
+        prefs.edit().putBoolean(CODEX_INSTALL_PROMPT_VIEWED_PREFERENCE, true).apply()
+        MaterialAlertDialogBuilder(this)
+            .setIcon(R.drawable.ic_codex_logo)
+            .setTitle(nativeText(nativeLanguage, "下载 Codex CLI？", "Download Codex CLI?"))
+            .setMessage(
+                nativeText(
+                    nativeLanguage,
+                    "原生聊天、WebUI 和 Termux 需要 Codex CLI 才能运行。\n\n安装包来自 OpenAI 官方 Release，只会写入应用私有目录，不会覆盖你的对话、项目和配置。",
+                    "Native chat, WebUI, and Termux require Codex CLI.\n\nThe package comes from the official OpenAI release and is stored only in the app's private directory. Your chats, projects, and settings are preserved.",
+                ),
+            )
+            .setNegativeButton(nativeText(nativeLanguage, "稍后", "Later"), null)
+            .setPositiveButton(nativeText(nativeLanguage, "下载 Codex", "Download Codex")) { _, _ ->
+                window.decorView.post {
+                    CodexInstaller.setupBootstrapIfNeeded(this) {
+                        if (!isFinishing && !isDestroyed) {
+                            startBackend(preferConfiguredDefault = true)
+                        }
+                    }
+                }
+            }
+            .show()
     }
 
     private fun currentBackendConfiguration(
@@ -381,12 +522,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         mcpRevision = prefs.getLong(NativeMcpConfigStore.REVISION_KEY, 0L),
         mcpFileFingerprint = NativeMcpConfigStore.fileFingerprint(),
     )
-
-    private fun selectedModelConfig(): CodexProviderStore.ModelConfig? {
-        val profile = providerStore.active() ?: return null
-        val selected = chatState.selectedModel.ifBlank { profile.model }
-        return profile.models.firstOrNull { it.id.equals(selected, ignoreCase = true) }
-    }
 
     private fun currentCompactionPolicy(): NativeCompactionPolicy {
         val profile = providerStore.active()
@@ -402,75 +537,47 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         return compactionPolicy
     }
 
-    private fun activeCompactionTurnKey(): String = currentThreadId.orEmpty() + ":" +
-        chatState.currentTurnId.ifBlank { chatState.turnStartedAt.toString() }
-
-    private fun compactionPolicyInput(usage: NativeTurnUsage): NativeCompactionPolicyInput {
-        val model = selectedModelConfig()
-        val contextWindow = usage.contextWindow.takeIf { it > 0L } ?: model?.contextWindow ?: 0L
-        val used = usage.currentContextTokens.takeIf { it > 0L } ?: 0L
-        val serverLimit = usage.autoCompactTokenLimit.takeIf { it > 0L }
-            ?: model?.autoCompactTokenLimit
-            ?: 0L
-        return NativeCompactionPolicyInput(
-            threadId = currentThreadId.orEmpty(),
-            turnId = chatState.currentTurnId.takeIf { it.isNotBlank() }
-                ?: chatState.turnStartedAt.takeIf { it > 0L }?.toString(),
-            contextWindow = contextWindow,
-            usedTokens = used,
-            serverAutoCompactTokenLimit = serverLimit,
-            usageReliable = usage.contextUsageReliable && used > 0L,
-            estimated = usage.estimated,
-            turnActive = chatState.phase.active,
-            compactionInProgress = chatState.compactionItems.any { !it.isTerminal },
-            waitingForUserInput = chatState.pendingUserInputRequest.isNotBlank() || chatState.pendingApprovalRequest.isNotBlank(),
-            stopping = chatState.phase == NativeTurnPhase.STOPPING,
-        )
-    }
-
     private fun evaluateAutomaticCompaction(usage: NativeTurnUsage) {
-        val policyInput = compactionPolicyInput(usage)
-        if (!usage.estimated &&
-            (policyInput.contextWindow > 0L || policyInput.serverAutoCompactTokenLimit > 0L) &&
-            policyInput.usedTokens > 0L && policyInput.usageReliable
+        if (!usage.estimated && usage.contextUsageReliable && usage.currentContextTokens > 0L &&
+            (usage.contextWindow > 0L || usage.autoCompactTokenLimit > 0L)
         ) {
             lastReliableUsage = usage
         }
-        val decision = currentCompactionPolicy().evaluate(policyInput)
-        if (!decision.shouldTrigger) {
-            decision.skipReason?.let { reason ->
-                NativeChatDiagnostics.record(this, "compaction_fallback_skipped_reason", JSONObject()
-                    .put("reason", reason.name.lowercase())
-                    .put("thread", currentThreadId.orEmpty().take(8)))
-            }
-            return
-        }
-        val turnKey = activeCompactionTurnKey()
-        if (pendingAutoCompactionTurn == turnKey) {
-            NativeChatDiagnostics.record(this, "compaction_duplicate_suppressed", JSONObject().put("turn", turnKey.takeLast(16)))
-            return
-        }
-        pendingAutoCompactionTurn = turnKey
-        streamHandler.removeCallbacks(autoCompactionRunnable)
-        // Give the server's native auto-compaction event a short lead. A started event cancels
-        // this runnable, so the client never races a server request at the same threshold.
-        streamHandler.postDelayed(autoCompactionRunnable, 450L)
+        // auto_compact_token_limit belongs to Codex/app-server. Calling thread/compact/start here
+        // starts a separate manual compaction turn, which terminates the active answer instead of
+        // continuing it. Match WebUI: observe the server's contextCompaction lifecycle only.
     }
 
     private fun requestManualCompaction() {
+        val continuationPending = chatState.queuedFollowUps.isNotEmpty() || goalRetryWaitingForCompletion
+        if (chatState.busy || chatState.pendingUserInputRequest.isNotBlank() ||
+            chatState.pendingApprovalRequest.isNotBlank() || continuationPending
+        ) {
+            NativeChatDiagnostics.record(this, "manual_compaction_blocked", JSONObject()
+                .put("thread", currentThreadId.orEmpty().take(8))
+                .put("busy", chatState.busy)
+                .put("continuation", continuationPending))
+            Toast.makeText(
+                this,
+                nativeText(nativeLanguage, "任务进行中，完成后才能压缩上下文", "Compact is disabled while a task is in progress"),
+                Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
         requestCompaction(NativeCompactionSource.MANUAL, null)
     }
 
     private fun requestCompaction(source: NativeCompactionSource, decision: NativeCompactionDecision?) {
         val threadId = currentThreadId ?: return
-        if (threadId.isBlank() || bridge == null || chatState.compactionItems.any { !it.isTerminal }) {
+        if (source != NativeCompactionSource.MANUAL || chatState.busy || threadId.isBlank() ||
+            bridge == null || chatState.compactionItems.any { !it.isTerminal }
+        ) {
             NativeChatDiagnostics.record(this, "compaction_duplicate_suppressed", JSONObject()
                 .put("thread", threadId.take(8)).put("source", source.name.lowercase()))
             return
         }
         val requestId = "${source.name.lowercase()}:${threadId.takeLast(8)}:${System.currentTimeMillis()}"
-        val item = if (source == NativeCompactionSource.MANUAL) chatState.beginManualCompaction(requestId)
-            else chatState.beginAutomaticCompaction(requestId)
+        val item = chatState.beginManualCompaction(requestId)
         compactionJournalStore.record(item)
         currentCompactionPolicy().markRequested(
             threadId,
@@ -480,12 +587,35 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .put("source", decision?.source?.name?.lowercase() ?: source.name.lowercase())
             .put("threshold", decision?.threshold ?: 0L)
             .put("thread", threadId.take(8)))
+        scheduleCompactionRequestTimeout(item)
         bridge?.compactThread(requestId)
     }
 
-    private fun cancelPendingAutoCompaction() {
-        pendingAutoCompactionTurn = ""
-        streamHandler.removeCallbacks(autoCompactionRunnable)
+    private fun scheduleCompactionRequestTimeout(item: NativeCompactionItem) {
+        val requestId = item.requestId?.takeIf { it.isNotBlank() } ?: return
+        val timeoutKey = "request:$requestId"
+        compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
+        val timeout = Runnable {
+            val pending = chatState.compactionItems.firstOrNull {
+                it.requestId == requestId && !it.isTerminal
+            } ?: return@Runnable
+            val updated = chatState.completeManualCompactionRpc(
+                requestId = requestId,
+                success = false,
+                error = nativeText(nativeLanguage, "未收到 Codex 的真实压缩事件", "Codex did not return a compaction lifecycle event"),
+                threadId = pending.threadId,
+            )
+            updated?.let(compactionJournalStore::record)
+            currentCompactionPolicy().markFailed(pending.threadId, pending.turnId)
+            compactionLifecycleTimeouts.remove(timeoutKey)
+        }
+        compactionLifecycleTimeouts[timeoutKey] = timeout
+        streamHandler.postDelayed(timeout, 30_000L)
+    }
+
+    private fun cancelCompactionRequestTimeout(requestId: String?) {
+        val value = requestId?.takeIf { it.isNotBlank() } ?: return
+        compactionLifecycleTimeouts.remove("request:$value")?.let(streamHandler::removeCallbacks)
     }
 
     private fun startBackend(
@@ -728,7 +858,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun editMessage(messageId: String, text: String) {
         val value = text.trim()
-        if (value.isEmpty() || chatState.busy || !chatState.ready) return
+        if (value.isEmpty() || chatState.busy || compactionInProgress() || !chatState.ready) return
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
         val userIndex = chatState.messages.indexOfFirst { it.id == messageId && it.role == NativeChatRole.USER }
         if (userIndex < 0) return
@@ -744,7 +874,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun retryMessage(text: String, preserveRetryStatus: Boolean = false) {
         val displayValue = text.trim()
-        if (displayValue.isEmpty() || chatState.busy || !chatState.ready) return
+        if (displayValue.isEmpty() || chatState.busy || compactionInProgress() || !chatState.ready) return
         if (!preserveRetryStatus) {
             cancelGoalAutoRetry()
             suppressGoalRetryUntilNewTurn = false
@@ -797,13 +927,40 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.selectedSkills.clear()
     }
 
-    private fun resetProtocolTurnState() {
+    /** Main-thread lifecycle/terminal barrier: publish every callback already accepted by us. */
+    private fun drainPendingNativeUiEvents() {
         streamHandler.removeCallbacks(flushProtocolEventQueueRunnable)
-        flushProtocolEventQueue()
-        protocolEventQueue.clear()
+        streamHandler.removeCallbacks(flushReasoningRunnable)
+        streamHandler.removeCallbacks(flushAnswerRunnable)
+        streamHandler.removeCallbacks(flushPlanRunnable)
+        streamHandler.removeCallbacks(flushCommandRunnable)
+        NativePendingUiEventDrain.run(
+            protocol = ::flushProtocolEventQueue,
+            reasoning = { flushReasoningDeltas(force = true) },
+            assistant = { flushAnswerDeltas(force = true) },
+            plan = ::flushPlanDeltas,
+            command = ::flushCommandDeltas,
+        )
+    }
+
+    private fun resetProtocolTurnState(preserveSequenceWatermarks: Boolean = true) {
+        drainPendingNativeUiEvents()
+        legacyPendingStreamScope.advanceEpoch()
+        if (preserveSequenceWatermarks) protocolEventQueue.clearPendingPreservingWatermarks()
+        else protocolEventQueue.clear()
+        currentThreadId?.let { threadId ->
+            NativeChatLifecycleHandoff.remove(threadId)
+            if (lifecycleHandoffRouteThreadId == threadId) lifecycleHandoffRouteThreadId = ""
+        }
         currentCompactionPolicy().reset()
         compactionLifecycleTimeouts.values.forEach(streamHandler::removeCallbacks)
         compactionLifecycleTimeouts.clear()
+        resetProtocolFeatureSeenForTurn()
+        lastProtocolCompletedTurnId = ""
+        lastReliableUsage = null
+    }
+
+    private fun resetProtocolFeatureSeenForTurn() {
         protocolReasoningSeen = false
         protocolAssistantSeen = false
         protocolCommandSeen = false
@@ -812,12 +969,46 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         protocolSubagentSeen = false
         protocolUsageSeen = false
         protocolTurnCompletedSeen = false
-        lastReliableUsage = null
-        cancelPendingAutoCompaction()
+    }
+
+    private fun claimTurnCompletion(threadId: String, turnId: String): Boolean {
+        val stableTurn = turnId.ifBlank { "legacy:${chatState.turnStartedAt}" }
+        val key = "${threadId.ifBlank { "thread" }}:$stableTurn"
+        if (!handledTurnCompletionKeys.add(key)) return false
+        while (handledTurnCompletionKeys.size > 24) {
+            val iterator = handledTurnCompletionKeys.iterator()
+            if (!iterator.hasNext()) break
+            iterator.next()
+            iterator.remove()
+        }
+        return true
+    }
+
+    private fun hasNativeContinuationPending(): Boolean {
+        val activeGoal = !suppressGoalRetryUntilNewTurn &&
+            chatState.activeGoalObjective.isNotBlank() && chatState.activeGoalStatus == "active"
+        val activeSubagent = chatState.subagentStatuses.values.any { it == "working" || it == "waiting" }
+        return chatState.queuedFollowUps.isNotEmpty() || goalRetryWaitingForCompletion ||
+            activeGoal || activeSubagent
+    }
+
+    private fun syncNativeContinuationHint() {
+        val threadId = currentThreadId?.takeIf { it.isNotBlank() } ?: return
+        val activeBridge = bridge ?: return
+        continuationHintRouter.sync(threadId, hasNativeContinuationPending()) { routedThreadId, pending ->
+            activeBridge.setNativeContinuationPending(routedThreadId, pending)
+        }
+    }
+
+    private fun detachNativeContinuationHintBeforeRouteChange(nextThreadId: String?) {
+        val previousThreadId = currentThreadId?.takeIf { it.isNotBlank() } ?: return
+        if (previousThreadId == nextThreadId?.trim()) return
+        continuationHintRouter.leave(previousThreadId)
     }
 
     private fun queueFollowUp(followUp: NativeQueuedFollowUp, clearComposer: Boolean = true): NativeSubmitResult {
         if (chatState.queuedFollowUps.none { it.id == followUp.id }) chatState.queuedFollowUps.add(followUp)
+        syncNativeContinuationHint()
         if (clearComposer) clearComposerAfterSubmit()
         return NativeSubmitResult(accepted = true, queued = true)
     }
@@ -841,6 +1032,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
         resetProtocolTurnState()
         val userMessage = chatState.addUser(followUp.text, followUp.skills, followUp.attachments)
+        currentThreadId?.let { threadId ->
+            CodexTaskStore.assignProject(this, threadId, chatState.projectPath)
+            conversationProjectCache[threadId] = chatState.projectPath
+        }
         startFrameDiagnostics()
         bridge?.sendMessage(
             followUp.text,
@@ -850,6 +1045,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             followUp.mode,
             skillsJson(followUp),
         )
+        syncNativeContinuationHint()
         return NativeSubmitResult(accepted = true, messageId = userMessage.id)
     }
 
@@ -879,6 +1075,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun sendMessage(text: String): NativeSubmitResult? {
         val value = text.trim()
         if ((value.isEmpty() && chatState.attachments.isEmpty()) || !chatState.ready) return null
+        if (compactionInProgress()) {
+            Toast.makeText(
+                this,
+                nativeText(nativeLanguage, "上下文正在压缩，请稍候", "Context compaction is still running"),
+                Toast.LENGTH_SHORT,
+            ).show()
+            return null
+        }
         val followUp = captureFollowUp(value)
         if (!chatState.busy) return startNewTurn(followUp)
         return when (chatState.followUpSubmitAction) {
@@ -894,12 +1098,15 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .apply()
     }
 
+    private fun compactionInProgress(): Boolean = chatState.compactionItems.any { !it.isTerminal }
+
     private fun removeQueuedFollowUp(id: String) {
         chatState.queuedFollowUps.removeAll { it.id == id }
+        syncNativeContinuationHint()
     }
 
     private fun sendNextQueuedFollowUp() {
-        if (chatState.busy || !chatState.ready || chatState.queuedFollowUps.isEmpty()) return
+        if (chatState.busy || compactionInProgress() || !chatState.ready || chatState.queuedFollowUps.isEmpty()) return
         val followUp = chatState.queuedFollowUps.removeAt(0)
         startNewTurn(followUp, clearComposer = false)
     }
@@ -984,6 +1191,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (chatState.pendingUserInputRequest.isNotBlank()) scheduleUserInputTimeout(threadId, chatState.pendingUserInputRequest)
         chatState.workspaceSnapshots.clear()
         chatState.workspaceSnapshots.addAll(NativeWorkspaceSnapshotStore.load(this, threadId))
+        syncNativeContinuationHint()
     }
 
     private fun clearLocalGoal(threadId: String) {
@@ -997,6 +1205,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             goalRetryWaitingForCompletion = false
             chatState.activeGoalObjective = ""
             chatState.activeGoalStatus = "active"
+            syncNativeContinuationHint()
         }
     }
 
@@ -1019,6 +1228,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .putString(goalPreferenceKey(threadId), objective)
             .putString(goalStatusPreferenceKey(threadId), normalizedStatus)
             .apply()
+        syncNativeContinuationHint()
     }
 
     private fun setGoal(objective: String) {
@@ -1031,6 +1241,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.activeGoalStatus = "active"
         suppressGoalRetryUntilNewTurn = false
         bridge?.setThreadGoal(value)
+        syncNativeContinuationHint()
     }
 
     private fun requestIdentity(raw: String): String = runCatching {
@@ -1236,6 +1447,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .takeIf { it.isNotBlank() }
     }
 
+    private fun protocolEventLocalEpoch(payload: JSONObject?): Long? {
+        if (payload == null) return null
+        val containers = listOfNotNull(payload, payload.optJSONObject("details"), payload.optJSONObject("turn"))
+        val keys = arrayOf("nativeTurnEpoch", "native_turn_epoch", "localTurnEpoch", "local_turn_epoch")
+        containers.forEach { item ->
+            keys.forEach { key ->
+                if (item.has(key) && !item.isNull(key)) return item.optLong(key)
+            }
+        }
+        return null
+    }
+
     private fun protocolCompactionSource(payload: JSONObject?, item: JSONObject?): NativeCompactionSource? {
         val raw = protocolString(item, "source", "origin", "trigger")
             .ifBlank { protocolString(payload, "source", "origin", "trigger") }
@@ -1280,13 +1503,16 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
      * protocol-specific parsing in the Compose state. */
     private fun handleDecodedLifecycleEvent(event: NativeProtocolEvent) {
         if (event.threadId.isNotBlank() && currentThreadId != null && event.threadId != currentThreadId) return
-        event.turnId?.takeIf { it.isNotBlank() }?.let { chatState.currentTurnId = it }
+        val acceptedTurnStart = event is NativeProtocolEvent.TurnStarted &&
+            chatState.shouldAcceptProtocolTurnStart(event.turnId)
         when (event) {
             is NativeProtocolEvent.CompactionStarted -> {
-                cancelPendingAutoCompaction()
                 enqueueProtocolEvent(event, immediate = true)
                 chatState.compactionItems.firstOrNull { it.serverItemId == event.itemId || it.id == event.itemId }
-                    ?.let(compactionJournalStore::record)
+                    ?.let { item ->
+                        cancelCompactionRequestTimeout(item.requestId)
+                        compactionJournalStore.record(item)
+                    }
                 currentCompactionPolicy().markStarted(event.threadId, event.turnId)
                 scheduleCompactionLifecycleTimeout(event)
             }
@@ -1295,14 +1521,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 enqueueProtocolEvent(event, immediate = true)
                 chatState.compactionItems.lastOrNull { event.itemId.isNullOrBlank() || it.serverItemId == event.itemId || it.id == event.itemId }
                     ?.let { item ->
+                        cancelCompactionRequestTimeout(item.requestId)
                         compactionJournalStore.record(item)
                         if (item.status == NativeCompactionStatus.COMPLETED) {
-                            currentCompactionPolicy().markCompleted(
-                                event.threadId,
-                                event.turnId,
-                                lastReliableUsage?.currentContextTokens ?: 0L,
-                                lastReliableUsage?.contextWindow ?: 0L,
-                            )
+                            // Completion items do not carry post-compaction usage. Keep the latch
+                            // until the next reliable token update proves the context actually fell.
+                            currentCompactionPolicy().markCompleted(event.threadId, event.turnId)
                         } else currentCompactionPolicy().markFailed(event.threadId, event.turnId)
                     }
                 cancelCompactionLifecycleTimeout(event)
@@ -1325,6 +1549,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             else -> {
                 when (event) {
+                    is NativeProtocolEvent.TurnStarted -> {
+                        if (acceptedTurnStart) resetProtocolFeatureSeenForTurn()
+                    }
                     is NativeProtocolEvent.ReasoningDelta,
                     is NativeProtocolEvent.ReasoningCompleted -> protocolReasoningSeen = true
                     is NativeProtocolEvent.AssistantDelta,
@@ -1336,10 +1563,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     is NativeProtocolEvent.PlanCompleted -> protocolPlanSeen = true
                     is NativeProtocolEvent.ToolCompleted -> protocolToolSeen = true
                     is NativeProtocolEvent.SubagentUpdated -> protocolSubagentSeen = true
-                    is NativeProtocolEvent.TurnCompleted -> protocolTurnCompletedSeen = true
+                    is NativeProtocolEvent.TurnCompleted -> {
+                        val completedTurn = event.turnId.orEmpty()
+                        if (completedTurn.isBlank() || chatState.currentTurnId.isBlank() || completedTurn == chatState.currentTurnId) {
+                            protocolTurnCompletedSeen = true
+                            lastProtocolCompletedTurnId = completedTurn.ifBlank { chatState.currentTurnId }
+                        }
+                    }
                     else -> Unit
                 }
                 enqueueProtocolEvent(event, immediate = true)
+                if (event is NativeProtocolEvent.SubagentUpdated) syncNativeContinuationHint()
                 if (event is NativeProtocolEvent.PlanCompleted) {
                     val planText = chatState.messages.lastOrNull {
                         it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)
@@ -1396,6 +1630,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             "plancompleted", "plancomplete" -> "planCompleted"
             "subagentupdated", "subagentupdate" -> "subagentUpdated"
             "tokenusageupdated", "tokenusageupdate" -> "tokenUsageUpdated"
+            "turnstarted", "turnstart" -> "turnStarted"
             "turncompleted", "turncomplete" -> "turnCompleted"
             "error" -> "error"
             else -> raw
@@ -1414,10 +1649,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         val threadId = protocolEventThread(payload).ifBlank { currentThreadId.orEmpty() }
         if (currentThreadId != null && threadId.isNotBlank() && threadId != currentThreadId) return
         val turnId = protocolEventTurn(payload)
-        // Token-usage and lifecycle notifications can be the first event of a turn. Capture the
-        // identity before evaluating automatic compaction, otherwise a synthetic marker is stored
-        // without turnId and cannot be consumed when the server sends item/started later.
-        if (!turnId.isNullOrBlank()) chatState.currentTurnId = turnId
+        val acceptedTurnStart = kind == "turnStarted" && chatState.shouldAcceptProtocolTurnStart(turnId)
         val item = payload.optJSONObject("item") ?: payload.optJSONObject("details")
         val itemId = protocolString(payload, "itemId", "item_id")
             .ifBlank { protocolString(item, "id", "itemId", "item_id") }
@@ -1433,7 +1665,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
         when (kind) {
             "contextCompactionStarted" -> {
-                cancelPendingAutoCompaction()
                 val event = NativeProtocolEvent.CompactionStarted(
                     threadId = threadId,
                     turnId = turnId,
@@ -1445,10 +1676,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     sequence = sequence,
                     timestampMs = timestamp,
                 )
-                chatState.currentTurnId = turnId.orEmpty().ifBlank { chatState.currentTurnId }
                 enqueueProtocolEvent(event, immediate = true)
                 val visual = chatState.compactionItems.firstOrNull { it.serverItemId == itemId || it.id == itemId }
-                visual?.let { compactionJournalStore.record(it) }
+                visual?.let {
+                    cancelCompactionRequestTimeout(it.requestId)
+                    compactionJournalStore.record(it)
+                }
                 currentCompactionPolicy().markStarted(threadId, turnId)
                 val timeoutKey = itemId ?: "${threadId}:${turnId.orEmpty()}"
                 compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
@@ -1496,9 +1729,10 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 enqueueProtocolEvent(event, immediate = true)
                 val visual = chatState.compactionItems.lastOrNull { itemId.isNullOrBlank() || it.serverItemId == itemId || it.id == itemId }
                 visual?.let {
+                    cancelCompactionRequestTimeout(it.requestId)
                     compactionJournalStore.record(it)
                     if (it.status == NativeCompactionStatus.COMPLETED) {
-                        currentCompactionPolicy().markCompleted(threadId, turnId, lastReliableUsage?.currentContextTokens ?: 0L, lastReliableUsage?.contextWindow ?: 0L)
+                        currentCompactionPolicy().markCompleted(threadId, turnId)
                     } else currentCompactionPolicy().markFailed(threadId, turnId)
                 }
                 val timeoutKey = itemId ?: "${threadId}:${turnId.orEmpty()}"
@@ -1585,7 +1819,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     threadId = threadId,
                     turnId = turnId,
                     itemId = itemId,
-                    agentThreadId = protocolString(item, "agentThreadId", "agent_thread_id"),
+                    agentThreadId = item?.let(::subagentThreadId).orEmpty(),
                     callId = protocolString(item, "callId", "call_id"),
                     name = protocolString(item, "agentName", "agentNickname", "nickname"),
                     status = protocolString(item, "status").ifBlank { "working" },
@@ -1620,12 +1854,27 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     evaluateAutomaticCompaction(parsed)
                 }
             }
+            "turnStarted" -> enqueueProtocolEvent(
+                NativeProtocolEvent.TurnStarted(
+                    threadId = threadId,
+                    turnId = turnId,
+                    itemId = itemId,
+                    sequence = sequence,
+                    timestampMs = timestamp,
+                ),
+                immediate = true,
+            )
             "turnCompleted" -> enqueueProtocolEvent(
                 NativeProtocolEvent.TurnCompleted(
                     threadId = threadId,
                     turnId = turnId,
                     itemId = itemId,
-                    failed = item?.has("error") == true && !item.isNull("error"),
+                    failed = nativeTurnLifecycleFailed(
+                        item,
+                        payload.optJSONObject("turn"),
+                        payload.optJSONObject("details"),
+                        payload,
+                    ),
                     sequence = sequence,
                     timestampMs = timestamp,
                 ),
@@ -1650,13 +1899,20 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (kind.startsWith("tool")) protocolToolSeen = true
         if (kind.startsWith("subagent")) protocolSubagentSeen = true
         if (kind.startsWith("tokenUsage")) protocolUsageSeen = true
-        if (kind == "turnCompleted") protocolTurnCompletedSeen = true
+        if (acceptedTurnStart) resetProtocolFeatureSeenForTurn()
+        if (kind == "turnCompleted") {
+            val completedTurn = turnId.orEmpty()
+            if (completedTurn.isBlank() || chatState.currentTurnId.isBlank() || completedTurn == chatState.currentTurnId) {
+                protocolTurnCompletedSeen = true
+                lastProtocolCompletedTurnId = completedTurn.ifBlank { chatState.currentTurnId }
+            }
+        }
+        if (kind.startsWith("subagent")) syncNativeContinuationHint()
     }
 
     private fun handleProtocolDelta(raw: String) {
         NativeProtocolEventDecoder.decodeDeltas(raw, currentThreadId.orEmpty()).forEach { event ->
             if (currentThreadId != null && event.threadId.isNotBlank() && event.threadId != currentThreadId) return@forEach
-            event.turnId?.takeIf { it.isNotBlank() }?.let { chatState.currentTurnId = it }
             when (event) {
                 is NativeProtocolEvent.ReasoningDelta -> protocolReasoningSeen = true
                 is NativeProtocolEvent.AssistantDelta -> protocolAssistantSeen = true
@@ -1670,7 +1926,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun handleCommandDeltaV2(raw: String) {
         NativeProtocolEventDecoder.decodeCommandOutputs(raw, currentThreadId.orEmpty()).forEach { event ->
             if (currentThreadId != null && event.threadId.isNotBlank() && event.threadId != currentThreadId) return@forEach
-            event.turnId?.takeIf { it.isNotBlank() }?.let { chatState.currentTurnId = it }
             protocolCommandSeen = true
             enqueueProtocolEvent(event)
         }
@@ -1684,32 +1939,23 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         else status in setOf("completed", "complete", "success", "succeeded", "ok")
         val cancelled = status in setOf("cancelled", "canceled", "cancel", "aborted")
         val threadId = protocolString(payload, "threadId", "thread_id").ifBlank { currentThreadId.orEmpty() }
-        val complete: () -> Unit = {
-            val current = chatState.compactionItems.firstOrNull { it.requestId == requestId }
-            if (!(success && current?.status == NativeCompactionStatus.RUNNING)) {
-                val updated = chatState.completeManualCompactionRpc(
-                    requestId,
-                    success = success && !cancelled,
-                    cancelled = cancelled,
-                    error = protocolString(payload, "error", "message"),
-                    threadId = threadId,
-                )
-                updated?.let(compactionJournalStore::record)
-                if (success && !cancelled && updated != null) {
-                    // Older servers return only the RPC result. Mark the policy as completed now
-                    // so a later reliable low-usage update can release hysteresis even when no
-                    // item/started or item/completed notification ever arrives.
-                    currentCompactionPolicy().markCompleted(
-                        threadId,
-                        chatState.currentTurnId.takeIf { it.isNotBlank() },
-                        lastReliableUsage?.currentContextTokens ?: 0L,
-                        lastReliableUsage?.contextWindow ?: 0L,
-                    )
-                }
-            }
+        if (success && !cancelled) {
+            // thread/compact/start returns {} as an acknowledgement. WebUI waits for the actual
+            // contextCompaction item/completed lifecycle before presenting success; do the same.
+            NativeChatDiagnostics.record(this, "compaction_rpc_acknowledged", JSONObject()
+                .put("thread", threadId.take(8)).put("requestId", requestId.orEmpty().takeLast(24)))
+            return
         }
-        if (!success || cancelled) complete() else streamHandler.postDelayed(complete, 900L)
-        if (!success || cancelled) currentCompactionPolicy().markFailed(threadId, chatState.currentTurnId)
+        cancelCompactionRequestTimeout(requestId)
+        val updated = chatState.completeManualCompactionRpc(
+            requestId,
+            success = false,
+            cancelled = cancelled,
+            error = protocolString(payload, "error", "message"),
+            threadId = threadId,
+        )
+        updated?.let(compactionJournalStore::record)
+        currentCompactionPolicy().markFailed(threadId, updated?.turnId ?: chatState.currentTurnId)
     }
 
     private fun configuredProjectPath(): String {
@@ -2278,6 +2524,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         if (next != "active") cancelGoalAutoRetry()
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString(goalStatusPreferenceKey(threadId), next).apply()
         bridge?.setThreadGoalStatus(next)
+        syncNativeContinuationHint()
         if (next == "active" && goalRetryCycleActive) scheduleGoalRetry(300L)
     }
 
@@ -2313,6 +2560,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         goalRetryWaitingForCompletion = false
         suppressGoalRetryUntilNewTurn = true
         chatState.connectionLabel = "正在停止…"
+        syncNativeContinuationHint()
         bridge?.interruptCurrentTurn()
     }
 
@@ -2347,18 +2595,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             chatState.updateRetryStatus(message, automaticGoal, terminal = false)
             return
         }
-        flushReasoningDeltas(force = true)
-        flushAnswerDeltas(force = true)
-        flushPlanDeltas()
-        flushCommandDeltas()
+        drainPendingNativeUiEvents()
         if (automaticGoal) {
             goalRetryCycleActive = true
             goalRetryWaitingForCompletion = true
+            syncNativeContinuationHint()
             chatState.updateRetryStatus(message, automaticGoal = true, terminal = true)
             // Normally turn/completed arrives first. This fallback also recovers from older
             // app-server builds that only emit the final error notification.
             scheduleGoalRetry()
         } else {
+            syncNativeContinuationHint()
             chatState.updateRetryStatus(message, automaticGoal = false, terminal = true)
             stopFrameDiagnostics()
             currentThreadId?.let { threadId ->
@@ -2372,6 +2619,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         android.util.Log.d("IlyopCodexTasks", "refresh generation=$generation")
         val favorites = favoriteThreadIds()
         val snapshot = CodexTaskStore.current(this)
+        val registeredProjectPaths = NativeDrawerProjectStore.registered(this).map(NativeDrawerProject::path)
+        fun visibleProjectPath(path: String): String = resolveNativeConversationProjectMigration(
+            cachedResolvedPath = path,
+            freshlyResolvedPath = null,
+            registeredProjectPaths = registeredProjectPaths,
+        ).registeredProjectPath.orEmpty()
 
         // Task status and stored titles are cheap SharedPreferences data. Publish them
         // immediately so a newly running/completed task appears without waiting for a
@@ -2381,7 +2634,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 task.threadId,
                 conversationTitleCache[task.threadId] ?: task.title,
                 task.state,
-                conversationProjectCache[task.threadId].orEmpty(),
+                if (task.projectAssignmentKnown) visibleProjectPath(task.projectPath)
+                else visibleProjectPath(conversationProjectCache[task.threadId].orEmpty()),
                 task.threadId in favorites,
                 taskAttention(task.threadId, task.state),
             )
@@ -2390,10 +2644,21 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         applyConversationSnapshot(generation, immediate)
 
         Thread {
-            val missingProjectIds = snapshot.asSequence().map { it.threadId }.filter { !conversationProjectCache.containsKey(it) }.toList()
-            if (missingProjectIds.isNotEmpty()) {
-                CodexAppServerBridge.resolveConversationProjects(missingProjectIds).forEach { (threadId, project) ->
-                    if (project.isNotBlank()) conversationProjectCache[threadId] = project
+            val missingProjectIds = snapshot.asSequence()
+                .filter { !it.projectAssignmentKnown && !conversationProjectCache.containsKey(it.threadId) }
+                .map { it.threadId }
+                .toList()
+            val resolvedProjects = if (missingProjectIds.isEmpty()) emptyMap()
+                else CodexAppServerBridge.resolveConversationProjects(missingProjectIds)
+            snapshot.asSequence().filterNot { it.projectAssignmentKnown }.forEach { task ->
+                val migration = resolveNativeConversationProjectMigration(
+                    cachedResolvedPath = conversationProjectCache[task.threadId],
+                    freshlyResolvedPath = resolvedProjects[task.threadId],
+                    registeredProjectPaths = registeredProjectPaths,
+                )
+                migration.resolvedPath?.let { conversationProjectCache[task.threadId] = it }
+                migration.registeredProjectPath?.let { project ->
+                    CodexTaskStore.assignProject(this, task.threadId, project)
                 }
             }
             val enriched = snapshot.mapNotNull { task ->
@@ -2406,7 +2671,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                         conversationTitleCache[task.threadId] = resolvedTitle
                     }
                 }
-                val project = conversationProjectCache[task.threadId].orEmpty()
+                val project = if (task.projectAssignmentKnown) visibleProjectPath(task.projectPath)
+                    else visibleProjectPath(conversationProjectCache[task.threadId].orEmpty())
                 if (fallbackTitle && title.startsWith("Codex 任务")) null
                 else NativeConversation(task.threadId, title, task.state, project, task.threadId in favorites, taskAttention(task.threadId, task.state))
             }.sortedWith(compareByDescending<NativeConversation> { it.state == CodexTaskStore.RUNNING }
@@ -2563,6 +2829,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         pendingPlan.setLength(0)
         pendingCommand.setLength(0)
         pendingPlanItemId = ""
+        legacyPendingStreamScope.clearPending()
         // Invalidate a catch-up callback posted by the route we just left.
         uiMotionCatchUpGeneration++
         stopFrameDiagnostics()
@@ -2571,14 +2838,36 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             .put("droppedPlan", droppedPlan).put("droppedCommand", droppedCommand))
     }
 
+    private fun hasPendingLegacyStreamEvents(): Boolean =
+        pendingReasoning.isNotEmpty() || pendingAnswer.isNotEmpty() ||
+            pendingPlan.isNotEmpty() || pendingCommand.isNotEmpty()
+
+    private fun captureLegacyPendingStreamScope() {
+        if (legacyPendingStreamScope.capture(currentThreadId.orEmpty(), chatState.currentTurnId)) return
+        // A callback from another turn must never share a StringBuilder with the visible turn.
+        discardPendingStreamEvents("legacy_scope_changed")
+        legacyPendingStreamScope.capture(currentThreadId.orEmpty(), chatState.currentTurnId)
+    }
+
+    private fun releaseLegacyPendingStreamScopeIfIdle() {
+        if (!hasPendingLegacyStreamEvents()) legacyPendingStreamScope.clearPending()
+    }
+
+    private fun rejectMismatchedLegacyStreamFlush(): Boolean {
+        if (legacyPendingStreamScope.canDrain(currentThreadId.orEmpty(), chatState.currentTurnId)) return false
+        discardPendingStreamEvents("legacy_flush_scope_mismatch")
+        return true
+    }
+
     private fun resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
+        detachNativeContinuationHintBeforeRouteChange(threadId)
         pendingNativeSteers.clear()
         cancelGoalAutoRetry()
         goalRetryCycleActive = false
         goalRetryWaitingForCompletion = false
         suppressGoalRetryUntilNewTurn = false
         discardPendingStreamEvents("resume")
-        resetProtocolTurnState()
+        resetProtocolTurnState(preserveSequenceWatermarks = false)
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
         currentThreadId = threadId
@@ -2586,6 +2875,19 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         NativeTaskNotificationManager.markSeen(this, threadId)
         NativeTaskNotificationManager.setForegroundThread(this, threadId)
         val selectedConversation = chatState.conversations.firstOrNull { it.threadId == threadId }
+        val lifecycleHandoff = NativeChatLifecycleHandoff.peek(threadId)
+        val restoreLifecycleHandoff = NativeChatLifecycleHandoffPolicy.canRestore(
+            retainedRuntime,
+            threadId,
+            lifecycleHandoff,
+        )
+        if (!restoreLifecycleHandoff && lifecycleHandoff != null) {
+            NativeChatLifecycleHandoff.remove(threadId)
+            // The regular cache may point at the same in-memory-only snapshot. A recreated bridge
+            // must start from its own disk history instead of importing a previous runtime tail.
+            NativeHistorySnapshotCache.remove(threadId)
+        }
+        lifecycleHandoffRouteThreadId = threadId.takeIf { restoreLifecycleHandoff }.orEmpty()
         val cachedHistory = NativeHistorySnapshotCache.get(threadId)
         pendingCachedHistoryThreadId = threadId.takeIf { cachedHistory != null }
         pendingCachedHistorySnapshot = cachedHistory
@@ -2634,13 +2936,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun newConversation() = newConversationAtProject("")
 
     private fun newConversationAtProject(requestedProjectPath: String) {
+        // Project creation/registration enters through this callback. Re-evaluate cached legacy
+        // cwd values now so old tasks migrate in the same process instead of waiting for restart.
+        if (requestedProjectPath.isNotBlank()) refreshConversations()
+        detachNativeContinuationHintBeforeRouteChange(null)
         pendingNativeSteers.clear()
         cancelGoalAutoRetry()
         goalRetryCycleActive = false
         goalRetryWaitingForCompletion = false
         suppressGoalRetryUntilNewTurn = false
         discardPendingStreamEvents("new")
-        resetProtocolTurnState()
+        resetProtocolTurnState(preserveSequenceWatermarks = false)
         chatState.selectedMode = "default"
         subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
@@ -2652,12 +2958,14 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.currentThreadId = ""
         chatState.conversationAnimationKey = "new-${UUID.randomUUID()}"
         chatState.resetConversation()
-        chatState.projectPath = requestedProjectPath.takeIf { it.isNotBlank() && File(it).isDirectory } ?: configuredProjectPath()
+        chatState.projectPath = requestedProjectPath
+            .takeIf { it.isNotBlank() && File(it).isDirectory }
+            ?.let { runCatching { File(it).canonicalPath }.getOrDefault(it) }
+            .orEmpty()
         chatState.conversationTitle = "新对话"
         chatState.ready = false
         chatState.connectionLabel = "正在创建新对话…"
-        if (requestedProjectPath.isNotBlank()) bridge?.newConversationAtCwd(chatState.projectPath)
-        else bridge?.newConversation()
+        bridge?.newConversationAtCwd(chatState.projectPath.ifBlank { TermuxConstants.TERMUX_HOME_DIR_PATH })
     }
 
     private fun openHomeSettings() {
@@ -2679,13 +2987,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     }
 
     private fun openLegacyWebUi() {
-        CodexNativeRuntime.shutdown()
-        startActivity(
-            Intent(this, CodexHomeActivity::class.java)
-                .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-        )
-        finish()
+        startActivity(FcodeToolNavigation.webUiIntent(this))
     }
 
     /**
@@ -2704,7 +3006,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun flushReasoningDeltas(force: Boolean = false) {
         streamHandler.removeCallbacks(flushReasoningRunnable)
         reasoningFlushScheduled = false
-        if (pendingReasoning.isEmpty()) { reasoningPendingSince = 0L; return }
+        if (pendingReasoning.isEmpty()) {
+            reasoningPendingSince = 0L
+            releaseLegacyPendingStreamScopeIfIdle()
+            return
+        }
+        if (rejectMismatchedLegacyStreamFlush()) return
         if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) return
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingReasoning.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
@@ -2732,6 +3039,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 delta = value,
             ))
         }
+        releaseLegacyPendingStreamScopeIfIdle()
     }
 
     private fun answerFlushDelayMs(): Long {
@@ -2745,7 +3053,12 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun flushAnswerDeltas(force: Boolean = false) {
         streamHandler.removeCallbacks(flushAnswerRunnable)
         answerFlushScheduled = false
-        if (pendingAnswer.isEmpty()) { answerPendingSince = 0L; return }
+        if (pendingAnswer.isEmpty()) {
+            answerPendingSince = 0L
+            releaseLegacyPendingStreamScopeIfIdle()
+            return
+        }
+        if (rejectMismatchedLegacyStreamFlush()) return
         if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) return
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingAnswer.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
@@ -2770,6 +3083,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 delta = value,
             ))
         }
+        releaseLegacyPendingStreamScopeIfIdle()
     }
 
     private fun commandFlushDelayMs(): Long =
@@ -2778,7 +3092,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
     private fun flushCommandDeltas() {
         streamHandler.removeCallbacks(flushCommandRunnable)
         commandFlushScheduled = false
-        if (pendingCommand.isEmpty()) return
+        if (pendingCommand.isEmpty()) {
+            releaseLegacyPendingStreamScopeIfIdle()
+            return
+        }
+        if (rejectMismatchedLegacyStreamFlush()) return
         val delta = pendingCommand.toString()
         pendingCommand.setLength(0)
         if (!protocolCommandSeen) {
@@ -2793,15 +3111,21 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 ),
             )
         }
+        releaseLegacyPendingStreamScopeIfIdle()
     }
 
     private fun flushPlanDeltas() {
         streamHandler.removeCallbacks(flushPlanRunnable)
         planFlushScheduled = false
-        if (pendingPlan.isEmpty()) return
+        if (pendingPlan.isEmpty()) {
+            releaseLegacyPendingStreamScopeIfIdle()
+            return
+        }
+        if (rejectMismatchedLegacyStreamFlush()) return
         val delta = pendingPlan.toString()
         pendingPlan.setLength(0)
         chatState.appendProposedPlanDelta(JSONObject().put("itemId", pendingPlanItemId).put("delta", delta).toString())
+        releaseLegacyPendingStreamScopeIfIdle()
     }
 
     private fun consumePendingCachedHistory(threadId: String): NativeHistorySnapshot? {
@@ -2814,29 +3138,52 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     private fun applyPreparedHistory(threadId: String, snapshot: NativeHistorySnapshot, fresh: Boolean) {
         if (currentThreadId != threadId) return
+        val lifecycleHandoff = if (lifecycleHandoffRouteThreadId == threadId) {
+            NativeChatLifecycleHandoff.peek(threadId)
+        } else null
+        val preparedSnapshot = if (fresh && lifecycleHandoff != null) {
+            NativeChatLifecycleHandoff.mergeFreshHistory(snapshot, lifecycleHandoff)
+        } else snapshot
         // A very fast empty disk result may beat the two-frame cached-history commit. Preserve the
         // known cached conversation rather than flashing/settling on an empty thread.
         if (fresh) {
             val pendingCache = consumePendingCachedHistory(threadId)
-            if (snapshot.messages.isEmpty() && pendingCache?.messages?.isNotEmpty() == true && chatState.messages.isEmpty()) {
+            if (lifecycleHandoff == null && preparedSnapshot.messages.isEmpty() &&
+                pendingCache?.messages?.isNotEmpty() == true && chatState.messages.isEmpty()
+            ) {
                 chatState.applyHistorySnapshot(pendingCache)
                 displayedHistorySnapshot = pendingCache
             }
         }
-        val preserveCachedSnapshot = fresh && snapshot.messages.isEmpty() && chatState.messages.isNotEmpty()
-        val unchangedFreshSnapshot = fresh && displayedHistorySnapshot?.hasSameContent(snapshot) == true
+        val preserveCachedSnapshot = fresh && preparedSnapshot.messages.isEmpty() && chatState.messages.isNotEmpty()
+        val unchangedFreshSnapshot = fresh && displayedHistorySnapshot?.hasSameContent(preparedSnapshot) == true
+        var restoredLifecycleState = false
         if (!preserveCachedSnapshot && !unchangedFreshSnapshot) {
-            chatState.applyHistorySnapshot(snapshot)
-            displayedHistorySnapshot = snapshot
+            chatState.applyHistorySnapshot(preparedSnapshot)
+            displayedHistorySnapshot = preparedSnapshot
+            if (lifecycleHandoff != null &&
+                (!fresh || preparedSnapshot === lifecycleHandoff.history || !lifecycleHandoff.phase.active)
+            ) {
+                chatState.restoreLifecycleUiState(lifecycleHandoff)
+                restoredLifecycleState = true
+            }
         }
         if (fresh) {
-            if (!preserveCachedSnapshot && !unchangedFreshSnapshot) NativeHistorySnapshotCache.put(threadId, snapshot)
+            if (!preserveCachedSnapshot && !unchangedFreshSnapshot) {
+                NativeHistorySnapshotCache.put(threadId, preparedSnapshot)
+            }
+            // Keep an uncovered live tail for another recreation; authoritative fresh history
+            // releases the process-level handoff as soon as it semantically covers that tail.
+            if (lifecycleHandoff != null && preparedSnapshot !== lifecycleHandoff.history) {
+                NativeChatLifecycleHandoff.remove(threadId)
+                lifecycleHandoffRouteThreadId = ""
+            }
             chatState.historyLoading = false
         }
         // Older app-server histories may omit context-compaction items. Merge the bounded local
         // journal by stable server/id key; NativeChatState keeps one divider for duplicates.
         compactionJournalStore.load(threadId).takeIf { it.isNotEmpty() }?.let(chatState::restoreCompactions)
-        if (chatState.busy) {
+        if (chatState.busy && !restoredLifecycleState) {
             // A resumed running turn starts a fresh live phase after the persisted snapshot.
             chatState.turnMessageStartIndex = chatState.messages.size
             chatState.phaseMessageStartIndex = chatState.messages.size
@@ -2844,9 +3191,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         }
         NativeChatDiagnostics.record(this, "history_snapshot_applied", JSONObject()
             .put("thread", threadId.take(8)).put("fresh", fresh)
-            .put("messages", chatState.messages.size).put("estimatedChars", snapshot.estimatedChars)
+            .put("messages", chatState.messages.size).put("estimatedChars", preparedSnapshot.estimatedChars)
             .put("preservedCache", preserveCachedSnapshot)
-            .put("skippedUnchanged", unchangedFreshSnapshot))
+            .put("skippedUnchanged", unchangedFreshSnapshot)
+            .put("lifecycleHandoff", lifecycleHandoff != null)
+            .put("lifecycleTailPreserved", lifecycleHandoff != null && preparedSnapshot === lifecycleHandoff.history))
     }
 
     override fun onHistoryPrepared(threadId: String, generation: Int, snapshot: NativeHistorySnapshot) {
@@ -2866,9 +3215,6 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (currentThreadId != null && currentThreadId != value) return
                 currentThreadId = value
                 chatState.currentThreadId = value
-                if (chatState.projectPath.isBlank() && chatState.conversationAnimationKey.startsWith("new-")) {
-                    chatState.projectPath = configuredProjectPath()
-                }
                 restoreGoalForThread(value)
                 chatState.ready = true
                 bridge?.getThreadGoal()
@@ -2892,6 +3238,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (!protocolAssistantSeen) {
                     flushReasoningDeltas(force = true)
                     flushCommandDeltas()
+                    captureLegacyPendingStreamScope()
                     if (pendingAnswer.isEmpty()) answerPendingSince = android.os.SystemClock.uptimeMillis()
                     pendingAnswer.append(value)
                     if (!answerFlushScheduled) {
@@ -2922,6 +3269,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 if (!protocolReasoningSeen) {
                     flushAnswerDeltas(force = true)
                     flushCommandDeltas()
+                    captureLegacyPendingStreamScope()
                     if (pendingReasoning.isEmpty()) reasoningPendingSince = android.os.SystemClock.uptimeMillis()
                     pendingReasoning.append(value)
                     if (!reasoningFlushScheduled) {
@@ -2966,6 +3314,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onCommandDelta" -> {
                 if (!protocolCommandSeen) {
+                    captureLegacyPendingStreamScope()
                     pendingCommand.append(value)
                     if (!commandFlushScheduled) {
                         commandFlushScheduled = true
@@ -3042,6 +3391,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     val itemId = payload?.optString("itemId", payload.optString("item_id")).orEmpty()
                     val delta = payload?.optString("delta").orEmpty()
                     if (itemId.isNotBlank() && pendingPlanItemId.isNotBlank() && itemId != pendingPlanItemId) flushPlanDeltas()
+                    if (delta.isNotEmpty()) captureLegacyPendingStreamScope()
                     if (itemId.isNotBlank()) pendingPlanItemId = itemId
                     if (delta.isNotEmpty()) pendingPlan.append(delta)
                     if (!planFlushScheduled && pendingPlan.isNotEmpty()) { planFlushScheduled = true; streamHandler.postDelayed(flushPlanRunnable, 56L) }
@@ -3124,9 +3474,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
             }
             "onSubagentEvent" -> {
                 val thread = if (!protocolSubagentSeen) chatState.updateSubagent(value) else runCatching {
-                    val item = JSONObject(value)
-                    item.optString("agentThreadId", item.optString("agent_thread_id"))
+                    subagentThreadId(JSONObject(value))
                 }.getOrDefault("")
+                syncNativeContinuationHint()
                 if (thread.isNotBlank()) loadSubagentHistory(thread)
             }
             "onSubagentHistory" -> handleSubagentHistory(value)
@@ -3150,29 +3500,76 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                 chatState.addActivity(value)
             }
             "onTurnComplete" -> {
-                val wasFailed = chatState.phase == NativeTurnPhase.FAILED
+                val completion = value.takeIf { it.isNotBlank() }
+                    ?.let { runCatching { JSONObject(it) }.getOrNull() }
+                val completionThreadId = completion?.let(::protocolEventThread).orEmpty()
+                val routeThreadId = currentThreadId.orEmpty()
+                val completionTurnId = completion?.let(::protocolEventTurn).orEmpty()
+                    .ifBlank { lastProtocolCompletedTurnId }
+                val completionEpoch = protocolEventLocalEpoch(completion)
+                val activeTurnId = chatState.currentTurnId
+                val ownsVisibleTurn = NativeTurnCompletionDrainGate.drainIfOwned(
+                    completionThreadId = completionThreadId,
+                    currentThreadId = currentThreadId,
+                    completionTurnId = completionTurnId,
+                    completionEpoch = completionEpoch,
+                    currentEpoch = legacyPendingStreamScope.currentEpoch,
+                    currentTurnActive = chatState.phase.active,
+                    acceptTurn = { turnId ->
+                        chatState.shouldAcceptProtocolTurnCompletion(
+                            turnId,
+                            localEpochMatches = completionEpoch == legacyPendingStreamScope.currentEpoch,
+                        )
+                    },
+                    drain = ::drainPendingNativeUiEvents,
+                )
+                if (!ownsVisibleTurn) {
+                    NativeChatDiagnostics.record(this, "stale_turn_completion_ignored", JSONObject()
+                        .put("thread", currentThreadId.orEmpty().take(8))
+                        .put("completedThread", completionThreadId.take(8))
+                        .put("completedTurn", completionTurnId.take(12))
+                        .put("activeTurn", activeTurnId.take(12)))
+                    return
+                }
+                // Only the completion that owns the visible thread/turn may publish the global
+                // compatibility StringBuilders. An old completion can otherwise flush a new turn.
+                val completionTurn = completion?.optJSONObject("turn")
+                val nestedContinuation = completionTurn?.let {
+                    it.optBoolean(
+                        "hasPendingContinuation",
+                        it.optBoolean("has_pending_continuation", false),
+                    )
+                } ?: false
+                val hasPendingContinuation = completion?.let {
+                    it.optBoolean(
+                        "hasPendingContinuation",
+                        it.optBoolean("has_pending_continuation", nestedContinuation),
+                    )
+                } ?: nestedContinuation
+                val wasFailed = chatState.phase == NativeTurnPhase.FAILED ||
+                    nativeTurnLifecycleFailed(completionTurn, completion?.optJSONObject("details"), completion)
+                val stableCompletionTurn = completionTurnId.ifBlank { activeTurnId }
+                if (!claimTurnCompletion(routeThreadId, stableCompletionTurn)) return
                 val waitingForGoalRetry = goalRetryWaitingForCompletion
-                cancelPendingAutoCompaction()
-                if (!protocolTurnCompletedSeen) chatState.acceptProtocolEvent(NativeProtocolEvent.TurnCompleted(
-                    threadId = currentThreadId.orEmpty(),
-                    turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
-                    failed = wasFailed,
-                ))
+                if (!protocolTurnCompletedSeen) {
+                    chatState.acceptProtocolEvent(NativeProtocolEvent.TurnCompleted(
+                        threadId = routeThreadId,
+                        turnId = completionTurnId.takeIf { it.isNotBlank() }
+                            ?: chatState.currentTurnId.takeIf { it.isNotBlank() },
+                        failed = wasFailed,
+                    ))
+                    chatState.completeTurn()
+                }
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
-                flushReasoningDeltas(force = true)
-                flushAnswerDeltas(force = true)
-                flushPlanDeltas()
-                flushCommandDeltas()
                 approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
                 currentThreadId?.takeIf { chatState.pendingUserInputRequest.isNotBlank() }
                     ?.let(::clearPendingUserInput)
-                chatState.completeTurn()
                 if (wasFailed) chatState.phase = NativeTurnPhase.FAILED
                 pendingPlanItemId = ""
                 if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
-                stopFrameDiagnostics()
+                if (!hasPendingContinuation) stopFrameDiagnostics()
                 refreshConversations()
-                applyPendingProviderConfiguration()
+                if (!hasPendingContinuation) applyPendingProviderConfiguration()
                 val hasQueuedFollowUp = chatState.queuedFollowUps.isNotEmpty()
                 if (hasQueuedFollowUp) {
                     // Keep the completion barrier observable for one frame, then start exactly one
@@ -3184,20 +3581,28 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     goalRetryWaitingForCompletion = false
                     cancelGoalAutoRetry()
                     scheduleGoalRetry(400L)
+                } else if (hasPendingContinuation && !hasQueuedFollowUp && !goalRetryWaitingForCompletion) {
+                    chatState.phase = NativeTurnPhase.WAITING
+                    chatState.processingLabel = nativeText(nativeLanguage, "继续处理中", "Continuing")
                 } else if (!wasFailed && !goalRetryWaitingForCompletion) {
                     goalRetryCycleActive = false
                     chatState.completeRetryStatus()
                 }
+                syncNativeContinuationHint()
+            }
+            "onHistoryWarning" -> {
+                chatState.historyLoading = false
+                NativeChatDiagnostics.record(this, "history_warning", JSONObject()
+                    .put("thread", currentThreadId.orEmpty().take(8))
+                    .put("message", value.take(600)))
+                chatState.addNotice(value)
             }
             "onNativeError" -> {
-                // History and backend failures must leave the loading shell immediately; keeping
-                // this true can make a useful error look like the same blank route that failed.
+                // Terminal backend failures must leave the loading shell immediately; keeping this
+                // true can make a useful error look like the same blank route that failed.
                 chatState.historyLoading = false
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
-                flushReasoningDeltas(force = true)
-                flushAnswerDeltas(force = true)
-                flushPlanDeltas()
-                flushCommandDeltas()
+                drainPendingNativeUiEvents()
                 approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
                 NativeChatDiagnostics.record(this, "native_error", JSONObject()
                     .put("thread", currentThreadId.orEmpty().take(8))
@@ -3228,6 +3633,8 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         nativeChatBackground = FcodeChatBackgroundStyle.from(prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND, FcodeChatBackgroundStyle.THEME.value)).value
         nativeChatBackgroundImage = prefs.getString(FcodeAppearancePreferences.CHAT_BACKGROUND_IMAGE, "").orEmpty()
         nativeChatBackgroundDim = prefs.getFloat(FcodeAppearancePreferences.CHAT_BACKGROUND_DIM, 0.32f).coerceIn(0f, 0.72f)
+        nativeChatFontScale = readFcodeChatFontScale(this)
+        nativeMaterialTransparency = readFcodeMaterialTransparencyConfig(this)
         nativeLanguage = prefs.getString("native_language_v1", "system").orEmpty().let {
             if (it == "en") "en" else if (it == "zh") "zh" else if (Locale.getDefault().language == "en") "en" else "zh"
         }
@@ -3243,8 +3650,18 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))
         AppUpdateManager.clearLegacyDownloadState(this)
         AppUpdateManager.checkAutomatically(this, nativeLanguage)
-        bridge?.loadSkills()
-        reloadProviderConfigurationIfChanged()
+        // The WebUI intentionally takes exclusive ownership of the Codex backend. When its
+        // host finishes, this Activity is still in the back stack with a reference to the old,
+        // stopped bridge; rebuild it before accepting another native turn.
+        if (runtimeStartAttempted && !backendConfigurationLoaded && isCodexCliInstalled()) {
+            startBackend(preferConfiguredDefault = true)
+        } else if (backendConfigurationLoaded && bridge != null && !CodexNativeRuntime.exists()) {
+            bridge = null
+            startBackend()
+        } else {
+            bridge?.loadSkills()
+            reloadProviderConfigurationIfChanged()
+        }
         if (chatState.busy) startFrameDiagnostics()
     }
 
@@ -3265,9 +3682,25 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         else NativeTaskNotificationManager.setForegroundThread(this, threadId)
     }
 
+    private fun persistLifecycleHandoffBeforeDetach() {
+        val threadId = currentThreadId?.takeIf { it.isNotBlank() } ?: return
+        if (!CodexNativeRuntime.exists() || Looper.myLooper() != Looper.getMainLooper()) return
+        drainPendingNativeUiEvents()
+        val handoff = chatState.lifecycleHandoffSnapshot()
+        if (handoff.threadId != threadId) return
+        NativeChatLifecycleHandoff.remember(handoff)
+        NativeHistorySnapshotCache.put(threadId, handoff.history)
+        NativeChatDiagnostics.record(this, "activity_lifecycle_handoff", JSONObject()
+            .put("thread", threadId.take(8))
+            .put("phase", handoff.phase.name.lowercase(Locale.ROOT))
+            .put("messages", handoff.history.messages.size)
+            .put("estimatedChars", handoff.history.estimatedChars))
+    }
+
     override fun onDestroy() {
         backendStartGeneration++
         backendScope.cancel()
+        persistLifecycleHandoffBeforeDetach()
         streamHandler.removeCallbacksAndMessages(null)
         getSharedPreferences("codex_mobile", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(taskPreferenceListener)
         CodexNativeRuntime.detach(this)

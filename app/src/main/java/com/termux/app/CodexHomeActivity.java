@@ -5,13 +5,12 @@ import android.Manifest;
 import android.animation.StateListAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.ProgressDialog;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ShortcutInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ShortcutManager;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
 import android.graphics.Canvas;
@@ -25,7 +24,6 @@ import android.graphics.drawable.Animatable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
-import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -63,6 +61,7 @@ import android.widget.Space;
 import android.widget.TextView;
 import android.widget.Toast;
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.termux.BuildConfig;
 import com.termux.app.CodexProviderStore;
 import com.termux.app.MihomoControllerClient;
@@ -99,8 +98,12 @@ public final class CodexHomeActivity extends Activity {
     static final String ACTION_OPEN_WEBUI = "com.ilyop.codex.OPEN_WEBUI";
     static final String ACTION_OPEN_TERMUX = "com.ilyop.codex.OPEN_TERMUX";
     static final String ACTION_OPEN_SETTINGS = "com.ilyop.codex.OPEN_SETTINGS";
+    static final String EXTRA_RETURN_TO_NATIVE = "com.ilyop.codex.RETURN_TO_NATIVE";
+    private static final String STATE_RETURN_TO_NATIVE = "return_to_native_after_external_tool";
+    private static final String STATE_FINISH_AFTER_TERMINAL = "finish_after_external_terminal";
     private static final int OVERLAY_PERMISSION_REQUEST = 4111;
     private static final int STORAGE_PERMISSION_REQUEST = 4112;
+    private static final String PREF_CODEX_INSTALL_PROMPT_VIEWED = "codex_install_prompt_viewed_v1";
     private ScrollView overlaySettingsPage;
     private ScrollView aboutPage;
     private View topNoticeView;
@@ -114,6 +117,8 @@ public final class CodexHomeActivity extends Activity {
     private String pendingLaunchAction;
     private String pendingSharePayload;
     private boolean pendingShareNewConversation;
+    private boolean returnToNativeAfterExternalTool;
+    private boolean finishAfterExternalTerminalReturn;
     private boolean editorProxyEnabled, editorProxyWebUi, editorProxyTermux;
     private boolean editorForwardReasoningContext;
     private boolean editorCustomSubagentStability;
@@ -164,6 +169,8 @@ public final class CodexHomeActivity extends Activity {
     private EditText model;
     private TextView onboardingRuntimeState;
     private LinearLayout onboardingView;
+    private Dialog codexInstallPrompt;
+    private Runnable pendingCodexInstallAction;
     private TextView pageTitle;
     private ValueCallback<Uri[]> pendingFileChooser;
     private SharedPreferences prefs;
@@ -213,6 +220,13 @@ public final class CodexHomeActivity extends Activity {
         configureWindow();
         this.prefs = getSharedPreferences("codex_mobile", 0);
         captureLaunchIntent(getIntent());
+        if (state != null) {
+            this.returnToNativeAfterExternalTool = state.getBoolean(
+                STATE_RETURN_TO_NATIVE,
+                this.returnToNativeAfterExternalTool
+            );
+            this.finishAfterExternalTerminalReturn = state.getBoolean(STATE_FINISH_AFTER_TERMINAL, false);
+        }
         this.providerStore = new CodexProviderStore(this.prefs);
         this.mihomoManager = MihomoManager.get(this);
         this.mihomoController = new MihomoControllerClient(this.mihomoManager);
@@ -267,6 +281,11 @@ public final class CodexHomeActivity extends Activity {
     @Override // android.app.Activity
     protected void onResume() {
         super.onResume();
+        if (this.finishAfterExternalTerminalReturn) {
+            this.finishAfterExternalTerminalReturn = false;
+            finish();
+            return;
+        }
         if (this.runtimeState != null) {
             refreshRuntimeState();
         }
@@ -291,6 +310,14 @@ public final class CodexHomeActivity extends Activity {
 
     private void captureLaunchIntent(Intent intent) {
         this.pendingLaunchAction = intent == null ? null : intent.getAction();
+        boolean externalToolAction = ACTION_OPEN_WEBUI.equals(this.pendingLaunchAction)
+            || ACTION_OPEN_TERMUX.equals(this.pendingLaunchAction);
+        this.returnToNativeAfterExternalTool = externalToolAction
+            && intent != null
+            && intent.getBooleanExtra(EXTRA_RETURN_TO_NATIVE, false);
+        if (!this.returnToNativeAfterExternalTool || !ACTION_OPEN_TERMUX.equals(this.pendingLaunchAction)) {
+            this.finishAfterExternalTerminalReturn = false;
+        }
         if (intent != null && (CodexShareActivity.ACTION_SHARE_TO_CURRENT_UI.equals(this.pendingLaunchAction)
             || CodexShareActivity.ACTION_SHARE_TO_NEW_UI.equals(this.pendingLaunchAction))) {
             this.pendingSharePayload = intent.getStringExtra(CodexShareActivity.EXTRA_SHARE_PAYLOAD);
@@ -2141,13 +2168,8 @@ public final class CodexHomeActivity extends Activity {
     }
 
     private void pinLauncherShortcut(boolean terminal) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) { Toast.makeText(this, "\u5f53\u524d\u684c\u9762\u4e0d\u652f\u6301\u5e94\u7528\u5185\u6dfb\u52a0\u5feb\u6377\u56fe\u6807", Toast.LENGTH_SHORT).show(); return; }
-        ShortcutManager manager = getSystemService(ShortcutManager.class);
-        if (manager == null || !manager.isRequestPinShortcutSupported()) { Toast.makeText(this, "\u5f53\u524d\u684c\u9762\u4e0d\u652f\u6301\u56fa\u5b9a\u5feb\u6377\u56fe\u6807", Toast.LENGTH_SHORT).show(); return; }
-        String id = terminal ? "codex_termux" : "codex_webui"; String label = terminal ? "Sillage Termux" : "Sillage WebUI";
-        Intent launch = new Intent(this, CodexHomeActivity.class).setAction(terminal ? ACTION_OPEN_TERMUX : ACTION_OPEN_WEBUI).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        ShortcutInfo shortcut = new ShortcutInfo.Builder(this, id).setShortLabel(label).setLongLabel(terminal ? "\u542f\u52a8 Codex \u5185\u7f6e Termux" : "\u6253\u5f00 Codex WebUI").setIcon(Icon.createWithResource(this, terminal ? com.termux.R.drawable.ic_new_session : com.termux.R.drawable.ic_codex_logo)).setIntent(launch).build();
-        Toast.makeText(this, manager.requestPinShortcut(shortcut, null) ? "\u5df2\u8bf7\u6c42\u5c06 " + label + " \u6dfb\u52a0\u5230\u684c\u9762" : "\u684c\u9762\u5feb\u6377\u56fe\u6807\u6dfb\u52a0\u5931\u8d25", Toast.LENGTH_SHORT).show();
+        if (terminal) FcodeLauncherShortcuts.pinTermux(this);
+        else FcodeLauncherShortcuts.pinWebUi(this);
     }
 
     private ScrollView buildAboutPage() {
@@ -2288,7 +2310,12 @@ public final class CodexHomeActivity extends Activity {
     }
 
     private void requestStartupPermissions() {
+        if (isFinishing() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) return;
         if (this.prefs == null || this.prefs.getBoolean("startup_permissions_prompted_v1", false)) return;
+        if (!hasWindowFocus() || (this.codexInstallPrompt != null && this.codexInstallPrompt.isShowing())) {
+            this.root.postDelayed(this::requestStartupPermissions, 900L);
+            return;
+        }
         this.prefs.edit().putBoolean("startup_permissions_prompted_v1", true).apply();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, STORAGE_PERMISSION_REQUEST);
@@ -4053,7 +4080,10 @@ public final class CodexHomeActivity extends Activity {
     }
 
     public void lambda$buildOnboarding$10$CodexHomeActivity(View v) {
-        this.prefs.edit().putBoolean("setup_skipped", true).apply();
+        this.prefs.edit()
+            .putBoolean("setup_skipped", true)
+            .putBoolean(PREF_CODEX_INSTALL_PROMPT_VIEWED, true)
+            .apply();
         transitionToMain();
     }
 
@@ -4304,11 +4334,46 @@ public final class CodexHomeActivity extends Activity {
     }
 
     public void routeAfterSplash() {
-        if (isCodexInstalled() || this.prefs.getBoolean("setup_skipped", false)) {
-            transitionToMain();
-        } else {
-            showOnboardingFromSplash();
+        boolean promptWasViewed = this.prefs.getBoolean(PREF_CODEX_INSTALL_PROMPT_VIEWED, false)
+            || this.prefs.getBoolean("setup_skipped", false);
+        boolean shouldOfferCodex = !isCodexInstalled() && !promptWasViewed;
+        transitionToMain();
+        if (shouldOfferCodex) {
+            this.root.postDelayed(() -> {
+                if (!isCodexInstalled() && !this.prefs.getBoolean(PREF_CODEX_INSTALL_PROMPT_VIEWED, false)) {
+                    showCodexInstallPrompt(null);
+                }
+            }, 520L);
         }
+    }
+
+    private void showCodexInstallPrompt(Runnable afterInstall) {
+        if (isCodexInstalled()) {
+            if (afterInstall != null) afterInstall.run();
+            return;
+        }
+        if (isFinishing() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) return;
+        if (afterInstall != null) this.pendingCodexInstallAction = afterInstall;
+        this.prefs.edit().putBoolean(PREF_CODEX_INSTALL_PROMPT_VIEWED, true).apply();
+        if (this.codexInstallPrompt != null && this.codexInstallPrompt.isShowing()) return;
+
+        final Dialog dialog = new MaterialAlertDialogBuilder(this)
+            .setIcon(com.termux.R.drawable.ic_codex_logo)
+            .setTitle("下载 Codex CLI？")
+            .setMessage("原生聊天、WebUI 和 Termux 需要 Codex CLI 才能运行。\n\n安装包来自 OpenAI 官方 Release，会保存在应用私有目录，不会覆盖你的会话、项目和配置。")
+            .setNegativeButton("稍后", (dismissed, which) -> this.pendingCodexInstallAction = null)
+            .setPositiveButton("下载 Codex", (confirmed, which) -> {
+                Runnable resumeAction = this.pendingCodexInstallAction;
+                this.pendingCodexInstallAction = null;
+                this.root.post(() -> installInternalRuntime(false, resumeAction));
+            })
+            .create();
+        dialog.setOnDismissListener(dismissed -> {
+            if (this.codexInstallPrompt == dialog) this.codexInstallPrompt = null;
+            this.pendingCodexInstallAction = null;
+        });
+        this.codexInstallPrompt = dialog;
+        dialog.show();
     }
 
     private void animateSplashLogo() {
@@ -4460,16 +4525,15 @@ public final class CodexHomeActivity extends Activity {
 
     private void startNativeChat() {
         closeDrawer();
+        if (!isCodexInstalled()) {
+            showCodexInstallPrompt(this::startNativeChat);
+            return;
+        }
         CodexProviderStore.Profile active = providerStore == null ? null : providerStore.active();
         if (active == null || active.baseUrl == null || active.baseUrl.trim().isEmpty()
                 || active.apiKey == null || active.apiKey.trim().isEmpty()) {
             showConfiguration();
             Toast.makeText(this, "请先创建并启用 API 配置", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (!isCodexInstalled()) {
-            Toast.makeText(this, "请先安装 Codex CLI", Toast.LENGTH_SHORT).show();
-            showOnboardingFromMain();
             return;
         }
         // Do not leave the WebUI app-server/proxy alive behind native chat. Two Codex
@@ -4485,6 +4549,10 @@ public final class CodexHomeActivity extends Activity {
 
     public void startWebUi() {
         closeDrawer();
+        if (!isCodexInstalled()) {
+            showCodexInstallPrompt(this::startWebUi);
+            return;
+        }
         if (CodexNativeRuntime.exists()) {
             CodexNativeRuntime.shutdown();
             this.backendSuspendedForNative = false;
@@ -4492,7 +4560,6 @@ public final class CodexHomeActivity extends Activity {
         final CodexProviderStore.Profile active = providerStore.active();
         final String url = baseUrl.getText().toString().trim(), key = apiKey.getText().toString().trim(), selectedModel = model.getText().toString().trim();
         if (url.isEmpty() || key.isEmpty()) { showConfiguration(); Toast.makeText(this, "\u8bf7\u5148\u521b\u5efa\u5e76\u542f\u7528 API \u914d\u7f6e", Toast.LENGTH_SHORT).show(); return; }
-        if (!isCodexInstalled()) { Toast.makeText(this, "\u8bf7\u5148\u5b89\u88c5 Codex CLI", Toast.LENGTH_SHORT).show(); showOnboardingFromMain(); return; }
         final boolean route = shouldRouteWebUi(active); Runnable launch = () -> startWebUiNow(url, key, selectedModel, route);
         if (route) ensureMihomoForLaunch("WebUI", launch); else launch.run();
     }
@@ -4591,6 +4658,10 @@ public final class CodexHomeActivity extends Activity {
     }
 
     private void installInternalRuntime(final boolean enterMainWhenDone) {
+        installInternalRuntime(enterMainWhenDone, null);
+    }
+
+    private void installInternalRuntime(final boolean enterMainWhenDone, final Runnable afterInstall) {
         ProgressBar progressBar = this.progress;
         if (progressBar != null) {
             progressBar.setVisibility(0);
@@ -4606,21 +4677,21 @@ public final class CodexHomeActivity extends Activity {
         TermuxInstaller.setupBootstrapIfNeeded(this, new Runnable() { // from class: com.termux.app.CodexHomeActivity.16
             @Override // java.lang.Runnable
             public final void run() {
-                CodexHomeActivity.this.lambda$installInternalRuntime$20$CodexHomeActivity(enterMainWhenDone);
+                CodexHomeActivity.this.lambda$installInternalRuntime$20$CodexHomeActivity(enterMainWhenDone, afterInstall);
             }
         });
     }
 
-    public void lambda$installInternalRuntime$20$CodexHomeActivity(final boolean enterMainWhenDone) {
+    public void lambda$installInternalRuntime$20$CodexHomeActivity(final boolean enterMainWhenDone, final Runnable afterInstall) {
         CodexInstaller.setupBootstrapIfNeeded(this, new Runnable() { // from class: com.termux.app.CodexHomeActivity.17
             @Override // java.lang.Runnable
             public final void run() {
-                CodexHomeActivity.this.lambda$installInternalRuntime$19$CodexHomeActivity(enterMainWhenDone);
+                CodexHomeActivity.this.lambda$installInternalRuntime$19$CodexHomeActivity(enterMainWhenDone, afterInstall);
             }
         });
     }
 
-    public void lambda$installInternalRuntime$19$CodexHomeActivity(boolean enterMainWhenDone) {
+    public void lambda$installInternalRuntime$19$CodexHomeActivity(boolean enterMainWhenDone, Runnable afterInstall) {
         ProgressBar progressBar = this.progress;
         if (progressBar != null) {
             progressBar.setVisibility(8);
@@ -4634,6 +4705,7 @@ public final class CodexHomeActivity extends Activity {
         if (enterMainWhenDone) {
             transitionToMain();
         }
+        if (afterInstall != null) afterInstall.run();
     }
 
     public void installDevelopmentExtensions() {
@@ -4722,15 +4794,31 @@ public final class CodexHomeActivity extends Activity {
     }
 
     public void openInternalTerminal() {
-        closeDrawer(); if (!isCodexInstalled()) { Toast.makeText(this, "\u8bf7\u5148\u5b89\u88c5 Codex CLI", Toast.LENGTH_SHORT).show(); showOnboardingFromMain(); return; }
+        closeDrawer();
+        if (!isCodexInstalled()) {
+            showCodexInstallPrompt(this::openInternalTerminal);
+            return;
+        }
         CodexProviderStore.Profile active = providerStore.active(); String url = baseUrl.getText().toString().trim(), key = apiKey.getText().toString().trim(), selectedModel = model.getText().toString().trim();
         if (url.isEmpty() || key.isEmpty()) { showConfiguration(); Toast.makeText(this, "\u8bf7\u5148\u521b\u5efa\u5e76\u542f\u7528 API \u914d\u7f6e", Toast.LENGTH_SHORT).show(); return; }
         boolean route = shouldRouteTermux(active); Runnable launch = () -> openInternalTerminalNow(url, key, selectedModel, route); if (route) ensureMihomoForLaunch("Termux", launch); else launch.run();
     }
 
     private void openInternalTerminalNow(String url, String key, String selectedModel, boolean route) {
-        try { if (terminalApiProxy != null) terminalApiProxy.stop(); LocalApiProxy local = new LocalApiProxy(url, activeApiFormat(), route, mihomoManager.mixedPort(), shouldForwardReasoningContext(), activeUltraTransportEfforts(), activePreventRecursiveSubagents()); terminalApiProxy = local; int port = local.start(); writeTerminalProxyConfig(port, key, selectedModel, activeApiFormat()); startActivity(new Intent(this, TermuxActivity.class)); }
-        catch (Exception error) { Toast.makeText(this, "Termux API \u4ee3\u7406\u542f\u52a8\u5931\u8d25\uff1a" + error.getMessage(), Toast.LENGTH_LONG).show(); showConfiguration(); }
+        try {
+            if (terminalApiProxy != null) terminalApiProxy.stop();
+            LocalApiProxy local = new LocalApiProxy(url, activeApiFormat(), route, mihomoManager.mixedPort(), shouldForwardReasoningContext(), activeUltraTransportEfforts(), activePreventRecursiveSubagents());
+            terminalApiProxy = local;
+            int port = local.start();
+            writeTerminalProxyConfig(port, key, selectedModel, activeApiFormat());
+            this.finishAfterExternalTerminalReturn = this.returnToNativeAfterExternalTool;
+            startActivity(new Intent(this, TermuxActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+        } catch (Exception error) {
+            this.finishAfterExternalTerminalReturn = false;
+            Toast.makeText(this, "Termux API \u4ee3\u7406\u542f\u52a8\u5931\u8d25\uff1a" + error.getMessage(), Toast.LENGTH_LONG).show();
+            showConfiguration();
+        }
     }
 
     private void writeTerminalProxyConfig(int port, String key, String selectedModel, String apiFormat) throws Exception {
@@ -5060,6 +5148,8 @@ public final class CodexHomeActivity extends Activity {
         }
         if (this.configPage.getVisibility() == 0 && this.providerEditorOpen) {
             renderProviderList();
+        } else if (this.webView.getVisibility() == 0 && this.returnToNativeAfterExternalTool) {
+            finish();
         } else if (this.webView.getVisibility() == 0 || this.configPage.getVisibility() == 0 || this.settingsPage.getVisibility() == 0) {
             showHome();
         } else {
@@ -5067,8 +5157,20 @@ public final class CodexHomeActivity extends Activity {
         }
     }
 
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        outState.putBoolean(STATE_RETURN_TO_NATIVE, this.returnToNativeAfterExternalTool);
+        outState.putBoolean(STATE_FINISH_AFTER_TERMINAL, this.finishAfterExternalTerminalReturn);
+        super.onSaveInstanceState(outState);
+    }
+
     @Override // android.app.Activity
     protected void onDestroy() {
+        if (this.codexInstallPrompt != null && this.codexInstallPrompt.isShowing()) {
+            this.codexInstallPrompt.dismiss();
+        }
+        this.codexInstallPrompt = null;
+        this.pendingCodexInstallAction = null;
         CodexAppServerBridge codexAppServerBridge = this.appServerBridge;
         if (codexAppServerBridge != null) {
             codexAppServerBridge.stop();

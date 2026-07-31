@@ -1,5 +1,6 @@
 package com.termux.app
 
+import android.os.Build
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -8,8 +9,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.produceState
@@ -20,6 +24,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,8 +45,58 @@ internal object FcodeAppearancePreferences {
     const val CHAT_DYNAMIC_BACKGROUND_REFRACTION_AMOUNT_DP = "native_chat_dynamic_background_refraction_amount_dp_v1"
     const val CHAT_DYNAMIC_BACKGROUND_CHROMATIC = "native_chat_dynamic_background_chromatic_v1"
     const val COMPACT_COMPOSER_ON_SCROLL = "native_compact_composer_on_scroll_v1"
+    const val CHAT_FONT_SCALE = "native_chat_font_scale_v1"
+    const val MATERIAL_USER_BUBBLE_ALPHA = "native_material_user_bubble_alpha_v1"
+    const val MATERIAL_ACTIVITY_ALPHA = "native_material_activity_alpha_v1"
+    const val MATERIAL_COMPOSER_ALPHA = "native_material_composer_alpha_v1"
+
+    const val DEFAULT_CHAT_FONT_SCALE = 0.87f
 
     fun normalizeColorMode(value: String?): String = value?.takeIf { it in setOf("system", "light", "dark") } ?: "system"
+}
+
+@Immutable
+internal data class FcodeMaterialTransparencyConfig(
+    val userBubbleAlpha: Float = DEFAULT_USER_BUBBLE_ALPHA,
+    val activityAlpha: Float = DEFAULT_ACTIVITY_ALPHA,
+    val composerAlpha: Float = DEFAULT_COMPOSER_ALPHA,
+) {
+    companion object {
+        const val DEFAULT_USER_BUBBLE_ALPHA = 0.92f
+        const val DEFAULT_ACTIVITY_ALPHA = 0.86f
+        const val DEFAULT_COMPOSER_ALPHA = 0.94f
+        const val MIN_ALPHA = 0.10f
+        const val MAX_ALPHA = 1f
+    }
+
+    fun normalized(): FcodeMaterialTransparencyConfig = copy(
+        userBubbleAlpha = userBubbleAlpha.coerceIn(MIN_ALPHA, MAX_ALPHA),
+        activityAlpha = activityAlpha.coerceIn(MIN_ALPHA, MAX_ALPHA),
+        composerAlpha = composerAlpha.coerceIn(MIN_ALPHA, MAX_ALPHA),
+    )
+}
+
+internal fun readFcodeChatFontScale(context: android.content.Context): Float =
+    context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)
+        .getFloat(FcodeAppearancePreferences.CHAT_FONT_SCALE, FcodeAppearancePreferences.DEFAULT_CHAT_FONT_SCALE)
+        .coerceIn(0.5f, 2f)
+
+internal fun readFcodeMaterialTransparencyConfig(context: android.content.Context): FcodeMaterialTransparencyConfig {
+    val prefs = context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)
+    return FcodeMaterialTransparencyConfig(
+        userBubbleAlpha = prefs.getFloat(
+            FcodeAppearancePreferences.MATERIAL_USER_BUBBLE_ALPHA,
+            FcodeMaterialTransparencyConfig.DEFAULT_USER_BUBBLE_ALPHA,
+        ),
+        activityAlpha = prefs.getFloat(
+            FcodeAppearancePreferences.MATERIAL_ACTIVITY_ALPHA,
+            FcodeMaterialTransparencyConfig.DEFAULT_ACTIVITY_ALPHA,
+        ),
+        composerAlpha = prefs.getFloat(
+            FcodeAppearancePreferences.MATERIAL_COMPOSER_ALPHA,
+            FcodeMaterialTransparencyConfig.DEFAULT_COMPOSER_ALPHA,
+        ),
+    ).normalized()
 }
 
 /**
@@ -140,6 +196,7 @@ internal enum class FcodeInterfaceStyle(val value: String) {
 }
 
 internal enum class FcodeColorPalette(val value: String) {
+    WALLPAPER("wallpaper"),
     ROSE("rose"),
     OCEAN("ocean"),
     FOREST("forest"),
@@ -189,6 +246,8 @@ internal val LocalFcodeChatBackground = staticCompositionLocalOf { FcodeChatBack
 internal val LocalFcodeChatBackgroundImage = staticCompositionLocalOf { "" }
 internal val LocalFcodeChatBackgroundDim = staticCompositionLocalOf { 0.32f }
 internal val LocalFcodeChatDynamicBackground = staticCompositionLocalOf { FcodeChatDynamicBackgroundConfig() }
+internal val LocalFcodeChatFontScale = staticCompositionLocalOf { FcodeAppearancePreferences.DEFAULT_CHAT_FONT_SCALE }
+internal val LocalFcodeMaterialTransparency = staticCompositionLocalOf { FcodeMaterialTransparencyConfig() }
 internal val LocalFcodeMarkdownColors = staticCompositionLocalOf {
     fcodeMarkdownColors(FcodeColorPalette.ROSE, dark = false, scheme = fcodeColorScheme(FcodeColorPalette.ROSE, false))
 }
@@ -241,6 +300,7 @@ private val RoseDark = darkColorScheme(
 internal fun fcodeColorScheme(palette: FcodeColorPalette, dark: Boolean): ColorScheme {
     val base = if (dark) RoseDark else RoseLight
     return when (palette) {
+        FcodeColorPalette.WALLPAPER -> base
         FcodeColorPalette.ROSE -> base
         FcodeColorPalette.OCEAN -> if (dark) base.copy(
             primary = Color(0xFFA5C9FF), onPrimary = Color(0xFF00315C),
@@ -330,6 +390,27 @@ internal fun fcodeColorScheme(palette: FcodeColorPalette, dark: Boolean): ColorS
             surfaceContainerHighest = Color(0xFFDFDEE2),
         )
     }
+}
+
+internal fun fcodeResolvedColorScheme(
+    context: android.content.Context,
+    palette: FcodeColorPalette,
+    dark: Boolean,
+): ColorScheme = if (palette == FcodeColorPalette.WALLPAPER && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+} else {
+    fcodeColorScheme(palette, dark)
+}
+
+/** Applies the chat-only type ratio without shrinking navigation chrome or touch targets. */
+@Composable
+internal fun FcodeChatTypography(content: @Composable () -> Unit) {
+    val density = LocalDensity.current
+    val ratio = LocalFcodeChatFontScale.current.coerceIn(0.5f, 2f)
+    CompositionLocalProvider(
+        LocalDensity provides Density(density.density, density.fontScale * ratio),
+        content = content,
+    )
 }
 
 

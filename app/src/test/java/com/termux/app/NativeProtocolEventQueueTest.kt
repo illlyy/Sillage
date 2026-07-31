@@ -32,4 +32,21 @@ class NativeProtocolEventQueueTest {
         queue.offer(delta)
         assertEquals(listOf(delta, barrier), queue.offer(barrier))
     }
+
+    @Test
+    fun localTurnResetDropsPendingButKeepsSequenceWatermark() {
+        val queue = NativeOrderedProtocolEventQueue()
+        val emitted = NativeProtocolEvent.ReasoningDelta("t", delta = "old", sequence = 7)
+        queue.offer(emitted)
+        assertEquals(listOf(emitted), queue.drain())
+
+        queue.offer(NativeProtocolEvent.ReasoningDelta("t", delta = "queued", sequence = 8))
+        queue.clearPendingPreservingWatermarks()
+
+        assertTrue(queue.offer(NativeProtocolEvent.ReasoningDelta("t", delta = "late-old", sequence = 8)).isEmpty())
+        assertTrue(queue.drain().isEmpty())
+        val fresh = NativeProtocolEvent.ReasoningDelta("t", delta = "fresh", sequence = 9)
+        queue.offer(fresh)
+        assertEquals(listOf(fresh), queue.drain())
+    }
 }

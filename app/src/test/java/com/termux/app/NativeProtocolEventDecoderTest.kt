@@ -1,10 +1,33 @@
 package com.termux.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativeProtocolEventDecoderTest {
+    @Test
+    fun decodesPrimaryTurnStartedEnvelope() {
+        val event = NativeProtocolEventDecoder.decodeLifecycle(
+            """{"method":"turn/started","params":{"thread_id":"thread-a","turn":{"id":"turn-2"}}}""",
+        ) as NativeProtocolEvent.TurnStarted
+
+        assertEquals("thread-a", event.threadId)
+        assertEquals("turn-2", event.turnId)
+        assertNull(event.itemId)
+    }
+
+    @Test
+    fun rawFailedTurnCompletionReadsNestedTurnStatus() {
+        val event = NativeProtocolEventDecoder.decodeLifecycle(
+            """{"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-2","status":"failed","error":{"message":"boom"}}}}""",
+        ) as NativeProtocolEvent.TurnCompleted
+
+        assertEquals("turn-2", event.turnId)
+        assertNull(event.itemId)
+        assertTrue(event.failed)
+    }
+
     @Test
     fun decodesCamelAndSnakeCaseLifecycleFields() {
         val event = NativeProtocolEventDecoder.decodeLifecycle(
@@ -84,5 +107,26 @@ class NativeProtocolEventDecoderTest {
         assertEquals(100000L, event.contextWindow)
         assertEquals(90000L, event.autoCompactTokenLimit)
         assertTrue(event.contextUsageReliable)
+    }
+
+    @Test
+    fun subagentUpdateAcceptsSnakeCaseReceiverThreadIds() {
+        val event = NativeProtocolEventDecoder.decodeLifecycle(
+            """{"kind":"subagent_updated","thread_id":"parent","item":{"receiver_thread_ids":["agent-snake"],"status":"working"}}""",
+        ) as NativeProtocolEvent.SubagentUpdated
+
+        assertEquals("parent", event.threadId)
+        assertEquals("agent-snake", event.agentThreadId)
+    }
+
+    @Test
+    fun subagentUpdateAcceptsObjectReceiverThreadIds() {
+        val event = NativeProtocolEventDecoder.decodeLifecycle(
+            """{"kind":"subagentUpdated","threadId":"parent","item":{"receiverThreadIds":[null,{"thread_id":"agent-object"}],"status":"completed"}}""",
+        ) as NativeProtocolEvent.SubagentUpdated
+
+        assertEquals("parent", event.threadId)
+        assertEquals("agent-object", event.agentThreadId)
+        assertEquals("completed", event.status)
     }
 }

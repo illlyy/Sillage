@@ -94,6 +94,21 @@ final class NativeStreamEventBatcher {
         pendingChars = 0;
     }
 
+    /** Drops stale conversation events while preserving global backend/error notifications. */
+    synchronized void clearRoutedEvents() {
+        if (pending.isEmpty()) return;
+        int retainedChars = 0;
+        for (int index = pending.size() - 1; index >= 0; index--) {
+            PendingEvent event = pending.get(index);
+            if (event.routeToken != null) {
+                pending.remove(index);
+            } else {
+                retainedChars += event.value.length();
+            }
+        }
+        pendingChars = retainedChars;
+    }
+
     private static boolean sameRoute(NativeRouteEventGate.RouteToken left,
                                      NativeRouteEventGate.RouteToken right) {
         if (left == null || right == null) return left == right;

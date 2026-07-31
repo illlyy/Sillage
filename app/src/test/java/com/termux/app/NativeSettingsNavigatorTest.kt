@@ -48,4 +48,16 @@ class NativeSettingsNavigatorTest {
         assertTrue(navigator.navigateBack())
         assertEquals(SettingsPage.ROOT, navigator.page)
     }
+
+    @Test
+    fun typographyPageReturnsDirectlyToSettingsRoot() {
+        val navigator = NativeSettingsNavigator()
+
+        navigator.navigate(SettingsPage.TYPOGRAPHY)
+
+        assertEquals(1, SettingsPage.TYPOGRAPHY.navigationDepth)
+        assertEquals(SettingsPage.ROOT, SettingsPage.TYPOGRAPHY.previousPage)
+        assertTrue(navigator.navigateBack())
+        assertEquals(SettingsPage.ROOT, navigator.page)
+    }
 }

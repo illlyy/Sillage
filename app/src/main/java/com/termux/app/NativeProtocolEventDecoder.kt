@@ -2,6 +2,18 @@ package com.termux.app
 
 import org.json.JSONObject
 
+internal fun nativeTurnLifecycleFailed(vararg values: JSONObject?): Boolean = values.any { value ->
+    if (value == null) return@any false
+    val status = sequenceOf("status", "state")
+        .map { key -> value.optString(key, "") }
+        .firstOrNull { it.isNotBlank() }
+        .orEmpty()
+        .replace("_", "").replace("-", "").lowercase()
+    (value.has("error") && !value.isNull("error")) || status in setOf(
+        "failed", "failure", "error", "cancelled", "canceled", "interrupted",
+    )
+}
+
 /**
  * Adapter for the already-normalized JSON emitted by CodexAppServerBridge.
  *
@@ -85,6 +97,7 @@ internal object NativeProtocolEventDecoder {
         val item = body.optJSONObject("item") ?: body.optJSONObject("details")
             ?: body.optJSONObject("tokenUsage") ?: body.optJSONObject("token_usage")
             ?: payload.optJSONObject("item") ?: payload.optJSONObject("details") ?: JSONObject()
+        val turn = body.optJSONObject("turn") ?: payload.optJSONObject("turn") ?: JSONObject()
         fun field(vararg keys: String): String = text(item, *keys)
             .ifBlank { text(body, *keys) }
             .ifBlank { text(payload, *keys) }
@@ -178,16 +191,20 @@ internal object NativeProtocolEventDecoder {
             )
             "subagentUpdated" -> NativeProtocolEvent.SubagentUpdated(
                 common.threadId, common.turnId, common.itemId,
-                agentThreadId = text(item, "agentThreadId", "agent_thread_id"),
+                agentThreadId = subagentThreadId(item),
                 callId = text(item, "callId", "call_id"),
                 name = text(item, "agentName", "agentNickname", "nickname"),
                 status = text(item, "status", "state").ifBlank { "working" },
                 sequence = common.sequence, timestampMs = common.timestampMs,
             )
             "tokenUsageUpdated" -> decodeUsage(common, item)
+            "turnStarted" -> NativeProtocolEvent.TurnStarted(
+                common.threadId, common.turnId, itemId = null,
+                sequence = common.sequence, timestampMs = common.timestampMs,
+            )
             "turnCompleted" -> NativeProtocolEvent.TurnCompleted(
-                common.threadId, common.turnId, common.itemId,
-                failed = item.has("error") && !item.isNull("error"),
+                common.threadId, common.turnId, itemId = null,
+                failed = nativeTurnLifecycleFailed(turn, item, body),
                 sequence = common.sequence, timestampMs = common.timestampMs,
             )
             "error" -> NativeProtocolEvent.Error(
@@ -323,6 +340,7 @@ internal object NativeProtocolEventDecoder {
             "contextcompactionfailed" -> "contextCompactionFailed"
             "contextcompactioncancelled", "contextcompactioncanceled" -> "contextCompactionCancelled"
             "tokenusageupdated", "tokenusageupdate", "threadtokenusageupdated", "threadtokenusageupdate" -> "tokenUsageUpdated"
+            "turnstarted", "turnstart" -> "turnStarted"
             "turncompleted", "turncomplete" -> "turnCompleted"
             "error" -> "error"
             else -> when {
@@ -334,6 +352,7 @@ internal object NativeProtocolEventDecoder {
                 normalized.endsWith("contextcompactioncancelled") || normalized.endsWith("contextcompactioncanceled") -> "contextCompactionCancelled"
                 normalized.endsWith("contextcompacted") -> "contextCompactionCompleted"
                 normalized.endsWith("tokenusageupdated") || normalized.endsWith("tokenusageupdate") -> "tokenUsageUpdated"
+                normalized.endsWith("turnstarted") || normalized.endsWith("turnstart") -> "turnStarted"
                 normalized.endsWith("turncompleted") || normalized.endsWith("turncomplete") -> "turnCompleted"
                 else -> raw
             }

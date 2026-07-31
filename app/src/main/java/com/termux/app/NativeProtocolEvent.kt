@@ -193,6 +193,20 @@ internal sealed interface NativeProtocolEvent {
         override val timestampMs: Long = System.currentTimeMillis(),
     ) : NativeProtocolEvent
 
+    /** A primary conversation turn became active on app-server.
+     *
+     * Auxiliary context-compaction turns are deliberately filtered by the bridge and must never
+     * be represented by this event: the UI uses it to reset the completed-turn barrier for real
+     * server-driven continuations (for example an active goal starting its next turn).
+     */
+    data class TurnStarted(
+        override val threadId: String,
+        override val turnId: String? = null,
+        override val itemId: String? = null,
+        override val sequence: Long = 0L,
+        override val timestampMs: Long = System.currentTimeMillis(),
+    ) : NativeProtocolEvent
+
     data class TurnCompleted(
         override val threadId: String,
         override val turnId: String? = null,
@@ -275,6 +289,19 @@ internal class NativeOrderedProtocolEventQueue(
         pending.clear()
         lastEmittedByThread.clear()
         orderCounter = 0L
+    }
+
+    /** Drop queued callbacks at a local turn boundary without reopening old sequence numbers. */
+    @Synchronized
+    fun clearPendingPreservingWatermarks() {
+        pending.forEach { entry ->
+            val event = entry.event
+            if (event.sequence <= 0L) return@forEach
+            val thread = event.threadId.ifBlank { "thread" }
+            val previous = lastEmittedByThread[thread] ?: Long.MIN_VALUE
+            if (event.sequence > previous) lastEmittedByThread[thread] = event.sequence
+        }
+        pending.clear()
     }
 
     private fun drainLocked(keepAtLeast: Int): List<NativeProtocolEvent> {

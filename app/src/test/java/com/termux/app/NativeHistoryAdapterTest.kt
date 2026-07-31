@@ -48,6 +48,52 @@ class NativeHistoryAdapterTest {
     }
 
     @Test
+    fun legacySyntheticCompletionIsRepairedFromReliableFailureEvidence() {
+        val payload = JSONObject().put(
+            "tools",
+            JSONArray()
+                .put(
+                    JSONObject()
+                        .put("id", "failed-prefix")
+                        .put("type", "commandExecution")
+                        .put("command", "restricted-command")
+                        .put("status", "completed")
+                        .put(NativeCommandOutputStore.OUTPUT_PREVIEW, "exec_command failed: Permission denied"),
+                )
+                .put(
+                    JSONObject()
+                        .put("id", "non-zero")
+                        .put("type", "commandExecution")
+                        .put("command", "false")
+                        .put("status", "completed")
+                        .put("exitCode", 1),
+                ),
+        )
+
+        val commands = NativeHistoryAdapter.processGroup("message", "thread", payload).commands
+        assertEquals(NativeActivityItemStatus.FAILED, commands[0].status)
+        assertEquals(NativeActivityItemStatus.FAILED, commands[1].status)
+    }
+
+    @Test
+    fun ordinaryHistoricalErrorTextRemainsCompleted() {
+        val payload = JSONObject().put(
+            "tools",
+            JSONArray().put(
+                JSONObject()
+                    .put("id", "successful")
+                    .put("type", "commandExecution")
+                    .put("command", "render docs")
+                    .put("status", "completed")
+                    .put("aggregatedOutput", "Example text: exec_command failed with error"),
+            ),
+        )
+
+        val command = NativeHistoryAdapter.processGroup("message", "thread", payload).commands.single()
+        assertEquals(NativeActivityItemStatus.COMPLETED, command.status)
+    }
+
+    @Test
     fun legacyCompactionAndJournalRecordShareOneTimelineDivider() {
         val legacy = NativeCompactionItem(
             id = "history-compaction:thread:1000",

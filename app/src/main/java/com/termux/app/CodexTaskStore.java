@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.io.File;
 
 /** Small persistent registry of user-started (root) Codex turns for the overlay UI. */
 final class CodexTaskStore {
@@ -28,12 +29,21 @@ final class CodexTaskStore {
         final String title;
         final String state;
         final long updatedAt;
+        final String projectPath;
+        final boolean projectAssignmentKnown;
 
         Task(String threadId, String title, String state, long updatedAt) {
+            this(threadId, title, state, updatedAt, "", false);
+        }
+
+        Task(String threadId, String title, String state, long updatedAt,
+             String projectPath, boolean projectAssignmentKnown) {
             this.threadId = threadId;
             this.title = title;
             this.state = state;
             this.updatedAt = updatedAt;
+            this.projectPath = projectPath == null ? "" : projectPath;
+            this.projectAssignmentKnown = projectAssignmentKnown;
         }
     }
 
@@ -59,6 +69,20 @@ final class CodexTaskStore {
         write(context, tasks);
     }
 
+    /** Persist explicit drawer ownership separately from the thread's runtime cwd. */
+    static synchronized void assignProject(Context context, String threadId, String projectPath) {
+        if (threadId == null || threadId.isEmpty()) return;
+        List<Task> tasks = read(context);
+        Task previous = find(tasks, threadId);
+        String normalized = normalizeProjectPath(projectPath);
+        String title = previous == null ? fallbackTitle(threadId) : previous.title;
+        String state = previous == null ? RUNNING : previous.state;
+        long updatedAt = previous == null ? System.currentTimeMillis() : previous.updatedAt;
+        tasks.removeIf(task -> threadId.equals(task.threadId));
+        tasks.add(new Task(threadId, title, state, updatedAt, normalized, true));
+        trimAndWrite(context, tasks);
+    }
+
     static synchronized void markCompleted(Context context, String threadId, boolean failed) {
         if (threadId == null || threadId.isEmpty()) return;
         List<Task> tasks = read(context);
@@ -74,7 +98,8 @@ final class CodexTaskStore {
         ArrayList<Task> reconciled = new ArrayList<>(tasks.size());
         for (Task task : tasks) {
             if (RUNNING.equals(task.state)) {
-                reconciled.add(new Task(task.threadId, task.title, FAILED, task.updatedAt));
+                reconciled.add(new Task(task.threadId, task.title, FAILED, task.updatedAt,
+                    task.projectPath, task.projectAssignmentKnown));
                 changed = true;
             } else {
                 reconciled.add(task);
@@ -96,11 +121,17 @@ final class CodexTaskStore {
 
     private static void update(Context context, String threadId, String title, String state) {
         List<Task> tasks = read(context);
+        Task previous = find(tasks, threadId);
         tasks.removeIf(task -> threadId.equals(task.threadId));
-        tasks.add(new Task(threadId, title, state, System.currentTimeMillis()));
-        tasks.sort((left, right) -> Long.compare(right.updatedAt, left.updatedAt));
-        if (tasks.size() > MAX_TASKS) tasks = new ArrayList<>(tasks.subList(0, MAX_TASKS));
-        write(context, tasks);
+        tasks.add(new Task(
+            threadId,
+            title,
+            state,
+            System.currentTimeMillis(),
+            previous == null ? "" : previous.projectPath,
+            previous != null && previous.projectAssignmentKnown
+        ));
+        trimAndWrite(context, tasks);
     }
 
     private static List<Task> read(Context context) {
@@ -114,7 +145,8 @@ final class CodexTaskStore {
                 String threadId = item.optString("threadId", "");
                 if (threadId.isEmpty()) continue;
                 tasks.add(new Task(threadId, item.optString("title", fallbackTitle(threadId)),
-                    item.optString("state", RUNNING), item.optLong("updatedAt", 0L)));
+                    item.optString("state", RUNNING), item.optLong("updatedAt", 0L),
+                    item.optString("projectPath", ""), item.has("projectPath")));
             }
         } catch (Exception ignored) {}
         return tasks;
@@ -125,7 +157,8 @@ final class CodexTaskStore {
         try {
             for (Task task : tasks) array.put(new JSONObject()
                 .put("threadId", task.threadId).put("title", task.title)
-                .put("state", task.state).put("updatedAt", task.updatedAt));
+                .put("state", task.state).put("updatedAt", task.updatedAt)
+                .putOpt("projectPath", task.projectAssignmentKnown ? task.projectPath : null));
         } catch (Exception ignored) {}
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, array.toString()).apply();
         Context appContext = context.getApplicationContext();
@@ -142,5 +175,22 @@ final class CodexTaskStore {
     private static String fallbackTitle(String threadId) {
         int length = threadId == null ? 0 : threadId.length();
         return "Codex 任务 · " + (length <= 8 ? threadId : threadId.substring(0, 8));
+    }
+
+    private static Task find(List<Task> tasks, String threadId) {
+        for (Task task : tasks) if (threadId.equals(task.threadId)) return task;
+        return null;
+    }
+
+    private static void trimAndWrite(Context context, List<Task> tasks) {
+        tasks.sort((left, right) -> Long.compare(right.updatedAt, left.updatedAt));
+        if (tasks.size() > MAX_TASKS) tasks = new ArrayList<>(tasks.subList(0, MAX_TASKS));
+        write(context, tasks);
+    }
+
+    private static String normalizeProjectPath(String projectPath) {
+        if (projectPath == null || projectPath.trim().isEmpty()) return "";
+        try { return new File(projectPath.trim()).getCanonicalPath(); }
+        catch (Exception ignored) { return new File(projectPath.trim()).getAbsolutePath(); }
     }
 }

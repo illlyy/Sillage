@@ -141,7 +141,11 @@ internal object NativeHistoryAdapter {
                 "collabagenttoolcall", "subagentactivity", "subagent", "subagenttoolcall" -> NativeActivityItemType.SUBAGENT
                 else -> NativeActivityItemType.TOOL
             }
-            val rawStatus = item.optString("status", "completed").lowercase()
+            val rawStatus = if (type == NativeActivityItemType.COMMAND) {
+                NativeCommandOutputStore.resolvedCommandStatus(item)
+            } else {
+                item.optString("status", "completed")
+            }.lowercase()
             val status = when (rawStatus) {
                 "working", "running", "started", "start", "inprogress", "in_progress" -> NativeActivityItemStatus.RUNNING
                 "waiting", "queued", "pending" -> NativeActivityItemStatus.WAITING

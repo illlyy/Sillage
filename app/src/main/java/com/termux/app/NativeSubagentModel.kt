@@ -14,11 +14,16 @@ internal fun jsonText(item: JSONObject, vararg keys: String): String {
 }
 
 internal fun subagentThreadId(item: JSONObject): String {
-    jsonText(item, "agentThreadId").takeIf { it.isNotBlank() }?.let { return it }
-    val receivers = item.optJSONArray("receiverThreadIds") ?: return ""
+    jsonText(item, "agentThreadId", "agent_thread_id").takeIf { it.isNotBlank() }?.let { return it }
+    val receivers = item.optJSONArray("receiverThreadIds")
+        ?: item.optJSONArray("receiver_thread_ids")
+        ?: return ""
     for (index in 0 until receivers.length()) {
         if (!receivers.isNull(index)) {
-            val value = receivers.optString(index, "").trim()
+            val raw = receivers.opt(index)
+            val value = if (raw is JSONObject) {
+                jsonText(raw, "agentThreadId", "agent_thread_id", "threadId", "thread_id", "id")
+            } else receivers.optString(index, "").trim()
             if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
         }
     }
@@ -117,4 +122,27 @@ internal fun collectSubagentItems(
     if (index >= 0) result[index] = mergeSubagentItems(result[index], current)
     else if (subagentThreadId(current).isNotBlank()) result.add(current)
     return result
+}
+
+/** Resolve a renderer-only visual back to the richest protocol item available for its drawer. */
+internal fun subagentDrawerAnchor(
+    visual: NativeSubagentVisual,
+    candidates: List<JSONObject>,
+): JSONObject {
+    val visualAliases = buildSet {
+        addAll(visual.aliases)
+        visual.agentThreadId.takeIf(String::isNotBlank)?.let(::add)
+        visual.callId.takeIf(String::isNotBlank)?.let(::add)
+        visual.seed.takeIf(String::isNotBlank)?.let(::add)
+    }
+    val matched = candidates.firstOrNull { candidate ->
+        subagentAliases(candidate).any(visualAliases::contains)
+    }
+    return runCatching { JSONObject(matched?.toString().orEmpty()) }.getOrElse { JSONObject() }.apply {
+        if (!has("type")) put("type", "subAgentActivity")
+        if (visual.agentThreadId.isNotBlank()) put("agentThreadId", visual.agentThreadId)
+        if (visual.callId.isNotBlank()) put("callId", visual.callId)
+        if (jsonText(this, "agentName", "agentNickname", "nickname").isBlank()) put("agentName", visual.name)
+        if (jsonText(this, "status", "state").isBlank()) put("status", visual.status.name.lowercase())
+    }
 }

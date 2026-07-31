@@ -103,11 +103,13 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Scaffold
@@ -122,7 +124,11 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -240,10 +246,13 @@ import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.ChartColumn
 import me.rerere.hugeicons.stroke.Code
+import me.rerere.hugeicons.stroke.Clock02
+import me.rerere.hugeicons.stroke.Download04
 import me.rerere.hugeicons.stroke.Files02
 import me.rerere.hugeicons.stroke.Folder01
 import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.InLove
+import me.rerere.hugeicons.stroke.Idea01
 import me.rerere.hugeicons.stroke.LanguageCircle
 import me.rerere.hugeicons.stroke.LeftToRightListBullet
 import me.rerere.hugeicons.stroke.Menu03
@@ -260,6 +269,7 @@ import me.rerere.hugeicons.stroke.Settings03
 import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.TransactionHistory
 import me.rerere.hugeicons.stroke.Tick02
+import me.rerere.hugeicons.stroke.Upload02
 import me.rerere.hugeicons.stroke.Voice
 import me.rerere.hugeicons.stroke.Zap
 
@@ -309,6 +319,8 @@ internal fun FcodeChatTheme(
     chatBackgroundImage: String = "",
     chatBackgroundDim: Float = 0.32f,
     chatDynamicBackground: FcodeChatDynamicBackgroundConfig? = null,
+    chatFontScale: Float? = null,
+    materialTransparency: FcodeMaterialTransparencyConfig? = null,
     fixedStreamingViewport: Boolean = true,
     showResponseStats: Boolean = true,
     showModelSubtitle: Boolean = true,
@@ -323,7 +335,17 @@ internal fun FcodeChatTheme(
     val dynamicBackground = chatDynamicBackground ?: remember(appearanceRevision, dynamicContext) {
         readFcodeChatDynamicBackgroundConfig(dynamicContext)
     }
-    val colorScheme = if (style == FcodeInterfaceStyle.LIQUID_GLASS) liquidGlassColorScheme(dark) else fcodeColorScheme(palette, dark)
+    val resolvedChatFontScale = chatFontScale ?: remember(appearanceRevision, dynamicContext) {
+        readFcodeChatFontScale(dynamicContext)
+    }
+    val resolvedMaterialTransparency = materialTransparency ?: remember(appearanceRevision, dynamicContext) {
+        readFcodeMaterialTransparencyConfig(dynamicContext)
+    }
+    val colorScheme = if (style == FcodeInterfaceStyle.LIQUID_GLASS) {
+        liquidGlassColorScheme(dark)
+    } else {
+        fcodeResolvedColorScheme(dynamicContext, palette, dark)
+    }
     val markdownColors = fcodeMarkdownColors(palette, dark, colorScheme, style.value)
     val view = LocalView.current
     SideEffect {
@@ -350,6 +372,8 @@ internal fun FcodeChatTheme(
             LocalFcodeChatBackgroundImage provides chatBackgroundImage,
             LocalFcodeChatBackgroundDim provides chatBackgroundDim.coerceIn(0f, 0.72f),
             LocalFcodeChatDynamicBackground provides dynamicBackground,
+            LocalFcodeChatFontScale provides resolvedChatFontScale.coerceIn(0.5f, 2f),
+            LocalFcodeMaterialTransparency provides resolvedMaterialTransparency.normalized(),
             LocalFcodeMarkdownColors provides markdownColors,
             content = content,
         )
@@ -377,6 +401,7 @@ internal fun NativeChatScreen(
     onFollowUpActionChange: (NativeFollowUpSubmitAction) -> Unit,
     onRemoveQueuedFollowUp: (String) -> Unit,
     onNewConversation: () -> Unit,
+    onNewConversationAtProject: (String) -> Unit,
     onResumeConversation: (String) -> Unit,
     onUiMotionChanged: (Boolean) -> Unit,
     onLoadSubagentHistory: (String) -> Unit,
@@ -408,6 +433,11 @@ internal fun NativeChatScreen(
 ) {
     val context = LocalContext.current
     val language = LocalNativeLanguage.current
+    val interfaceStyle = LocalFcodeInterfaceStyle.current
+    val appearanceRevision = LocalFcodeAppearanceRevision.current
+    val topBarGlassConfig = remember(appearanceRevision, context) { readTopBarLiquidGlassConfig(context) }
+    val progressiveTopBar = interfaceStyle == FcodeInterfaceStyle.LIQUID_GLASS &&
+        topBarGlassConfig.enabled && liquidGlassSupported
     val dynamicBackground = LocalFcodeChatDynamicBackground.current
     val sendAnimationsEnabled = LocalStreamAnimationsEnabled.current
     val autoFollowEnabled = LocalAutoFollowOutput.current
@@ -476,6 +506,8 @@ internal fun NativeChatScreen(
     val chatBackdrop = rememberCombinedBackdrop(wallpaperBackdrop, conversationBackdrop)
     var pendingSendMotion by remember(conversationListKey) { mutableStateOf<PendingSendMotion?>(null) }
     var sendMotionRootBounds by remember { mutableStateOf<Rect?>(null) }
+    var ultraBurst by remember(conversationListKey) { mutableStateOf<UltraBurstRequest?>(null) }
+    var rootWindowBounds by remember { mutableStateOf(Rect.Zero) }
     var inputHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     // Keep one owner for each inset: the list handles the IME, while the measured composer
@@ -487,6 +519,11 @@ internal fun NativeChatScreen(
     // conversation inset tied to Material's real bar height plus the visible status bar.
     val topBarContentPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() +
         TopAppBarDefaults.TopAppBarExpandedHeight
+    val conversationViewportModifier = Modifier
+        .fillMaxSize()
+        .then(if (progressiveTopBar) Modifier else Modifier.padding(top = topBarContentPadding))
+        .imePadding()
+    val conversationTopContentPadding = 16.dp + if (progressiveTopBar) topBarContentPadding else 0.dp
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + navigationBarBottomPadding + 8.dp
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
     val showScrollToBottom by remember(listState) { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
@@ -697,6 +734,20 @@ internal fun NativeChatScreen(
                             }
                         }
                     },
+                    onNewConversationAtProject = { projectPath ->
+                        if (pendingConversationThreadId == null) {
+                            pendingConversationThreadId = ""
+                            scope.launch {
+                                try {
+                                    drawerState.close()
+                                    withFrameNanos { }
+                                    onNewConversationAtProject(projectPath)
+                                } finally {
+                                    pendingConversationThreadId = null
+                                }
+                            }
+                        }
+                    },
                     onBackHome = {
                         scope.launch {
                             // Keep the drawer out of the settings entry snapshot, but do not
@@ -718,6 +769,7 @@ internal fun NativeChatScreen(
             Box(
                 Modifier
                     .fillMaxSize()
+                    .onGloballyPositioned { rootWindowBounds = it.boundsInWindow() }
                     .pointerInput(conversationListKey, dynamicBackgroundCanStart) {
                         if (!dynamicBackgroundCanStart) return@pointerInput
                         // Observe taps at the chat root so buttons, bubbles, the composer and empty
@@ -851,20 +903,15 @@ internal fun NativeChatScreen(
                             LazyColumn(
                                 state = listState,
                                 userScrollEnabled = !textSelectionActive,
-                                // Keep the scroll viewport below the transparent/progressive app bar.
-                                // A top contentPadding only moves the first item; once the list scrolls,
-                                // long answers can still be painted underneath the title and become
-                                // readable through the glass fade. Reserving the inset at the viewport
-                                // level clips every item at the bar boundary while keeping the
-                                // wallpaper/material visible above it.
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(top = topBarContentPadding)
-                                    .imePadding(),
+                                // Liquid Glass owns a full-screen viewport: the initial content
+                                // padding keeps the first message below the controls, while scrolled
+                                // text can pass behind the AlphaMask and become the live blur source.
+                                // Material keeps the old clipped viewport and opaque top bar.
+                                modifier = conversationViewportModifier,
                                 contentPadding = PaddingValues(
                                     start = 16.dp,
                                     end = 16.dp,
-                                    top = 16.dp,
+                                    top = conversationTopContentPadding,
                                     bottom = inputBottomPadding,
                                 ),
                                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1029,6 +1076,9 @@ internal fun NativeChatScreen(
                         value = state.input,
                         enabled = state.ready,
                         loading = state.phase.active,
+                        compactEnabled = !state.phase.active && state.compactionItems.none { !it.isTerminal },
+                        compactRunning = state.compactionItems.any { !it.isTerminal },
+                        submitEnabled = state.compactionItems.none { !it.isTerminal },
                         conversationKey = conversationListKey,
                         conversationMoving = listDragged,
                         hasConversation = state.messages.isNotEmpty(),
@@ -1042,6 +1092,12 @@ internal fun NativeChatScreen(
                         effortOptions = state.modelOptions.firstOrNull { it.id == state.selectedModel }?.efforts.orEmpty().ifEmpty { listOf("none", "low", "medium", "high", "xhigh") },
                         selectedEffort = state.selectedEffort,
                         onEffortSelected = onEffortSelected,
+                        onUltraBurst = { rect ->
+                            ultraBurst = UltraBurstRequest(
+                                token = android.os.SystemClock.uptimeMillis(),
+                                originWindowRect = rect,
+                            )
+                        },
                         selectedMode = state.selectedMode,
                         permissionMode = state.permissionMode,
                         onPermissionModeSelected = onPermissionModeChange,
@@ -1122,8 +1178,19 @@ internal fun NativeChatScreen(
                     // Sample both the wallpaper and scrolling conversation; title/actions remain
                     // separate and crisp above the material layer.
                     backdrop = chatBackdrop,
+                    glassConfig = topBarGlassConfig,
                     modifier = Modifier.align(Alignment.TopCenter).zIndex(2f),
                 )
+                ultraBurst?.let { burst ->
+                    UltraGlassShockwave(
+                        modifier = Modifier.fillMaxSize().zIndex(3f),
+                        backdrop = chatBackdrop,
+                        requestToken = burst.token,
+                        originWindowRect = burst.originWindowRect,
+                        rootWindowRect = rootWindowBounds,
+                        onFinished = { if (ultraBurst?.token == burst.token) ultraBurst = null },
+                    )
+                }
             }
         }
     }
@@ -1456,7 +1523,11 @@ private fun MessageSearchDialog(
                             LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(results, key = { it.id }) { message ->
                                     Surface(
-                                        modifier = Modifier.fillMaxWidth().clickable { onSelect(message.id) },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .fcodePressClickable(
+                                                onClickLabel = nativeText(language, "跳转到消息", "Go to message"),
+                                            ) { onSelect(message.id) },
                                         shape = MaterialTheme.shapes.medium,
                                         color = MaterialTheme.colorScheme.surfaceContainer,
                                     ) {
@@ -1484,7 +1555,17 @@ private fun NativeUserInputBanner(raw: String, drawerOpen: Boolean, onToggle: ()
     val count = questions?.length()?.coerceAtLeast(1) ?: 1
     val firstQuestion = questions?.optJSONObject(0)?.optString("question").orEmpty()
     Surface(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp).clickable(onClick = onToggle),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .fcodePressClickable(
+                onClickLabel = if (drawerOpen) {
+                    nativeText(language, "收起待回答问题", "Collapse pending questions")
+                } else {
+                    nativeText(language, "展开待回答问题", "Expand pending questions")
+                },
+                onClick = onToggle,
+            ),
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.84f),
         contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -2054,15 +2135,13 @@ private fun RikkaTopBar(
     canExport: Boolean,
     onNewConversation: () -> Unit,
     backdrop: Backdrop? = null,
+    glassConfig: TopBarLiquidGlassConfig,
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
-    val context = LocalContext.current
-    val appearanceRevision = LocalFcodeAppearanceRevision.current
-    val config = remember(appearanceRevision, context) { readTopBarLiquidGlassConfig(context) }
-    // The top-bar mask is an independent chat material, not the global component style.
-    // Developer options therefore behave the same in Material and Liquid Glass themes.
-    val useProgressiveGlass = config.enabled && liquidGlassSupported && backdrop != null
+    // Material deliberately remains opaque; developer mask controls belong to Liquid Glass.
+    val useProgressiveGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
+        glassConfig.enabled && liquidGlassSupported && backdrop != null
     val isLight = rememberIsLightTheme()
     val tint = if (isLight) Color.White else Color.Black
     val surfaceColor = MaterialTheme.colorScheme.surface
@@ -2071,22 +2150,10 @@ private fun RikkaTopBar(
         Modifier.drawPlainBackdrop(
             backdrop = backdrop,
             shape = { RectangleShape },
-            effects = { applyTopBarProgressiveGlass(config, tint) },
+            effects = { applyTopBarProgressiveGlass(glassConfig, tint) },
         )
     } else Modifier
-    val topBarModifier = if (useProgressiveGlass) {
-        Modifier
-    } else {
-        Modifier.background(
-            Brush.verticalGradient(
-                colors = listOf(
-                    surfaceColor.copy(alpha = if (isLight) 0.98f else 0.94f),
-                    surfaceColor.copy(alpha = if (isLight) 0.88f else 0.82f),
-                    surfaceColor.copy(alpha = if (isLight) 0.58f else 0.52f),
-                ),
-            ),
-        )
-    }
+    val topBarModifier = if (useProgressiveGlass) Modifier else Modifier.background(surfaceColor)
     Layout(
         modifier = modifier.fillMaxWidth(),
         content = {
@@ -2164,7 +2231,7 @@ private fun RikkaTopBar(
     ) { measurables, constraints ->
         val topBarPlaceable = measurables[1].measure(constraints)
         val materialHeightPx = if (useProgressiveGlass) {
-            config.maskHeightDp.dp.roundToPx().coerceAtLeast(topBarPlaceable.height)
+            glassConfig.maskHeightDp.dp.roundToPx().coerceAtLeast(topBarPlaceable.height)
         } else 0
         val materialPlaceable = measurables[0].measure(
             Constraints.fixed(topBarPlaceable.width, materialHeightPx),
@@ -2248,7 +2315,10 @@ private fun RikkaEmptyState(
             ) {
                 suggestions.forEach { (label, prompt) ->
                     Surface(
-                        modifier = Modifier.clickable(enabled = ready) { onSuggestion(prompt) },
+                        modifier = Modifier.fcodePressClickable(
+                            enabled = ready,
+                            onClickLabel = label,
+                        ) { onSuggestion(prompt) },
                         shape = RoundedCornerShape(14.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
@@ -2386,45 +2456,47 @@ private fun RikkaMessageItem(
     sendingMotionActive: Boolean = false,
     onUserBubbleBounds: ((Rect) -> Unit)? = null,
 ) {
-    when (message.role) {
-        NativeChatRole.USER -> {
-            val implementsPlan = message.content.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
-            val displayText = if (implementsPlan) nativeText(LocalNativeLanguage.current, "\u662f\uff0c\u6267\u884c\u6b64\u8ba1\u5212", "Yes, implement this plan") else message.content
-            RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan, backdrop = wallpaperBackdrop, sendingMotionActive = sendingMotionActive, onBubbleBounds = onUserBubbleBounds)
-        }
-        NativeChatRole.ASSISTANT -> {
-            val liveSnapshot = if (message.streaming && chatState.liveAssistantMessageId == message.id) {
-                chatState.liveAssistantSnapshot
-            } else null
-            val historicalFileChanges = remember(message.id, chatState.conversationAnimationKey, chatState.messages.size) {
-                associatedFileChangeItems(chatState.messages, message.id)
+    FcodeChatTypography {
+        when (message.role) {
+            NativeChatRole.USER -> {
+                val implementsPlan = message.content.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
+                val displayText = if (implementsPlan) nativeText(LocalNativeLanguage.current, "\u662f\uff0c\u6267\u884c\u6b64\u8ba1\u5212", "Yes, implement this plan") else message.content
+                RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan, backdrop = wallpaperBackdrop, sendingMotionActive = sendingMotionActive, onBubbleBounds = onUserBubbleBounds)
             }
-            // Tool payloads change far less often than the streamed answer. Snapshot the
-            // state list so token batches do not parse every completed tool JSON again.
-            val liveToolDetails = liveState?.toolDetails?.toList().orEmpty()
-            val liveFileChanges = remember(liveToolDetails) {
-                parseToolDetails(liveToolDetails).fileChanges
+            NativeChatRole.ASSISTANT -> {
+                val liveSnapshot = if (message.streaming && chatState.liveAssistantMessageId == message.id) {
+                    chatState.liveAssistantSnapshot
+                } else null
+                val historicalFileChanges = remember(message.id, chatState.conversationAnimationKey, chatState.messages.size) {
+                    associatedFileChangeItems(chatState.messages, message.id)
+                }
+                // Tool payloads change far less often than the streamed answer. Snapshot the
+                // state list so token batches do not parse every completed tool JSON again.
+                val liveToolDetails = liveState?.toolDetails?.toList().orEmpty()
+                val liveFileChanges = remember(liveToolDetails) {
+                    parseToolDetails(liveToolDetails).fileChanges
+                }
+                RikkaAssistantMessage(
+                    message.id,
+                    message.content,
+                    message.streaming,
+                    message.revealStartedAt,
+                    message.finalOnlyReveal,
+                    message.usage,
+                    assistantActionText,
+                    liveState,
+                    liveSnapshot,
+                    historicalFileChanges + liveFileChanges,
+                    chatState.projectPath,
+                    onRetry,
+                    onLoadSubagentHistory,
+                    onQuote,
+                    onReasoningAutoCollapse,
+                )
             }
-            RikkaAssistantMessage(
-                message.id,
-                message.content,
-                message.streaming,
-                message.revealStartedAt,
-                message.finalOnlyReveal,
-                message.usage,
-                assistantActionText,
-                liveState,
-                liveSnapshot,
-                historicalFileChanges + liveFileChanges,
-                chatState.projectPath,
-                onRetry,
-                onLoadSubagentHistory,
-                onQuote,
-                onReasoningAutoCollapse,
-            )
+            NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
+            NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
         }
-        NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
-        NativeChatRole.ERROR -> RikkaErrorMessage(message.content, onRetry)
     }
 }
 
@@ -2448,6 +2520,7 @@ private fun RikkaUserMessage(
     val isLightTheme = rememberIsLightTheme()
     val useLiquidGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
         bubbleConfig.enabled && liquidGlassSupported && backdrop != null
+    val materialBubbleAlpha = LocalFcodeMaterialTransparency.current.userBubbleAlpha
     val bubbleTint = (if (isLightTheme) Color.White else Color.Black).copy(alpha = bubbleConfig.tintAlpha)
     val bubbleShape = RoundedCornerShape(
         topStart = bubbleConfig.spec.cornerRadiusDp.dp,
@@ -2468,7 +2541,11 @@ private fun RikkaUserMessage(
                         formatFileSize(java.io.File(attachment.path).length())
                     }
                     Surface(
-                        modifier = Modifier.widthIn(max = 250.dp).clickable { onPreviewAttachment(attachment) },
+                        modifier = Modifier
+                            .widthIn(max = 250.dp)
+                            .fcodePressClickable(
+                                onClickLabel = nativeText(language, "\u9884\u89c8\u9644\u4ef6", "Preview attachment"),
+                            ) { onPreviewAttachment(attachment) },
                         shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     ) {
@@ -2515,7 +2592,7 @@ private fun RikkaUserMessage(
             Surface(
                 modifier = Modifier
                     .widthIn(max = 360.dp)
-                    .combinedClickable(onClick = {}, onLongClick = { menuExpanded = true })
+                    .fcodePressCombinedClickable(onClick = {}, onLongClick = { menuExpanded = true })
                     .onGloballyPositioned { onBubbleBounds?.invoke(it.boundsInWindow()) }
                     .then(
                         if (useLiquidGlass && backdrop != null) Modifier.drawBackdrop(
@@ -2528,7 +2605,7 @@ private fun RikkaUserMessage(
                     )
                     .graphicsLayer { alpha = if (sendingMotionActive) 0f else 1f },
                 shape = bubbleShape,
-                color = if (useLiquidGlass) Color.Transparent else MaterialTheme.colorScheme.primaryContainer,
+                color = if (useLiquidGlass) Color.Transparent else MaterialTheme.colorScheme.primaryContainer.copy(alpha = materialBubbleAlpha),
                 contentColor = if (useLiquidGlass) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimaryContainer,
                 border = if (useLiquidGlass) BorderStroke(0.7.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)) else null,
             ) {
@@ -2780,7 +2857,7 @@ private fun RikkaAssistantMessage(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 760.dp)
-                .combinedClickable(onClick = {}, onLongClick = { if (showChrome) menuExpanded = true }),
+                .fcodePressCombinedClickable(onClick = {}, onLongClick = { if (showChrome) menuExpanded = true }),
         ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     if (liveState != null) {
@@ -2890,46 +2967,83 @@ private fun ResponseUsageFooter(usage: NativeTurnUsage) {
 @Composable
 private fun ResponseUsageFooterCompact(usage: NativeTurnUsage) {
     val language = LocalNativeLanguage.current
-    val metrics = remember(usage, language) {
-        buildList {
-            val prefix = if (usage.estimated) "≈" else ""
-            usage.outputTokensPerSecond.takeIf { it > 0.0 }?.let { rate ->
-                add(nativeText(language, "速度", "Speed") to String.format(Locale.US, "%.1f tok/s", rate))
-            }
-            if (usage.outputTokens > 0) add(nativeText(language, "输出", "Output") to "$prefix${usage.outputTokens}")
-            if (usage.totalTokens > 0) add(nativeText(language, "总计", "Total") to "$prefix${usage.totalTokens}")
-            if (usage.durationMs > 0) {
-                val seconds = usage.durationMs / 1000.0
-                val duration = if (seconds < 10.0) String.format(Locale.US, "%.1fs", seconds)
-                    else String.format(Locale.US, "%.0fs", seconds)
-                add(nativeText(language, "用时", "Time") to duration)
-            }
-            if (usage.inputTokens > 0) add(nativeText(language, "输入", "Input") to "$prefix${usage.inputTokens}")
-            if (usage.cachedInputTokens > 0) add(nativeText(language, "缓存", "Cached") to usage.cachedInputTokens.toString())
-            if (usage.reasoningOutputTokens > 0) add(nativeText(language, "推理", "Reasoning") to usage.reasoningOutputTokens.toString())
+    val prefix = if (usage.estimated) "≈" else ""
+    if (usage.inputTokens <= 0 && usage.cachedInputTokens <= 0 && usage.outputTokens <= 0 &&
+        usage.reasoningOutputTokens <= 0 && usage.outputTokensPerSecond <= 0.0 && usage.durationMs <= 0
+    ) return
+    val mutedColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.56f)
+    FlowRow(
+        modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp, end = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (usage.inputTokens > 0 || usage.cachedInputTokens > 0) {
+            val cached = if (usage.cachedInputTokens > 0) {
+                nativeText(language, "（${usage.cachedInputTokens} 缓存）", " (${usage.cachedInputTokens} cached)")
+            } else ""
+            ResponseUsageMetric(
+                icon = HugeIcons.Upload02,
+                description = nativeText(language, "输入与缓存", "Input and cache"),
+                text = "$prefix${usage.inputTokens} tokens$cached",
+                color = mutedColor,
+            )
+        }
+        if (usage.outputTokens > 0) {
+            ResponseUsageMetric(
+                icon = HugeIcons.Download04,
+                description = nativeText(language, "输出", "Output"),
+                text = "$prefix${usage.outputTokens} tokens",
+                color = mutedColor,
+            )
+        }
+        if (usage.reasoningOutputTokens > 0) {
+            ResponseUsageMetric(
+                icon = HugeIcons.Idea01,
+                description = nativeText(language, "推理", "Reasoning"),
+                text = nativeText(language, "${usage.reasoningOutputTokens} 推理", "${usage.reasoningOutputTokens} reasoning"),
+                color = mutedColor,
+            )
+        }
+        usage.outputTokensPerSecond.takeIf { it > 0.0 }?.let { rate ->
+            ResponseUsageMetric(
+                icon = HugeIcons.Zap,
+                description = nativeText(language, "速度", "Speed"),
+                text = String.format(Locale.US, "%.1f tok/s", rate),
+                color = mutedColor,
+            )
+        }
+        if (usage.durationMs > 0) {
+            val seconds = usage.durationMs / 1000.0
+            ResponseUsageMetric(
+                icon = HugeIcons.Clock02,
+                description = nativeText(language, "用时", "Duration"),
+                text = if (seconds < 10.0) String.format(Locale.US, "%.1fs", seconds)
+                    else String.format(Locale.US, "%.0fs", seconds),
+                color = mutedColor,
+            )
         }
     }
-    if (metrics.isEmpty()) return
+}
+
+@Composable
+private fun ResponseUsageMetric(
+    icon: ImageVector,
+    description: String,
+    text: String,
+    color: Color,
+) {
     Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        metrics.forEach { (label, value) ->
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f),
-                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f))
-                    Text(value, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.88f))
-                }
-            }
-        }
+        Icon(icon, contentDescription = description, modifier = Modifier.size(12.dp), tint = color)
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            maxLines = 1,
+        )
     }
 }
 
@@ -3217,6 +3331,11 @@ private fun ActiveProcessingPanel(
     onAutomaticCollapse: () -> Unit,
 ) {
     val openSubagentDrawer = LocalOpenSubagentDrawer.current
+    val messageSnapshot = state.messages.toList()
+    val liveSubagentSnapshot = state.liveSubagents.toList()
+    val subagentCandidates = remember(messageSnapshot, liveSubagentSnapshot) {
+        collectAllSubagentItems(messageSnapshot, liveSubagentSnapshot)
+    }
     // Normalized protocol events own the live group. The compatibility adapter covers the tiny
     // interval (or an old callback) before that event is reduced, while still producing the same
     // domain DTO and using the same renderer as history.
@@ -3227,14 +3346,15 @@ private fun ActiveProcessingPanel(
             group = domainGroup,
             subagents = state.conversationRenderModel.subagents,
             onSubagentClick = { visual ->
-                visual.agentThreadId.takeIf { it.isNotBlank() }?.let(onLoadSubagentHistory)
+                val anchor = subagentDrawerAnchor(visual, subagentCandidates)
+                openSubagentDrawer(anchor)
+                subagentThreadId(anchor).takeIf { it.isNotBlank() }?.let(onLoadSubagentHistory)
             },
-            onSubagentOverflowClick = {
-                // The existing drawer already has an overview mode.  Mark a lightweight anchor
-                // item instead of adding a second drawer implementation just for the overflow
-                // chip; the drawer will collect all live/history agents from state.
-                val anchor = state.liveSubagents.firstOrNull()
-                    ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            onSubagentOverflowClick = { visuals ->
+                // Reuse the same near-full-height overview drawer as an individual capsule.
+                val anchor = visuals.firstOrNull()
+                    ?.let { subagentDrawerAnchor(it, subagentCandidates) }
+                    ?: subagentCandidates.firstOrNull()?.let { JSONObject(it.toString()) }
                     ?: JSONObject().put("type", "collabAgentToolCall")
                 anchor.put("_openOverview", true)
                 openSubagentDrawer(anchor)
@@ -3385,6 +3505,7 @@ private fun FcodeSelectableCodeText(
 ) {
     val language = LocalNativeLanguage.current
     val colors = LocalFcodeMarkdownColors.current
+    val chatFontScale = LocalFcodeChatFontScale.current.coerceIn(0.5f, 2f)
     val onSelectionActivityChanged = LocalTextSelectionActivityChanged.current
     // Syntax coloring is computed off the render path and cached per (text, language, theme).
     val highlighted = remember(text, codeLanguage, colors.codeBlockBackground) {
@@ -3413,6 +3534,7 @@ private fun FcodeSelectableCodeText(
             view.selectAllLabel = nativeText(language, "\u5168\u9009", "Select all")
             view.onSelectionActivityChanged = onSelectionActivityChanged
             view.onQuoteSelection = onQuoteSelection
+            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13f * chatFontScale)
             view.setTextColor((textColor ?: colors.codeBlockText).toArgb())
             val display: CharSequence = highlighted ?: text
             // Re-set only when the source changed or the highlighted spans were rebuilt
@@ -3594,15 +3716,23 @@ private object NativeMarkdownRenderer {
     }
 
     @Synchronized
-    fun get(context: android.content.Context, colors: FcodeMarkdownColors): Markwon {
-        renderers[colors.cacheKey]?.let { return it }
+    fun get(
+        context: android.content.Context,
+        colors: FcodeMarkdownColors,
+        chatFontScale: Float,
+    ): Markwon {
+        val normalizedScale = chatFontScale.coerceIn(0.5f, 2f)
+        val scaleKey = (normalizedScale * 100f).roundToInt()
+        val rendererKey = "${colors.cacheKey}|chat-font-$scaleKey"
+        renderers[rendererKey]?.let { return it }
         val density = context.resources.displayMetrics.density
+        val scaledDensity = density * context.resources.configuration.fontScale
         val renderer = Markwon.builder(context)
             .usePlugin(object : AbstractMarkwonPlugin() {
                 override fun configureTheme(builder: MarkwonTheme.Builder) {
                     builder
                         .blockMargin((12f * density).roundToInt())
-                        .codeTextSize((14f * density).roundToInt())
+                        .codeTextSize((14f * scaledDensity * normalizedScale).roundToInt())
                         .headingTextSizeMultipliers(floatArrayOf(1.46f, 1.28f, 1.16f, 1.08f, 1.02f, 1.0f))
                         .headingBreakHeight(0)
                         .listItemColor(colors.listMarker.toArgb())
@@ -3640,10 +3770,10 @@ private object NativeMarkdownRenderer {
             .usePlugin(TablePlugin.create(context))
             .usePlugin(LinkifyPlugin.create())
             .usePlugin(MarkwonInlineParserPlugin.create())
-            .usePlugin(JLatexMathPlugin.create(42f) { builder -> builder.inlinesEnabled(true) })
+            .usePlugin(JLatexMathPlugin.create(42f * normalizedScale) { builder -> builder.inlinesEnabled(true) })
             .build()
         if (renderers.size >= 8) renderers.remove(renderers.keys.first())
-        renderers[colors.cacheKey] = renderer
+        renderers[rendererKey] = renderer
         return renderer
     }
 
@@ -3770,11 +3900,13 @@ private fun RichMarkdownText(
     val context = LocalContext.current
     val language = LocalNativeLanguage.current
     val colors = LocalFcodeMarkdownColors.current
-    val themeKey = colors.cacheKey
+    val chatFontScale = LocalFcodeChatFontScale.current.coerceIn(0.5f, 2f)
+    val fontScaleKey = (chatFontScale * 100f).roundToInt()
+    val themeKey = "${colors.cacheKey}|chat-font-$fontScaleKey"
     val onSelectionActivityChanged = LocalTextSelectionActivityChanged.current
     val markwon: Markwon? = if (needsRichRenderer) {
         remember(context.applicationContext, themeKey) {
-            NativeMarkdownRenderer.get(context.applicationContext, colors)
+            NativeMarkdownRenderer.get(context.applicationContext, colors, chatFontScale)
         }
     } else null
     val parsed: android.text.Spanned? = if (markwon != null) {
@@ -3826,6 +3958,7 @@ private fun RichMarkdownText(
             view.selectAllLabel = nativeText(language, "\u5168\u9009", "Select all")
             view.onSelectionActivityChanged = onSelectionActivityChanged
             view.onQuoteSelection = onQuoteSelection
+            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15.5f * chatFontScale)
             view.setTextColor(colors.text.toArgb())
             val rendered = parsed
             if (rendered != null && markwon != null && view.tag != renderedTag) {
@@ -3922,20 +4055,24 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         val group = remember(message.id, state.currentThreadId, text) {
             NativeHistoryAdapter.processGroup(message.id, state.currentThreadId, payload, message.revealStartedAt)
         }
+        val messageSnapshot = state.messages.toList()
+        val liveSubagentSnapshot = state.liveSubagents.toList()
+        val subagentCandidates = remember(messageSnapshot, liveSubagentSnapshot) {
+            collectAllSubagentItems(messageSnapshot, liveSubagentSnapshot)
+        }
         NativeActivityGroupRenderer(
             group = group,
             onSubagentClick = { visual ->
-                visual.agentThreadId.takeIf { it.isNotBlank() }?.let(onLoadSubagentHistory)
+                val anchor = subagentDrawerAnchor(visual, subagentCandidates)
+                openSubagentDrawer(anchor)
+                subagentThreadId(anchor).takeIf { it.isNotBlank() }?.let(onLoadSubagentHistory)
             },
             onSubagentOverflowClick = { visuals ->
                 val first = visuals.firstOrNull()
-                openSubagentDrawer(
-                    JSONObject()
-                        .put("type", "subAgentActivity")
-                        .put("agentThreadId", first?.agentThreadId.orEmpty())
-                        .put("callId", first?.callId.orEmpty())
-                        .put("_openOverview", true),
-                )
+                val anchor = first?.let { subagentDrawerAnchor(it, subagentCandidates) }
+                    ?: JSONObject().put("type", "subAgentActivity")
+                anchor.put("_openOverview", true)
+                openSubagentDrawer(anchor)
             },
         )
         return
@@ -3959,7 +4096,19 @@ private fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatSt
         label = "historicalReasoningArrow",
     )
     Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
-        Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fcodePressClickable(
+                    onClickLabel = if (expanded) {
+                        nativeText(language, "收起历史过程", "Collapse historical process")
+                    } else {
+                        nativeText(language, "展开历史过程", "Expand historical process")
+                    },
+                ) { expanded = !expanded }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Icon(HugeIcons.Zap, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(8.dp))
             Text(nativeText(language, "\u601d\u8003\u4e86 ${duration}s", "Thought for ${duration}s"), modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -4067,11 +4216,15 @@ private fun CollabAgentCapsule(
     val chipColor = Color(if (isLight) resolvedVisual.lightColorArgb else resolvedVisual.darkColorArgb).copy(alpha = .82f)
     val iconTint = if (isLight) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface
     Surface(
-        modifier = Modifier.padding(top = 8.dp).clickable {
-            openDrawer(item)
-            val thread = subagentThreadId(item)
-            if (thread.isNotBlank()) onLoadHistory(thread)
-        },
+        modifier = Modifier
+            .padding(top = 8.dp)
+            .fcodePressClickable(
+                onClickLabel = nativeText(LocalNativeLanguage.current, "查看子代理详情", "Open subagent details"),
+            ) {
+                openDrawer(item)
+                val thread = subagentThreadId(item)
+                if (thread.isNotBlank()) onLoadHistory(thread)
+            },
         shape = CircleShape,
         color = chipColor,
         contentColor = iconTint,
@@ -4118,8 +4271,10 @@ private fun SubagentDrawer(
         collectSubagentItems(messageSnapshot, liveSubagentSnapshot, item)
     }
     var selectedId by remember(initialId) { mutableStateOf<String?>(initialId) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 2.dp,
@@ -4236,7 +4391,16 @@ private fun WorkPanelDialog(
     Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         val scrim by animateFloatAsState(if (entered) 0.16f else 0f, tween(170, easing = LinearEasing), label = "workPanelScrim")
         Box(Modifier.fillMaxSize()) {
-            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = scrim)).clickable(onClick = close))
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(Color.Black.copy(alpha = scrim))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = close,
+                    ),
+            )
             AnimatedVisibility(
                 visible = entered,
                 modifier = Modifier.align(Alignment.CenterEnd),
@@ -4344,7 +4508,9 @@ private fun WorkPanelTabs(tab: String, planCount: Int, checkpointCount: Int, sna
             "git" to "Git $gitCount",
         ).forEach { (id, label) ->
             Surface(
-                modifier = Modifier.clickable { onTab(id) },
+                modifier = Modifier.fcodePressClickable(
+                    onClickLabel = nativeText(language, "切换到$label", "Show $label"),
+                ) { onTab(id) },
                 shape = CircleShape,
                 color = if (tab == id) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
                 contentColor = if (tab == id) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -4639,7 +4805,16 @@ private fun SnapshotDiffCard(
     }
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
         Column {
-            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(start = 13.dp, end = 6.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u5dee\u5f02", "Collapse diff")
+                        else nativeText(language, "\u5c55\u5f00\u5dee\u5f02", "Expand diff"),
+                    ) { expanded = !expanded }
+                    .padding(start = 13.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(HugeIcons.Files02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
@@ -4869,7 +5044,13 @@ private fun WorkChangeFileCard(
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
         Column {
             Row(
-                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(start = 13.dp, end = 5.dp, top = 10.dp, bottom = 10.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u6587\u4ef6\u53d8\u66f4", "Collapse file changes")
+                        else nativeText(language, "\u5c55\u5f00\u6587\u4ef6\u53d8\u66f4", "Expand file changes"),
+                    ) { expanded = !expanded }
+                    .padding(start = 13.dp, end = 5.dp, top = 10.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(HugeIcons.Files02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
@@ -5097,7 +5278,12 @@ private fun WorkPlanView(raw: String, explanation: String, goal: String, execute
         }
         if (goal.isNotBlank()) item(key = "active-goal") {
             Surface(
-                modifier = Modifier.fillMaxWidth().clickable(enabled = executeEnabled) { onEditGoal() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        enabled = executeEnabled,
+                        onClickLabel = nativeText(language, "\u7f16\u8f91\u6d3b\u8dc3\u76ee\u6807", "Edit active goal"),
+                    ) { onEditGoal() },
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -5210,9 +5396,10 @@ private fun SubagentOverview(state: NativeChatState, agents: List<JSONObject>, o
 
 @Composable
 private fun SubagentOverviewRow(state: NativeChatState, agent: JSONObject, onSelect: (JSONObject) -> Unit) {
+    val language = LocalNativeLanguage.current
     val task = jsonText(agent, "task", "prompt", "input", "message")
     val status = resolvedSubagentStatus(state, agent)
-    val statusLabel = subagentStatusLabel(status, LocalNativeLanguage.current)
+    val statusLabel = subagentStatusLabel(status, language)
     val statusColor = when (status) {
         "working" -> MaterialTheme.colorScheme.primary
         "waiting" -> MaterialTheme.colorScheme.tertiary
@@ -5220,7 +5407,11 @@ private fun SubagentOverviewRow(state: NativeChatState, agent: JSONObject, onSel
         else -> Color(0xFF5E8B68)
     }
     Surface(
-        Modifier.fillMaxWidth().clickable { onSelect(agent) },
+        Modifier
+            .fillMaxWidth()
+            .fcodePressClickable(
+                onClickLabel = nativeText(language, "查看子代理详情", "View agent details"),
+            ) { onSelect(agent) },
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
@@ -5483,7 +5674,12 @@ private fun SubagentActivityView(content: String) {
     ) {
         Column {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 13.dp, vertical = 10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) "\u6536\u8d77\u5b50\u4ee3\u7406\u6d3b\u52a8" else "\u5c55\u5f00\u5b50\u4ee3\u7406\u6d3b\u52a8",
+                    ) { expanded = !expanded }
+                    .padding(horizontal = 13.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(HugeIcons.Zap, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
@@ -5654,7 +5850,17 @@ private fun CommandExecutionCard(item: JSONObject, running: Boolean = false, liv
     ) {
         Column {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable(enabled = hasDetails) { expanded = !expanded }.padding(horizontal = if (compact) 8.dp else 11.dp, vertical = rowVerticalPadding),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        enabled = hasDetails,
+                        onClickLabel = if (expanded) {
+                            nativeText(language, "收起命令详情", "Collapse command details")
+                        } else {
+                            nativeText(language, "展开命令详情", "Expand command details")
+                        },
+                    ) { expanded = !expanded }
+                    .padding(horizontal = if (compact) 8.dp else 11.dp, vertical = rowVerticalPadding),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Surface(shape = CircleShape, color = accent.copy(alpha = 0.12f), contentColor = accent) {
@@ -5802,7 +6008,16 @@ private fun DirectoryOutputCard(content: String) {
     val visible = if (expanded) lines else lines.take(12)
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
         Column {
-            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u76ee\u5f55\u5185\u5bb9", "Collapse directory contents")
+                        else nativeText(language, "\u5c55\u5f00\u76ee\u5f55\u5185\u5bb9", "Expand directory contents"),
+                    ) { expanded = !expanded }
+                    .padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(HugeIcons.Folder01, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp)); Text("目录内容", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 Text(nativeText(language, "${lines.size} \u9879", "${lines.size} items"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -5840,7 +6055,16 @@ private fun SearchOutputCard(content: String) {
     var expanded by remember { mutableStateOf(false) }
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
         Column {
-            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u641c\u7d22\u7ed3\u679c", "Collapse search results")
+                        else nativeText(language, "\u5c55\u5f00\u641c\u7d22\u7ed3\u679c", "Expand search results"),
+                    ) { expanded = !expanded }
+                    .padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(HugeIcons.Search01, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp)); Text("搜索结果", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 Text(nativeText(language, "${results.size} \u6761 \u00b7 ${grouped.size} \u4e2a\u6587\u4ef6", "${results.size} matches ? ${grouped.size} files"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -5868,6 +6092,7 @@ private fun SearchOutputCard(content: String) {
 }
 @Composable
 private fun ToolTextCard(title: String, detail: String, diff: Boolean, payloadRef: String = "") {
+    val language = LocalNativeLanguage.current
     var expanded by remember { mutableStateOf(false) }
     var loadedDetail by remember(payloadRef) { mutableStateOf<String?>(null) }
     LaunchedEffect(expanded, payloadRef) {
@@ -5884,7 +6109,16 @@ private fun ToolTextCard(title: String, detail: String, diff: Boolean, payloadRe
     val accent = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Surface(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest) {
         Column {
-            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u5de5\u5177\u8be6\u60c5", "Collapse tool details")
+                        else nativeText(language, "\u5c55\u5f00\u5de5\u5177\u8be6\u60c5", "Expand tool details"),
+                    ) { expanded = !expanded }
+                    .padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(if (diff) HugeIcons.Folder01 else HugeIcons.Sparkles, null, modifier = Modifier.size(17.dp), tint = accent)
                 Spacer(Modifier.width(8.dp))
                 Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
@@ -5986,7 +6220,12 @@ private fun FileDiffCard(items: List<JSONObject>, projectPath: String = "") {
     )
     Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Surface(
-            modifier = Modifier.widthIn(max = 420.dp).clickable { expanded = !expanded },
+            modifier = Modifier
+                .widthIn(max = 420.dp)
+                .fcodePressClickable(
+                    onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u6587\u4ef6\u53d8\u66f4", "Collapse file changes")
+                    else nativeText(language, "\u5c55\u5f00\u6587\u4ef6\u53d8\u66f4", "Expand file changes"),
+                ) { expanded = !expanded },
             shape = CircleShape,
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
@@ -6042,7 +6281,13 @@ private fun FileDiffRow(file: NativeFileChangeEntry, projectPath: String) {
     )
     Column {
         Row(
-            modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 8.dp, vertical = 7.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fcodePressClickable(
+                    onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u6587\u4ef6 diff", "Collapse file diff")
+                    else nativeText(language, "\u5c55\u5f00\u6587\u4ef6 diff", "Expand file diff"),
+                ) { expanded = !expanded }
+                .padding(horizontal = 8.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(HugeIcons.Files02, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
@@ -6194,7 +6439,10 @@ private fun ImageGroupCard(items: List<JSONObject>) {
                     AttachmentThumbnail(
                         path,
                         (if (single) Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 240.dp) else Modifier.size(88.dp))
-                            .clip(RoundedCornerShape(11.dp)).clickable { previewPath = path },
+                            .clip(RoundedCornerShape(11.dp))
+                            .fcodePressClickable(
+                                onClickLabel = nativeText(language, "\u9884\u89c8\u56fe\u7247", "Preview image"),
+                            ) { previewPath = path },
                         maxEdge = if (single) 960 else 320,
                     )
                 }
@@ -6253,7 +6501,16 @@ private fun NativeGoalBanner(objective: String, paused: Boolean, enabled: Boolea
     val arrowRotation by animateFloatAsState(if (expanded) 180f else 0f, spring(dampingRatio = 0.78f, stiffness = 420f), label = "goalArrow")
     Surface(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f)) {
         Column {
-            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .fcodePressClickable(
+                        onClickLabel = if (expanded) nativeText(language, "\u6536\u8d77\u76ee\u6807", "Collapse goal")
+                        else nativeText(language, "\u5c55\u5f00\u76ee\u6807", "Expand goal"),
+                    ) { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(HugeIcons.LookTop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
@@ -6403,6 +6660,9 @@ private fun RikkaChatInput(
     value: String,
     enabled: Boolean,
     loading: Boolean,
+    compactEnabled: Boolean,
+    compactRunning: Boolean,
+    submitEnabled: Boolean,
     conversationKey: String,
     conversationMoving: Boolean,
     hasConversation: Boolean,
@@ -6416,6 +6676,7 @@ private fun RikkaChatInput(
     effortOptions: List<String>,
     selectedEffort: String,
     onEffortSelected: (String) -> Unit,
+    onUltraBurst: (Rect) -> Unit,
     selectedMode: String,
     permissionMode: String,
     onPermissionModeSelected: (String) -> Unit,
@@ -6519,6 +6780,8 @@ private fun RikkaChatInput(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         ) {
             NativeComposerToolSheet(
+                compactEnabled = compactEnabled,
+                compactRunning = compactRunning,
                 onDismiss = { toolsExpanded = false },
                 onCommand = { command ->
                     when (command) {
@@ -6619,7 +6882,8 @@ private fun RikkaChatInput(
         animationSpec = spring(dampingRatio = 0.6f, stiffness = 250f, visibilityThreshold = 0.001f),
         label = "compactComposerPressScale",
     )
-    val submitCurrentText: (String) -> Unit = { currentText ->
+    val submitCurrentText: (String) -> Unit = submit@ { currentText ->
+        if (!submitEnabled) return@submit
         val result = onSend(currentText, composerTextBounds)
         if (result?.accepted == true && enabled && (currentText.isNotBlank() || attachments.isNotEmpty())) {
             textState.setTextAndPlaceCursorAtEnd("")
@@ -6751,7 +7015,13 @@ private fun RikkaChatInput(
                 shape = inputShape,
                 tonalElevation = 0.dp,
                 border = if (useLiquidGlass) null else BorderStroke(1.dp, inputBorderColor),
-                color = if (useLiquidGlass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLow,
+                color = if (useLiquidGlass) {
+                    Color.Transparent
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerLow.copy(
+                        alpha = LocalFcodeMaterialTransparency.current.composerAlpha,
+                    )
+                },
             ) {
                 Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = maxOf(0.dp, composerSurfaceVerticalPadding))) {
                     Column(modifier = Modifier.fillMaxWidth()) {
@@ -6813,9 +7083,10 @@ private fun RikkaChatInput(
                                 onRemoveSkill = onRemoveSkill,
                             )
                         }
-                        BasicTextField(
-                            state = textState,
-                            modifier = Modifier
+                        FcodeChatTypography {
+                            BasicTextField(
+                                state = textState,
+                                modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = fieldMinHeight)
                                 .padding(start = 12.dp, end = fieldEndPadding, top = fieldVerticalPadding, bottom = fieldVerticalPadding)
@@ -6823,7 +7094,7 @@ private fun RikkaChatInput(
                                 .onGloballyPositioned { composerTextBounds = it.boundsInWindow() }
                                 .onPreviewKeyEvent { event ->
                                     val currentText = textState.text.toString()
-                                    if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && currentText.isNotBlank()) {
+                                    if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && submitEnabled && currentText.isNotBlank()) {
                                         val result = onSend(currentText, composerTextBounds)
                                         if (result?.accepted == true) {
                                             textState.setTextAndPlaceCursorAtEnd("")
@@ -6832,31 +7103,32 @@ private fun RikkaChatInput(
                                         result?.accepted == true
                                     } else false
                                 },
-                            enabled = enabled && !compactComposer,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                color = MaterialTheme.colorScheme.onSurface,
-                                lineHeight = 24.sp,
-                            ),
-                            lineLimits = TextFieldLineLimits.MultiLine(
-                                minHeightInLines = 1,
-                                maxHeightInLines = if (compactComposer) 1 else 5,
-                            ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            decorator = { innerTextField ->
-                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-                                    if (textState.text.isEmpty()) {
-                                        Text(
-                                            nativeText(language, "输入消息", "Type a message"),
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                enabled = enabled && !compactComposer,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    lineHeight = 24.sp,
+                                ),
+                                lineLimits = TextFieldLineLimits.MultiLine(
+                                    minHeightInLines = 1,
+                                    maxHeightInLines = if (compactComposer) 1 else 5,
+                                ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                decorator = { innerTextField ->
+                                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                                        if (textState.text.isEmpty()) {
+                                            Text(
+                                                nativeText(language, "输入消息", "Type a message"),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        innerTextField()
                                     }
-                                    innerTextField()
-                                }
-                            },
-                        )
+                                },
+                            )
+                        }
                         AnimatedVisibility(
                             visible = !compactComposer,
                             enter = fadeIn(tween(145)) + expandVertically(
@@ -6878,7 +7150,7 @@ private fun RikkaChatInput(
                                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
                                     InputTool(HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick)
-                                    LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected)
+                                    LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected, onUltraBurst)
                                     InputTool(
                                         HugeIcons.Settings03,
                                         NativePermissionMode.label(permissionMode, language != "en"),
@@ -6925,7 +7197,7 @@ private fun RikkaChatInput(
             }
                 ComposerActionButton(
                     textState = textState,
-                    enabled = enabled,
+                    enabled = enabled && submitEnabled,
                     loading = loading,
                     hasAttachments = attachments.isNotEmpty(),
                     onStop = onStop,
@@ -7143,7 +7415,12 @@ private fun PermissionModeSheet(selected: String, onSelect: (String) -> Unit, on
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -> Unit) {
+private fun NativeComposerToolSheet(
+    compactEnabled: Boolean,
+    compactRunning: Boolean,
+    onDismiss: () -> Unit,
+    onCommand: (String) -> Unit,
+) {
     val language = LocalNativeLanguage.current
     val tools = listOf(
         Triple(HugeIcons.Sparkles, "\u538b\u7f29\u4e0a\u4e0b\u6587", "__compact__"),
@@ -7161,12 +7438,51 @@ private fun NativeComposerToolSheet(onDismiss: () -> Unit, onCommand: (String) -
         }
         Text(nativeText(language, "\u8f93\u5165 / \u4e5f\u53ef\u4ee5\u968f\u65f6\u6253\u5f00\u6b64\u9762\u677f", "Type / to open this panel"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 10.dp))
         tools.forEach { (icon, title, command) ->
-            Surface(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onCommand(command) }, shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            val itemEnabled = command != "__compact__" || compactEnabled
+            val trailingLabel = when (command) {
+                "__compact__" -> if (compactEnabled) {
+                    nativeText(language, "\u6267\u884c", "Run")
+                } else if (compactRunning) {
+                    nativeText(language, "\u538b\u7f29\u8fdb\u884c\u4e2d", "Compacting")
+                } else {
+                    nativeText(language, "\u4efb\u52a1\u4e2d\u4e0d\u53ef\u7528", "Unavailable during a task")
+                }
+                "__attachments__" -> "\u9009\u62e9"
+                "__retry__" -> "\u6267\u884c"
+                "__edit__" -> "\u7f16\u8f91"
+                "" -> "\u6e05\u9664"
+                else -> command
+            }
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .clickable(enabled = itemEnabled) { onCommand(command) },
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        icon,
+                        null,
+                        Modifier.size(20.dp),
+                        tint = if (itemEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .42f),
+                    )
                     Spacer(Modifier.width(14.dp))
-                    Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                    Text(when (command) { "__attachments__" -> "\u9009\u62e9"; "__retry__" -> "\u6267\u884c"; "__edit__" -> "\u7f16\u8f91"; "" -> "\u6e05\u9664"; else -> command }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f),
+                        color = if (itemEnabled) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .55f),
+                    )
+                    Text(
+                        trailingLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (itemEnabled) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }
@@ -7321,12 +7637,21 @@ private fun effortLabel(value: String, language: String): String = when (value.l
 }
 
 @Composable
-private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: (String) -> Unit) {
+private fun LiquidEffortTool(
+    options: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    onUltraBurst: (Rect) -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
     var popupVisible by remember { mutableStateOf(false) }
     var contentReady by remember { mutableStateOf(false) }
     var previewEffort by remember(options, selected) { mutableStateOf(selected) }
     var effortDragging by remember { mutableStateOf(false) }
+    // Anchor of the effort button in app-window coordinates, refreshed during popup placement.
+    // Popup windows report their own coordinate space from onGloballyPositioned, so the burst
+    // origin is captured from the placement pass instead, which receives the real window bounds.
+    var effortAnchorRect by remember { mutableStateOf<Rect?>(null) }
     val effortLabelScale by animateFloatAsState(
         targetValue = if (effortDragging) 1.14f else 1f,
         animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
@@ -7352,6 +7677,13 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
         contentReady = false; expanded = false; menuVisibility.targetState = false
         scope.launch { delay(265); popupVisible = false }
     }
+    // Commit the selection, then fire the full-screen glass burst once the Ultra effort is
+    // actually engaged. The slider only commits on change, so re-selecting Ultra does not stack
+    // bursts while it is already active.
+    val commitEffort: (String) -> Unit = { value ->
+        onSelect(value)
+        if (value.equals("ultra", ignoreCase = true)) effortAnchorRect?.let(onUltraBurst)
+    }
     LaunchedEffect(popupVisible, expanded) {
         if (popupVisible && expanded) { delay(20); menuVisibility.targetState = true; delay(35); contentReady = true }
     }
@@ -7360,6 +7692,13 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
     val positionProvider = remember(gapPx, shadowPadPx) {
         object : PopupPositionProvider {
             override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
+                val anchor = Rect(
+                    anchorBounds.left.toFloat(),
+                    anchorBounds.top.toFloat(),
+                    anchorBounds.right.toFloat(),
+                    anchorBounds.bottom.toFloat(),
+                )
+                if (effortAnchorRect != anchor) effortAnchorRect = anchor
                 val x = (anchorBounds.left - shadowPadPx).coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
                 val above = anchorBounds.top - popupContentSize.height + shadowPadPx - gapPx
                 val y = if (above >= 0) above else (anchorBounds.bottom + gapPx - shadowPadPx).coerceAtMost(windowSize.height - popupContentSize.height)
@@ -7368,14 +7707,27 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
         }
     }
     Box {
+        // While the Ultra effort is active the Zap button breathes a primary-colored ring and the
+        // icon shifts to primary, echoing the overdrive state without a separate badge.
+        val ultraActive = selected.equals("ultra", ignoreCase = true)
+        val ultraGlowAlpha = if (ultraActive) {
+            val glowTransition = rememberInfiniteTransition(label = "ultraZapGlow")
+            glowTransition.animateFloat(
+                initialValue = 0.45f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(1100, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+                label = "ultraZapGlowAlpha",
+            ).value
+        } else 0f
         Surface(
             modifier = Modifier.size(40.dp).graphicsLayer { scaleX = buttonScale; scaleY = buttonScale },
             shape = CircleShape,
             color = if (expanded) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
             contentColor = if (expanded) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+            border = if (ultraActive) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = ultraGlowAlpha)) else null,
         ) {
             Box(Modifier.fillMaxSize().clickable(interactionSource = interaction, indication = null) { if (expanded) close() else open() }, contentAlignment = Alignment.Center) {
-                Icon(HugeIcons.Zap, "思维强度", modifier = Modifier.size(21.dp))
+                Icon(HugeIcons.Zap, "思维强度", modifier = Modifier.size(21.dp), tint = if (ultraActive) MaterialTheme.colorScheme.primary else LocalContentColor.current)
             }
         }
         if (popupVisible) {
@@ -7392,7 +7744,14 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                             modifier = Modifier.width(310.dp), shape = RoundedCornerShape(22.dp),
                             color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 5.dp, shadowElevation = panelElevation,
                         ) {
-                            Column(Modifier.padding(vertical = 8.dp)) {
+                            Box(Modifier.clip(RoundedCornerShape(22.dp))) {
+                                // Starry sky material: only the Ultra effort stages it, fading in
+                                // while the slider previews the Ultra segment and out when it leaves.
+                                PixelStarrySky(
+                                    visible = previewEffort.equals("ultra", ignoreCase = true),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                Column(Modifier.padding(vertical = 8.dp)) {
                                 AnimatedVisibility(
                                     visible = contentReady,
                                     enter = fadeIn(tween(145, delayMillis = 20)) + slideInHorizontally(initialOffsetX = { -it / 12 }, animationSpec = spring(dampingRatio = 0.66f, stiffness = 430f)),
@@ -7425,7 +7784,7 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                                         selected = selected,
                                         onPreview = { previewEffort = it },
                                         onDraggingChanged = { effortDragging = it },
-                                        onSelect = onSelect,
+                                        onSelect = commitEffort,
                                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                                     )
                                 }
@@ -7435,6 +7794,7 @@ private fun LiquidEffortTool(options: List<String>, selected: String, onSelect: 
                                     exit = fadeOut(tween(80)),
                                 ) {
                                     Text("拖动或点击选择，松手后自动吸附", Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                                 }
                             }
                         }
@@ -7572,6 +7932,7 @@ private fun RikkaDrawerV2(
     onResumeConversation: (String) -> Unit,
     onClose: () -> Unit,
     onNewConversation: () -> Unit,
+    onNewConversationAtProject: (String) -> Unit,
     onBackHome: () -> Unit,
     onOpenLegacyWebUi: () -> Unit,
 ) {
@@ -7630,7 +7991,7 @@ private fun RikkaDrawerV2(
                         showNewProjectDialog = false
                         projectDialogError = ""
                         newProjectName = ""
-                        onNewConversation()
+                        onNewConversationAtProject(project.path)
                     }
                     .onFailure { error ->
                         projectDialogError = error.message ?: nativeText(language, "无法访问所选文件夹。", "Unable to access the selected folder.")
@@ -7650,16 +8011,22 @@ private fun RikkaDrawerV2(
     val conversationSnapshot = remember(conversationRevision) { conversations.toList() }
     val registeredProjects = remember(projectRevision) { NativeDrawerProjectStore.registered(context) }
     val hiddenProjects = remember(projectRevision) { NativeDrawerProjectStore.hiddenPaths(context) }
-    val projects = remember(conversationRevision, registeredProjects, hiddenProjects, projectRevision) {
-        val paths = linkedSetOf<String>()
-        registeredProjects.forEach { paths.add(it.path) }
-        conversationSnapshot.mapTo(paths) { it.projectPath }.remove("")
-        paths.filterNot(hiddenProjects::contains).map { path ->
-            registeredProjects.firstOrNull { it.path == path }
-                ?: NativeDrawerProject(path, NativeDrawerProjectStore.displayName(context, path))
+    val drawerClassification = remember(conversationRevision, registeredProjects, hiddenProjects, projectRevision) {
+        classifyNativeDrawerTasks(
+            conversations = conversationSnapshot,
+            registeredProjectPaths = registeredProjects.map(NativeDrawerProject::path),
+            hiddenProjectPaths = hiddenProjects,
+        )
+    }
+    val projects = remember(drawerClassification.visibleProjects, registeredProjects) {
+        drawerClassification.visibleProjects.mapNotNull { path ->
+            registeredProjects.firstOrNull {
+                nativeDrawerPathIdentity(it.path) == nativeDrawerPathIdentity(path)
+            }
         }
     }
-    val tasksByProject = remember(conversationRevision) { conversationSnapshot.groupBy { it.projectPath } }
+    val standaloneTasks = drawerClassification.standaloneTasks
+    val tasksByProject = drawerClassification.tasksByProject
     val openTask: (NativeConversation) -> Unit = remember(context, onResumeConversation) {
         { conversation ->
             if (conversation.projectPath.isNotBlank()) {
@@ -7718,8 +8085,11 @@ private fun RikkaDrawerV2(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("tasks" to nativeText(language, "\u4efb\u52a1", "Tasks"), "projects" to nativeText(language, "\u9879\u76ee", "Projects")).forEach { (value, label) ->
                     Surface(
-                        onClick = { mode = value },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .fcodePressClickable(
+                                onClickLabel = nativeText(language, "\u5207\u6362\u5230$label", "Show $label"),
+                            ) { mode = value },
                         shape = RoundedCornerShape(13.dp),
                         color = if (mode == value) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
                     ) {
@@ -7739,10 +8109,10 @@ private fun RikkaDrawerV2(
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 if (mode == "tasks") {
-                    if (conversationSnapshot.isEmpty()) {
+                    if (standaloneTasks.isEmpty()) {
                         item { DrawerEmptyState(nativeText(language, "\u8fd8\u6ca1\u6709\u4efb\u52a1", "No tasks yet")) }
                     } else {
-                        items(conversationSnapshot, key = { "task:${it.threadId}" }) { conversation ->
+                        items(standaloneTasks, key = { "task:${it.threadId}" }) { conversation ->
                             DrawerConversationTaskRow(
                                 conversation = conversation,
                                 selected = conversation.threadId == currentThreadId,
@@ -7768,6 +8138,7 @@ private fun RikkaDrawerV2(
                                 onToggle = {
                                     expandedProjects = if (project.path in expandedProjects) expandedProjects - project.path else expandedProjects + project.path
                                 },
+                                onNewTask = { onNewConversationAtProject(project.path) },
                                 onRename = { renameProjectError = ""; renameProject = project },
                                 onDelete = { deleteProject = project },
                             )
@@ -7839,7 +8210,7 @@ private fun RikkaDrawerV2(
                             showNewProjectDialog = false
                             projectDialogError = ""
                             newProjectName = ""
-                            onNewConversation()
+                            onNewConversationAtProject(project.path)
                         }
                         .onFailure { error -> projectDialogError = error.message.orEmpty() }
                 }) { Text(nativeText(language, "\u521b\u5efa", "Create")) }
@@ -7969,6 +8340,7 @@ private fun DrawerProjectRow(
     taskCount: Int,
     expanded: Boolean,
     onToggle: () -> Unit,
+    onNewTask: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -7977,10 +8349,18 @@ private fun DrawerProjectRow(
     var menuExpanded by remember(project.path) { mutableStateOf(false) }
     Box {
         Surface(
-            modifier = Modifier.fillMaxWidth().combinedClickable(
-                onClick = onToggle,
-                onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menuExpanded = true },
-            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fcodePressCombinedClickable(
+                    onClickLabel = nativeText(
+                        language,
+                        if (expanded) "\u6536\u8d77\u9879\u76ee" else "\u5c55\u5f00\u9879\u76ee",
+                        if (expanded) "Collapse project" else "Expand project",
+                    ),
+                    onLongClickLabel = nativeText(language, "\u9879\u76ee\u83dc\u5355", "Project menu"),
+                    onClick = onToggle,
+                    onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menuExpanded = true },
+                ),
             shape = RoundedCornerShape(15.dp),
             color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent,
         ) {
@@ -7991,6 +8371,18 @@ private fun DrawerProjectRow(
                 Spacer(Modifier.width(10.dp))
                 Text(project.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
                 Text(taskCount.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.68f))
+                Spacer(Modifier.width(4.dp))
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .fcodePressClickable(
+                            onClickLabel = nativeText(language, "\u5728\u6b64\u9879\u76ee\u4e2d\u65b0\u5efa\u4efb\u52a1", "New task in this project"),
+                            onClick = onNewTask,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(HugeIcons.MessageAdd01, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                }
             }
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
@@ -8015,10 +8407,14 @@ private fun DrawerConversationTaskRow(
     var menuExpanded by remember(conversation.threadId) { mutableStateOf(false) }
     Box(Modifier.padding(start = if (indented) 28.dp else 0.dp)) {
         Surface(
-            modifier = Modifier.fillMaxWidth().combinedClickable(
-                onClick = onOpen,
-                onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menuExpanded = true },
-            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fcodePressCombinedClickable(
+                    onClickLabel = nativeText(language, "\u6253\u5f00\u4efb\u52a1", "Open task"),
+                    onLongClickLabel = nativeText(language, "\u4efb\u52a1\u83dc\u5355", "Task menu"),
+                    onClick = onOpen,
+                    onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menuExpanded = true },
+                ),
             shape = RoundedCornerShape(15.dp),
             color = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent,
         ) {

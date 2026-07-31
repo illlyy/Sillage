@@ -46,6 +46,23 @@ public class NativeStreamEventBatcherTest {
     }
 
     @Test
+    public void routeResetCanDiscardConversationEventsWithoutHidingGlobalErrors() {
+        NativeRouteEventGate gate = new NativeRouteEventGate();
+        gate.resetRoute(1, "thread-a", true);
+        NativeRouteEventGate.RouteToken route = gate.captureRouteToken();
+        NativeStreamEventBatcher batcher = new NativeStreamEventBatcher();
+        batcher.offer("onProtocolDelta", "stale", route);
+        batcher.offerSeparate("onNativeError", "backend disconnected", null);
+
+        batcher.clearRoutedEvents();
+
+        List<NativeStreamEventBatcher.Event> events = batcher.drain();
+        assertEquals(1, events.size());
+        assertEquals("onNativeError", events.get(0).function);
+        assertEquals("backend disconnected", events.get(0).value);
+    }
+
+    @Test
     public void standaloneLifecyclePayloadsAreNeverConcatenated() {
         NativeStreamEventBatcher batcher = new NativeStreamEventBatcher();
         batcher.offerSeparate("onProtocolEvent", "{\"kind\":\"assistantCompleted\"}");
@@ -55,6 +72,23 @@ public class NativeStreamEventBatcherTest {
         assertEquals(2, events.size());
         assertEquals("{\"kind\":\"assistantCompleted\"}", events.get(0).value);
         assertEquals("{\"kind\":\"turnCompleted\"}", events.get(1).value);
+    }
+
+    @Test
+    public void deltaBarrierDeltaPreservesStrictFifoAndNeverMergesAcrossBarrier() {
+        NativeStreamEventBatcher batcher = new NativeStreamEventBatcher();
+        batcher.offer("onProtocolDelta", "before");
+        batcher.offerSeparate("onProtocolEvent", "barrier");
+        batcher.offer("onProtocolDelta", "after");
+
+        List<NativeStreamEventBatcher.Event> events = batcher.drain();
+        assertEquals(3, events.size());
+        assertEquals("onProtocolDelta", events.get(0).function);
+        assertEquals("before", events.get(0).value);
+        assertEquals("onProtocolEvent", events.get(1).function);
+        assertEquals("barrier", events.get(1).value);
+        assertEquals("onProtocolDelta", events.get(2).function);
+        assertEquals("after", events.get(2).value);
     }
 
     @Test

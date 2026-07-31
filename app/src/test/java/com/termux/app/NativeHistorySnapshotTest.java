@@ -7,6 +7,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import org.json.JSONArray;
@@ -202,9 +203,74 @@ public class NativeHistorySnapshotTest {
         assertFalse(NativeHistoryRouteGuard.shouldApply(-1, "thread-b", -1, "thread-b"));
     }
 
+    @Test
+    public void legacyAssistantTailFallbackStopsAtANewerUserMessage() {
+        NativeHistorySnapshot snapshot = new NativeHistorySnapshot(
+            Arrays.asList(
+                message("a1", NativeChatRole.ASSISTANT, "previous answer"),
+                message("u2", NativeChatRole.USER, "new question"),
+                message("activity", NativeChatRole.ACTIVITY, "PROCESS2|timeline")
+            ),
+            "[]", "", -1, 0, 0L, Collections.emptySet());
+
+        assertEquals("", CodexAppServerBridge.historyTailAssistantText(snapshot));
+    }
+
+    @Test
+    public void legacyAssistantTailFallbackMayIgnoreTrailingActivity() {
+        NativeHistorySnapshot snapshot = new NativeHistorySnapshot(
+            Arrays.asList(
+                message("u1", NativeChatRole.USER, "question"),
+                message("a1", NativeChatRole.ASSISTANT, "answer"),
+                message("activity", NativeChatRole.ACTIVITY, "PROCESS2|timeline")
+            ),
+            "[]", "", -1, 0, 0L, Collections.emptySet());
+
+        assertEquals("answer", CodexAppServerBridge.historyTailAssistantText(snapshot));
+    }
+
+    @Test
+    public void sourceLessBlockingRequestRequiresTheCurrentTurnIdentity() throws Exception {
+        assertTrue(CodexAppServerBridge.hasVerifiableRequestRoute(
+            new JSONObject().put("turnId", "turn-current"), "turn-current"));
+        assertFalse(CodexAppServerBridge.hasVerifiableRequestRoute(
+            new JSONObject().put("turnId", "turn-old"), "turn-current"));
+        assertFalse(CodexAppServerBridge.hasVerifiableRequestRoute(new JSONObject(), "turn-current"));
+        assertTrue(CodexAppServerBridge.hasVerifiableRequestRoute(
+            new JSONObject().put("threadId", "thread-a"), "turn-current"));
+    }
+
+    @Test
+    public void serverRequestRouteKeysPreserveJsonRpcIdType() {
+        assertFalse(CodexAppServerBridge.serverRequestRouteKey(1)
+            .equals(CodexAppServerBridge.serverRequestRouteKey("1")));
+        assertEquals(CodexAppServerBridge.serverRequestRouteKey(1),
+            CodexAppServerBridge.serverRequestRouteKey(Integer.valueOf(1)));
+    }
+
+    @Test
+    public void resolvedRequestIdentityCannotCrossThreadsOrTurns() throws Exception {
+        assertTrue(CodexAppServerBridge.requestRouteIdentityMatches(
+            "thread-a", "turn-a", new JSONObject()
+                .put("threadId", "thread-a").put("turnId", "turn-a")));
+        assertFalse(CodexAppServerBridge.requestRouteIdentityMatches(
+            "thread-a", "turn-a", new JSONObject()
+                .put("threadId", "thread-b").put("turnId", "turn-a")));
+        assertFalse(CodexAppServerBridge.requestRouteIdentityMatches(
+            "thread-a", "turn-a", new JSONObject()
+                .put("threadId", "thread-a").put("turnId", "turn-b")));
+        assertFalse(CodexAppServerBridge.requestRouteIdentityMatches(
+            "thread-a", "", new JSONObject().put("turnId", "turn-b")));
+    }
+
     private static NativeHistorySnapshot snapshot(int estimatedChars) {
         return new NativeHistorySnapshot(
             Collections.emptyList(), "[]", "", -1, estimatedChars, 0L, Collections.emptySet());
+    }
+
+    private static NativeChatMessage message(String id, NativeChatRole role, String content) {
+        return new NativeChatMessage(id, role, content, false, 0L, false, null,
+            Collections.emptyList(), Collections.emptyList());
     }
 
     private static String encoded(String prefix, JSONObject value) {

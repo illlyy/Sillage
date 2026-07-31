@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -181,6 +182,8 @@ class NativeSettingsActivity : ComponentActivity() {
             var showReasoningTitles by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING_TITLES, true)) }
             var hideStatusBar by remember { mutableStateOf(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)) }
             var compactComposerOnScroll by remember { mutableStateOf(prefs.getBoolean(FcodeAppearancePreferences.COMPACT_COMPOSER_ON_SCROLL, true)) }
+            var chatFontScale by remember { mutableFloatStateOf(readFcodeChatFontScale(this@NativeSettingsActivity)) }
+            var materialTransparency by remember { mutableStateOf(readFcodeMaterialTransparencyConfig(this@NativeSettingsActivity)) }
             var dialog by remember { mutableStateOf<String?>(null) }
             var missingCliFeature by remember { mutableStateOf<CodexDependentFeature?>(null) }
             var codexCliInstalled by remember { mutableStateOf(isCodexCliInstalled()) }
@@ -200,6 +203,14 @@ class NativeSettingsActivity : ComponentActivity() {
             val navigateBack = {
                 if (!navigator.navigateBack()) finish()
             }
+            val updateMaterialTransparency: (FcodeMaterialTransparencyConfig) -> Unit = { value ->
+                materialTransparency = value.normalized()
+                prefs.edit()
+                    .putFloat(FcodeAppearancePreferences.MATERIAL_USER_BUBBLE_ALPHA, materialTransparency.userBubbleAlpha)
+                    .putFloat(FcodeAppearancePreferences.MATERIAL_ACTIVITY_ALPHA, materialTransparency.activityAlpha)
+                    .putFloat(FcodeAppearancePreferences.MATERIAL_COMPOSER_ALPHA, materialTransparency.composerAlpha)
+                    .apply()
+            }
             FcodeChatTheme(
                 theme, lang, animations, reasoning, follow,
                 colorPalette = colorPalette,
@@ -211,6 +222,8 @@ class NativeSettingsActivity : ComponentActivity() {
                 showResponseStats = showResponseStats,
                 showModelSubtitle = showModelSubtitle,
                 showReasoningTitles = showReasoningTitles,
+                chatFontScale = chatFontScale,
+                materialTransparency = materialTransparency,
             ) {
                 val settingsBackplate = MaterialTheme.colorScheme.surfaceContainer
                 val settingsPageShape = remember { RoundedCornerShape(28.dp) }
@@ -326,6 +339,8 @@ class NativeSettingsActivity : ComponentActivity() {
                             onModels = { navigator.navigate(SettingsPage.MODEL_CONFIGS) },
                             onWebUi = { navigator.navigate(SettingsPage.WEB_UI) },
                             onTermux = { requestCodexFeature(CodexDependentFeature.TERMUX) },
+                            onPinWebUiShortcut = { FcodeLauncherShortcuts.pinWebUi(this@NativeSettingsActivity, lang) },
+                            onPinTermuxShortcut = { FcodeLauncherShortcuts.pinTermux(this@NativeSettingsActivity, lang) },
                             onInstallCodexCli = { requestCodexFeature(CodexDependentFeature.SETUP) },
                             codexCliInstalled = codexCliInstalled,
                             onProxy = { navigator.navigate(SettingsPage.PROXY) },
@@ -335,7 +350,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onMcp = { navigator.navigate(SettingsPage.MCP) },
                             onSkills = { navigator.navigate(SettingsPage.SKILLS) },
                             onLanguage = { dialog = "language" },
-                            onTypography = { dialog = "typography" },
+                            onTypography = { navigator.navigate(SettingsPage.TYPOGRAPHY) },
                             onDeveloper = { navigator.navigate(SettingsPage.DEVELOPER) },
                             environmentRevision = resumeRevision,
                             prefs = prefs,
@@ -431,6 +446,18 @@ class NativeSettingsActivity : ComponentActivity() {
                                     .putBoolean(FcodeAppearancePreferences.CHAT_DYNAMIC_BACKGROUND_CHROMATIC, value.chromaticAberration)
                                     .apply()
                             },
+                        )
+                        SettingsPage.TYPOGRAPHY -> TypographySettingsPage(
+                            lang = lang,
+                            chatFontScale = chatFontScale,
+                            interfaceStyle = FcodeInterfaceStyle.from(interfaceStyle),
+                            transparency = materialTransparency,
+                            onBack = navigateBack,
+                            onChatFontScaleChange = { value ->
+                                chatFontScale = value.coerceIn(0.5f, 2f)
+                                prefs.edit().putFloat(FcodeAppearancePreferences.CHAT_FONT_SCALE, chatFontScale).apply()
+                            },
+                            onTransparencyChange = updateMaterialTransparency,
                         )
                         SettingsPage.DEVELOPMENT_TOOLS -> DevelopmentToolsSettingsPage(
                             lang = lang,
@@ -658,11 +685,6 @@ class NativeSettingsActivity : ComponentActivity() {
                         listOf("system" to tr(lang, "跟随系统", "System"), "zh" to "简体中文", "en" to "English"),
                         language, { dialog = null },
                     ) { language = it; prefs.edit().putString(KEY_LANGUAGE, it).apply(); dialog = null }
-                    "typography" -> InfoDialog(
-                        tr(lang, "文字与 Markdown", "Typography & Markdown"),
-                        tr(lang, "已支持 Markdown、代码块、表格、列表和公式渲染。字号与行距沿用系统无障碍显示设置。", "Markdown, code blocks, tables, lists and math are supported. Font scale follows system accessibility settings."),
-                        lang, { dialog = null },
-                    )
                 }
                 missingCliFeature?.let { feature ->
                     MissingCodexCliDialog(
@@ -712,22 +734,11 @@ class NativeSettingsActivity : ComponentActivity() {
         File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex").canExecute()
 
     private fun openWebUi() {
-        CodexNativeRuntime.shutdown()
-        startActivity(Intent(this, CodexHomeActivity::class.java)
-            .setAction(CodexHomeActivity.ACTION_OPEN_WEBUI)
-            // Recreate the legacy host so its EditText-backed launch state is synchronized
-            // from the profile that may just have been edited on this native screen.
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-        finish()
+        startActivity(FcodeToolNavigation.webUiIntent(this))
     }
 
     private fun openTermux() {
-        CodexNativeRuntime.shutdown()
-        startActivity(Intent(this, CodexHomeActivity::class.java)
-            .setAction(CodexHomeActivity.ACTION_OPEN_TERMUX)
-            // Recreate the host so the terminal proxy uses the latest provider settings.
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-        finish()
+        startActivity(FcodeToolNavigation.termuxIntent(this))
     }
 
     private fun resetWebUiPreferences(lang: String) {
@@ -1693,6 +1704,26 @@ private fun ThemeSettingsPage(
                         }
                     }
                 }
+                if (selectedPalette == FcodeColorPalette.WALLPAPER) {
+                    item {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .72f),
+                        ) {
+                            Text(
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                    tr(lang, "主题色会跟随当前 Android 壁纸变化。", "Theme colors follow the current Android wallpaper.")
+                                } else {
+                                    tr(lang, "壁纸取色需要 Android 12 或更高版本；当前设备会自动回退到绯樱配色。", "Wallpaper colors require Android 12 or later; this device falls back to the Rose palette.")
+                                },
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            )
+                        }
+                    }
+                }
             } else {
                 item { SettingsSection(tr(lang, "液态玻璃配色", "Liquid Glass colors")) }
                 item {
@@ -1851,7 +1882,8 @@ private fun PaletteChoiceCard(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    val scheme = fcodeColorScheme(palette, dark)
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scheme = fcodeResolvedColorScheme(context, palette, dark)
     val cardColor by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .62f) else MaterialTheme.colorScheme.surfaceContainerLow,
         animationSpec = tween(180),
@@ -1921,6 +1953,283 @@ private fun MarkdownThemePreview(lang: String) {
                 Text(tr(lang, "引用颜色、行内代码和代码块均独立适配浅色与深色模式。", "Quotes, inline code and code blocks adapt independently to light and dark modes."), Modifier.padding(start = 11.dp), style = MaterialTheme.typography.bodySmall, color = colors.secondaryText)
             }
         }
+    }
+}
+
+@Composable
+private fun TypographySettingsPage(
+    lang: String,
+    chatFontScale: Float,
+    interfaceStyle: FcodeInterfaceStyle,
+    transparency: FcodeMaterialTransparencyConfig,
+    onBack: () -> Unit,
+    onChatFontScaleChange: (Float) -> Unit,
+    onTransparencyChange: (FcodeMaterialTransparencyConfig) -> Unit,
+) {
+    val normalizedScale = chatFontScale.coerceIn(0.5f, 2f)
+    SettingsScaffold(
+        tr(lang, "文字与 Markdown", "Typography & Markdown"),
+        tr(lang, "调整对话正文大小，并实时预览 Markdown", "Adjust conversation text and preview Markdown live"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            item { SettingsSection(tr(lang, "对话字号", "Conversation text size")) }
+            item {
+                ChatFontScaleCard(
+                    lang = lang,
+                    value = normalizedScale,
+                    onValueChange = onChatFontScaleChange,
+                )
+            }
+            item { SettingsSection(tr(lang, "实时预览", "Live preview")) }
+            item {
+                CompositionLocalProvider(LocalFcodeChatFontScale provides normalizedScale) {
+                    FcodeChatTypography {
+                        TypographyMarkdownPreview(lang)
+                    }
+                }
+            }
+            if (interfaceStyle == FcodeInterfaceStyle.MATERIAL) {
+                item { SettingsSection(tr(lang, "Material Expressive 透明度", "Material Expressive transparency")) }
+                item { MaterialTransparencyPreview(lang, transparency) }
+                item {
+                    MaterialTransparencySettingsCard(
+                        lang = lang,
+                        value = transparency,
+                        onValueChange = onTransparencyChange,
+                    )
+                }
+            }
+            item {
+                Text(
+                    tr(
+                        lang,
+                        "只缩放消息正文、Markdown、代码、思考与命令内容以及输入文字；顶栏、按钮和触控区域保持原尺寸。",
+                        "Only message text, Markdown, code, reasoning and command content, and composer text are scaled. Headers, buttons, and touch targets keep their original size.",
+                    ),
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ChatFontScaleCard(
+    lang: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+) {
+    val percentage = (value * 100).roundToInt()
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(tr(lang, "正文与代码字号", "Body and code size"), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        tr(lang, "默认 87%，范围 50%–200%", "Default 87%, range 50%–200%"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                    Text(
+                        "$percentage%",
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+            }
+            Slider(
+                value = value,
+                onValueChange = { raw -> onValueChange((raw * 100).roundToInt() / 100f) },
+                valueRange = 0.5f..2f,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("50%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("200%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (percentage != (FcodeAppearancePreferences.DEFAULT_CHAT_FONT_SCALE * 100).roundToInt()) {
+                TextButton(
+                    onClick = { onValueChange(FcodeAppearancePreferences.DEFAULT_CHAT_FONT_SCALE) },
+                    modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
+                ) {
+                    Text(tr(lang, "恢复默认 87%", "Restore default 87%"))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypographyMarkdownPreview(lang: String) {
+    val colors = LocalFcodeMarkdownColors.current
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(tr(lang, "让移动端工作流更清晰", "A clearer mobile workflow"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = colors.text)
+            Text(
+                tr(lang, "正文会按上方比例显示，系统无障碍字号仍然继续生效。", "Body text follows the ratio above while the system accessibility scale remains active."),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.text,
+            )
+            Row(verticalAlignment = Alignment.Top) {
+                Text("• ", color = colors.listMarker, fontWeight = FontWeight.Bold)
+                Text(tr(lang, "Markdown 列表、链接和引用", "Markdown lists, links, and quotes"), style = MaterialTheme.typography.bodyMedium, color = colors.link)
+            }
+            Row {
+                Surface(Modifier.width(4.dp).height(46.dp), shape = RoundedCornerShape(50), color = colors.quote) {}
+                Text(
+                    tr(lang, "预览会随滑块即时变化。", "The preview changes immediately with the slider."),
+                    Modifier.padding(start = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.secondaryText,
+                )
+            }
+            Surface(shape = RoundedCornerShape(14.dp), color = colors.codeBlockBackground) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("kotlin", style = MaterialTheme.typography.labelSmall, color = colors.secondaryText)
+                    Text(
+                        "val result = codex.run(\"continue\")",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = colors.codeBlockText,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MaterialTransparencyPreview(
+    lang: String,
+    value: FcodeMaterialTransparencyConfig,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .72f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = value.activityAlpha),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .4f)),
+            ) {
+                Row(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(Modifier.size(8.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {}
+                    Spacer(Modifier.width(9.dp))
+                    Text(tr(lang, "思考与执行 · 3 个步骤", "Thinking & actions · 3 steps"), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = value.userBubbleAlpha),
+                ) {
+                    Text(tr(lang, "帮我继续优化这个页面", "Keep polishing this page"), Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = value.composerAlpha),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .42f)),
+            ) {
+                Text(tr(lang, "输入消息…", "Message…"), Modifier.padding(horizontal = 15.dp, vertical = 12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MaterialTransparencySettingsCard(
+    lang: String,
+    value: FcodeMaterialTransparencyConfig,
+    onValueChange: (FcodeMaterialTransparencyConfig) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column(Modifier.padding(horizontal = 18.dp, vertical = 8.dp)) {
+            TransparencySliderRow(
+                title = tr(lang, "用户气泡", "User bubble"),
+                subtitle = tr(lang, "你发送的消息背景", "Background behind messages you send"),
+                value = value.userBubbleAlpha,
+                onValueChange = { onValueChange(value.copy(userBubbleAlpha = it)) },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f))
+            TransparencySliderRow(
+                title = tr(lang, "思考与命令卡", "Reasoning & command card"),
+                subtitle = tr(lang, "思考、命令和工具活动表面", "Reasoning, command, and tool activity surfaces"),
+                value = value.activityAlpha,
+                onValueChange = { onValueChange(value.copy(activityAlpha = it)) },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f))
+            TransparencySliderRow(
+                title = tr(lang, "输入框背景", "Composer background"),
+                subtitle = tr(lang, "底部消息输入区域", "The message composer at the bottom"),
+                value = value.composerAlpha,
+                onValueChange = { onValueChange(value.copy(composerAlpha = it)) },
+            )
+            val defaults = FcodeMaterialTransparencyConfig()
+            if (value != defaults) {
+                TextButton(
+                    onClick = { onValueChange(defaults) },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text(tr(lang, "恢复默认透明度", "Restore default transparency"))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransparencySliderRow(
+    title: String,
+    subtitle: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+) {
+    val normalized = value.coerceIn(FcodeMaterialTransparencyConfig.MIN_ALPHA, FcodeMaterialTransparencyConfig.MAX_ALPHA)
+    Column(Modifier.padding(vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(
+                "${(normalized * 100).roundToInt()}%",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        Slider(
+            value = normalized,
+            onValueChange = { raw -> onValueChange((raw * 100).roundToInt() / 100f) },
+            valueRange = FcodeMaterialTransparencyConfig.MIN_ALPHA..FcodeMaterialTransparencyConfig.MAX_ALPHA,
+            modifier = Modifier.padding(top = 2.dp),
+        )
     }
 }
 
@@ -2362,6 +2671,7 @@ private fun DynamicBackgroundSliderRow(
 }
 
 private fun paletteLabel(lang: String, palette: FcodeColorPalette): String = when (palette) {
+    FcodeColorPalette.WALLPAPER -> tr(lang, "壁纸取色", "Wallpaper colors")
     FcodeColorPalette.ROSE -> tr(lang, "绯樱", "Rose")
     FcodeColorPalette.OCEAN -> tr(lang, "海盐", "Ocean")
     FcodeColorPalette.FOREST -> tr(lang, "森屿", "Forest")
@@ -2808,6 +3118,8 @@ private fun SettingsRootPage(
     onModels: () -> Unit,
     onWebUi: () -> Unit,
     onTermux: () -> Unit,
+    onPinWebUiShortcut: () -> Unit,
+    onPinTermuxShortcut: () -> Unit,
     onInstallCodexCli: () -> Unit,
     codexCliInstalled: Boolean,
     onProxy: () -> Unit,
@@ -2873,6 +3185,15 @@ private fun SettingsRootPage(
             }
             item { NavigationSettingsRow(HugeIcons.Code, "WebUI", tr(lang, "入口、全屏、项目目录与缓存", "Launch, fullscreen, project root and cache"), onWebUi) }
             item { NavigationSettingsRow(HugeIcons.Code, tr(lang, "Termux 终端", "Termux terminal"), tr(lang, "检查工具、运行命令和管理项目文件", "Inspect tools, run commands and manage project files"), onTermux) }
+            item { SettingsSection(tr(lang, "桌面快捷方式", "Home screen shortcuts")) }
+            item {
+                LauncherShortcutsCard(
+                    lang = lang,
+                    onPinWebUi = onPinWebUiShortcut,
+                    onPinTermux = onPinTermuxShortcut,
+                )
+            }
+            item { SettingsSection(tr(lang, "扩展与连接", "Extensions & connections")) }
             item { NavigationSettingsRow(HugeIcons.Code, "MCP", tr(lang, "\u8fde\u63a5\u5916\u90e8\u5de5\u5177\u3001\u6570\u636e\u6e90\u4e0e\u8fdc\u7a0b\u670d\u52a1", "Connect external tools, data sources and remote services"), onMcp) }
             item { NavigationSettingsRow(HugeIcons.Sparkles, "Skills", tr(lang, "\u6d4f\u89c8\u5b98\u65b9 Skill \u5e76\u7ba1\u7406\u5df2\u5b89\u88c5\u5185\u5bb9", "Browse official skills and manage installed skills"), onSkills) }
             item {
@@ -2930,6 +3251,74 @@ private fun SettingsRootPage(
                 )
             }
             item { Spacer(Modifier.height(28.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun LauncherShortcutsCard(
+    lang: String,
+    onPinWebUi: () -> Unit,
+    onPinTermux: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f)),
+    ) {
+        Column {
+            LauncherShortcutRow(
+                title = "WebUI",
+                subtitle = tr(lang, "从桌面直接进入 WebUI", "Open WebUI directly from the home screen"),
+                actionLabel = tr(lang, "添加", "Add"),
+                onClick = onPinWebUi,
+            )
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f),
+            )
+            LauncherShortcutRow(
+                title = tr(lang, "Termux 终端", "Termux terminal"),
+                subtitle = tr(lang, "从桌面直接启动内置终端", "Launch the built-in terminal from the home screen"),
+                actionLabel = tr(lang, "添加", "Add"),
+                onClick = onPinTermux,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LauncherShortcutRow(
+    title: String,
+    subtitle: String,
+    actionLabel: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SettingsIcon(HugeIcons.Code)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        FilledTonalButton(
+            onClick = onClick,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Icon(HugeIcons.Add01, null, Modifier.size(17.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(actionLabel)
         }
     }
 }
@@ -3345,7 +3734,7 @@ private fun ModelConfigurationEditor(
     }
 
     if (showModelEditor) ModelEditorDialog(
-        lang = lang, profileId = providerId, editing = editingModel, seed = modelSeed,
+        lang = lang, editing = editingModel, seed = modelSeed,
         existingIds = models.filter { it !== editingModel }.map { it.id },
         onDismiss = { showModelEditor = false },
         onSave = { saved ->
@@ -3430,15 +3819,12 @@ private fun ModelCatalogCard(lang: String, model: CodexProviderStore.ModelConfig
 @Composable
 private fun ModelEditorDialog(
     lang: String,
-    profileId: String,
     editing: CodexProviderStore.ModelConfig?,
     seed: CodexProviderStore.ModelConfig?,
     existingIds: List<String>,
     onDismiss: () -> Unit,
     onSave: (CodexProviderStore.ModelConfig) -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val compactionStore = remember { NativeCompactionSettingsStore(context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)) }
     val value = remember(seed?.id, editing?.id) { (seed ?: CodexProviderStore.ModelConfig("", "", 0L)).copy() }
     var name by remember { mutableStateOf(value.name) }
     var id by remember { mutableStateOf(value.id) }
@@ -3464,12 +3850,6 @@ private fun ModelEditorDialog(
     var skillsInstructions by remember { mutableStateOf(value.includeSkillsInstructions) }
     var responsesLite by remember { mutableStateOf(value.responsesLite) }
     var applyPatch by remember { mutableStateOf(value.applyPatchTool) }
-    var nativeCompactionEnabled by remember(profileId, value.id) {
-        mutableStateOf(compactionStore.read(profileId, value.id).enabled)
-    }
-    var nativeCompactionPercent by remember(profileId, value.id) {
-        mutableIntStateOf(compactionStore.read(profileId, value.id).normalizedPercent)
-    }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun saveModel() {
@@ -3500,7 +3880,6 @@ private fun ModelEditorDialog(
             imageInput, imageInput && imageDetail, reasoningSummaries, parallelTools, verbosity, webSearch,
             skillsInstructions, responsesLite, applyPatch, resolvedMultiAgent, toolMode, ultraTransportEffort,
         ))
-        compactionStore.write(profileId, nextId, NativeCompactionSettings(nativeCompactionEnabled, nativeCompactionPercent))
     }
 
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
@@ -3515,33 +3894,20 @@ private fun ModelEditorDialog(
                     item { SettingsTextField(id, { id = it; error = null }, tr(lang, "模型 ID", "Model ID"), "gpt-5.6-sol") }
                     item { SettingsTextField(description, { description = it }, tr(lang, "模型描述", "Description"), tr(lang, "用途、特点或供应商备注", "Purpose, characteristics or provider notes")) }
                     item { SettingsTextField(contextWindow, { contextWindow = it; error = null }, tr(lang, "上下文窗口（tokens）", "Context window (tokens)"), "200000", keyboardType = KeyboardType.Number) }
-                    item { SettingsTextField(compactLimit, { compactLimit = it; error = null }, tr(lang, "自动压缩阈值（tokens）", "Auto-compact limit (tokens)"), tr(lang, "可留空", "Optional"), keyboardType = KeyboardType.Number) }
+                    item { SettingsTextField(compactLimit, { compactLimit = it; error = null }, tr(lang, "自动压缩阈值（auto_compact_token_limit，tokens）", "Auto-compact threshold (auto_compact_token_limit, tokens)"), tr(lang, "可留空", "Optional"), keyboardType = KeyboardType.Number) }
+                    item {
+                        Text(
+                            tr(
+                                lang,
+                                "达到该阈值后，由 Codex / app-server 在同一任务内自动压缩上下文并继续执行。原生 UI 只展示压缩状态，不会主动抢占任务或额外触发压缩。",
+                                "At this threshold, Codex / app-server automatically compacts context and continues within the same task. The native UI only presents compaction status; it never preempts the task or triggers extra compaction.",
+                            ),
+                            Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     item { SettingsTextField(effectivePercent, { effectivePercent = it; error = null }, tr(lang, "可用上下文比例（%）", "Effective context (%)"), "95", keyboardType = KeyboardType.Number) }
-                    item { SettingsSection(tr(lang, "原生聊天压缩", "Native chat compaction")) }
-                    item {
-                        ToggleSettingsRow(
-                            HugeIcons.Refresh03,
-                            tr(lang, "启用自动压缩", "Enable automatic compaction"),
-                            tr(lang, "只影响原生 UI 的本地回退策略，不会向 app-server 写入额外参数", "Only controls the native UI fallback; no unsupported app-server parameter is sent"),
-                            nativeCompactionEnabled,
-                        ) { nativeCompactionEnabled = it }
-                    }
-                    item {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(tr(lang, "回退阈值", "Fallback threshold"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                                Text("$nativeCompactionPercent%", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                            }
-                            Slider(
-                                value = nativeCompactionPercent.toFloat(),
-                                onValueChange = { nativeCompactionPercent = it.roundToInt().coerceIn(80, 95) },
-                                valueRange = 80f..95f,
-                                steps = 14,
-                                enabled = nativeCompactionEnabled,
-                            )
-                            Text(tr(lang, "服务端提供的 auto_compact_token_limit 优先；缺失可靠上下文数据时不会猜测触发。", "A server auto_compact_token_limit takes precedence; missing reliable context data never triggers a guess."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
                     item { SettingsSection(tr(lang, "推理与输出", "Reasoning & output")) }
                     item { ChoiceSettingsField(tr(lang, "默认推理强度", "Default reasoning effort"), defaultEffort, reasoningEffortOptions(lang)) { defaultEffort = it } }
                     item { SettingsTextField(supportedEfforts, { supportedEfforts = it; error = null }, tr(lang, "支持的推理强度（逗号分隔）", "Supported efforts (comma-separated)"), "none,minimal,low,medium,high,xhigh,max,ultra") }
@@ -4768,27 +5134,50 @@ private fun PageTransitionPlayground(lang: String, modifier: Modifier = Modifier
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SettingsScaffold(title: String, subtitle: String, onBack: () -> Unit, content: @Composable (PaddingValues) -> Unit) {
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     Scaffold(
         topBar = {
-            Surface(color = MaterialTheme.colorScheme.background) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .padding(horizontal = 8.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onBack) { Icon(HugeIcons.ArrowLeft01, null) }
-                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                        Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            LargeFlexibleTopAppBar(
+                title = {
+                    Text(
+                        title,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                subtitle = {
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                navigationIcon = {
+                    FilledTonalIconButton(
+                        onClick = onBack,
+                        shapes = IconButtonDefaults.shapes(),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                    ) {
+                        Icon(HugeIcons.ArrowLeft01, "返回 / Back")
                     }
-                }
-            }
+                },
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            )
         },
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        containerColor = MaterialTheme.colorScheme.background,
         content = content,
     )
 }

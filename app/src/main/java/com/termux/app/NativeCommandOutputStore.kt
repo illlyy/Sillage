@@ -23,6 +23,28 @@ object NativeCommandOutputStore {
     private const val MAX_CACHE_CHARS = 8 * 1024 * 1024
     private const val MAX_ENTRIES = 64
     private val heavyFields = setOf("aggregatedOutput", "output", "stdout", "stderr")
+    private val failedStatuses = setOf(
+        "failed",
+        "failure",
+        "error",
+        "errored",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "aborted",
+    )
+    private val commandFailurePrefix = Regex(
+        """\A\s*(?:(?:error|tool error)\s*:\s*)?(?:exec_command|shell_command)\s+failed\b""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val exitCodeEnvelope = Regex(
+        """\A\s*exit code\s*:\s*(-?\d+)\s*(?=\r?\n(?:wall time\s*:|total output lines\s*:|output\s*:)|\z)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val processExitEnvelope = Regex(
+        """\A\s*(?:command|process) exited with (?:exit )?code\s+(-?\d+)\s*(?:[.:]|\r?\n|\z)""",
+        RegexOption.IGNORE_CASE,
+    )
     private val values = LinkedHashMap<String, String>(16, 0.75f, true)
     private var cachedChars = 0
 
@@ -40,7 +62,7 @@ object NativeCommandOutputStore {
             if (key !in heavyFields) compact.put(key, source.opt(key))
         }
         compact.put("type", "commandExecution")
-        if (compact.optString("status").isBlank()) compact.put("status", "completed")
+        compact.put("status", resolvedCommandStatus(source, fallbackOutput))
 
         // A payload emitted by the bridge is already compact. Preserve its references rather
         // than duplicating the stream when NativeChatState merges the live fallback buffer.
@@ -63,6 +85,31 @@ object NativeCommandOutputStore {
         attachOutput(compact, output, error = false)
         attachOutput(compact, stderr, error = true)
         return compact.toString()
+    }
+
+    /**
+     * Resolves legacy command state without treating arbitrary stderr or words such as "error"
+     * as a failed process. Explicit failure states are authoritative; otherwise a non-zero
+     * structured exit code wins, and text is consulted only for tool-owned envelopes at the
+     * beginning of the output. This also repairs old snapshots that persisted a synthetic
+     * `completed` status before the bridge knew the command had failed.
+     */
+    @JvmStatic
+    fun resolvedCommandStatus(item: JSONObject?, fallbackOutput: String = ""): String {
+        val source = item ?: JSONObject()
+        val rawStatus = source.optString("status").trim()
+        val normalizedStatus = rawStatus.lowercase().replace("-", "_").replace(" ", "_")
+        if (normalizedStatus in failedStatuses) return "failed"
+
+        val exitCode = explicitExitCode(source)
+        if (exitCode != null) {
+            if (exitCode != 0) return "failed"
+            // A structured zero exit code is stronger than a phrase printed by the command.
+            return rawStatus.ifBlank { "completed" }
+        }
+
+        if (commandOutputs(source, fallbackOutput).any(::hasReliableFailureEnvelope)) return "failed"
+        return rawStatus.ifBlank { "completed" }
     }
 
     /** A bounded tail used while a command is still running. */
@@ -99,6 +146,34 @@ object NativeCommandOutputStore {
         listOf(OUTPUT_REF, STDERR_REF, OUTPUT_CHARS, STDERR_CHARS, OUTPUT_PREVIEW, STDERR_PREVIEW).forEach { key ->
             if (source.has(key)) target.put(key, source.opt(key))
         }
+    }
+
+    private fun explicitExitCode(source: JSONObject): Int? {
+        for (key in listOf("exitCode", "exit_code")) {
+            if (!source.has(key) || source.isNull(key)) continue
+            val value = source.opt(key)
+            val parsed = if (value is Number) value.toInt()
+            else (value as? String)?.trim()?.toIntOrNull()
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    private fun commandOutputs(source: JSONObject, fallbackOutput: String): Sequence<String> = sequenceOf(
+        source.optString("aggregatedOutput"),
+        source.optString("output"),
+        source.optString("stdout"),
+        source.optString("stderr"),
+        source.optString(OUTPUT_PREVIEW),
+        source.optString(STDERR_PREVIEW),
+        fallbackOutput,
+    ).filter(String::isNotBlank)
+
+    private fun hasReliableFailureEnvelope(output: String): Boolean {
+        if (commandFailurePrefix.containsMatchIn(output)) return true
+        val exitCode = exitCodeEnvelope.find(output)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: processExitEnvelope.find(output)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return exitCode != null && exitCode != 0
     }
 
     private fun attachOutput(target: JSONObject, value: String, error: Boolean) {

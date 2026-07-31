@@ -45,21 +45,24 @@ final class CodexAppServerBridge {
     private volatile EventListener eventListener;
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final Map<String, Long> turnStartedAtMs = new ConcurrentHashMap<>();
-    private final Set<String> pendingFinalTurns = ConcurrentHashMap.newKeySet();
-    private final Set<String> syntheticCompletedTurns = ConcurrentHashMap.newKeySet();
-    /** Turns whose native UI was already closed by thread/status/changed=idle. */
-    private final Set<String> uiCompletedTurns = ConcurrentHashMap.newKeySet();
+    /** Main conversation turns whose normalized start lifecycle was already emitted. */
+    private final Set<String> emittedTurnStartedTurns = ConcurrentHashMap.newKeySet();
     private final Set<String> streamedAgentItemIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingGoalGetRequests = new ConcurrentHashMap<>();
-    /** Native follow-up requests are handled separately so a rejected steer can fall back to queue. */
-    private final Set<Integer> pendingSteerRequestIds = ConcurrentHashMap.newKeySet();
+    /** Route captured when a native follow-up is sent; a late response must not bind to a new chat. */
+    private final Map<Integer, NativeRouteEventGate.RouteToken> pendingSteerRequestRoutes =
+        new ConcurrentHashMap<>();
+    /** Server-originated approval/input requests keep their original identity until resolved. */
+    private final Map<String, PendingServerRequestRoute> pendingServerRequestRoutes =
+        new ConcurrentHashMap<>();
+    /** Process-lifetime tombstones detect sequential JSON-RPC id reuse after a response. */
+    private final Set<String> seenServerRequestRouteKeys = ConcurrentHashMap.newKeySet();
+    /** A concurrently reused JSON-RPC id cannot safely identify either pending request. */
+    private final Set<String> ambiguousServerRequestRouteKeys = ConcurrentHashMap.newKeySet();
     private final Set<String> autoClearingCompletedGoalThreads = ConcurrentHashMap.newKeySet();
     private long lastAgentDeltaAt;
     private int agentDeltaCount;
     private int agentDeltaChars;
-    static final long MISSING_TURN_COMPLETION_CHECK_MS = 1200L;
-    static final long MISSING_TURN_COMPLETION_WARNING_MS = 60_000L;
-    static final int MISSING_TURN_COMPLETION_IDLE_CHECKS = 2;
     /** Threads explicitly opened by the desktop UI; subagent threads never enter this set. */
     private final Set<String> primaryThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<Integer, String> pendingPrimaryThreadTitles = new ConcurrentHashMap<>();
@@ -67,6 +70,11 @@ final class CodexAppServerBridge {
     /** Invalidates an asynchronous process bootstrap when start/stop is called again. */
     private final AtomicInteger serverGeneration = new AtomicInteger();
     private final Map<Integer, Integer> pendingNavigationGenerations = new ConcurrentHashMap<>();
+    private final Map<Integer, String> pendingNavigationMethods = new ConcurrentHashMap<>();
+    /** Outbound turn/start requests are strong evidence that a new primary turn may replace one. */
+    private final Map<String, String> pendingPrimaryTurnStartRequestThreads = new ConcurrentHashMap<>();
+    /** All outbound compact requests, including Desktop/WebUI calls, keep their request identity. */
+    private final Map<String, String> pendingCompactRequestThreads = new ConcurrentHashMap<>();
     private Process process;
     private BufferedWriter writer;
     private volatile String threadId;
@@ -74,12 +82,14 @@ final class CodexAppServerBridge {
     private volatile String visibleThreadId;
     private volatile boolean visibleRouteReady;
     private volatile String activeTurnId;
+    private volatile boolean activeTurnConfirmedPrimary;
     private volatile int initializeRequestId = -1;
     private volatile boolean appServerInitialized;
     private String deferredResumeThreadId;
     private int deferredResumeGeneration = -1;
     private volatile int editRollbackRequestId = -1;
     private volatile int compactRequestId = -1;
+    private volatile String compactRequestThreadId;
     private volatile String compactNativeRequestId;
     private final AtomicLong nativeProtocolSequence = new AtomicLong();
     private volatile int collaborationModesRequestId = -1;
@@ -91,14 +101,307 @@ final class CodexAppServerBridge {
     private LocalApiProxy apiProxy;
     private CodexDesktopBridge desktopBridge;
     private static final long NATIVE_STREAM_BATCH_MS = 32L;
+    static final long COMPACTION_TURN_BIND_WINDOW_MS = 30_000L;
+    static final long TASK_COMPLETION_SETTLE_MS = 500L;
+    static final long PRIMARY_COMPLETION_TOMBSTONE_MS = 60_000L;
+    static final long COMPACTION_TERMINAL_SETTLE_MS = 2_000L;
+    static final long HISTORY_LOAD_TIMEOUT_MS = 5_000L;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final NativeStreamEventBatcher nativeStreamBatcher = new NativeStreamEventBatcher();
     /** Keeps live events behind the history snapshot without losing route or protocol identity. */
     private final NativeRouteEventGate nativeRouteEventGate = new NativeRouteEventGate();
+    /** Keeps explicit thread/compact/start turns separate from the active conversation turn. */
+    private final CompactionTurnTracker compactionTurnTracker = new CompactionTurnTracker();
+    /** Classifies a weak post-completion start without depending on task-finalization state. */
+    private final PrimaryCompletionTracker primaryCompletionTracker =
+        new PrimaryCompletionTracker();
+    /** Native UI continuation state (queued follow-up, goal retry, or working subagent), per thread. */
+    private final Set<String> nativeContinuationPendingThreads = ConcurrentHashMap.newKeySet();
+    /** A task terminal state delayed until its native continuation has genuinely drained. */
+    private final Map<String, DeferredTaskCompletion> deferredTaskCompletions =
+        new ConcurrentHashMap<>();
+    /** Unconfirmed post-completion starts wait for their first non-compaction event. */
+    private final Map<String, ProvisionalTurnStart> provisionalTurnStarts =
+        new ConcurrentHashMap<>();
+    /** Serializes route admission, history handoff, reset and delivery-queue insertion. */
+    private final Object nativeRouteDeliveryLock = new Object();
     /** Route identity captured on the app-server reader thread before any later navigation. */
     private final ThreadLocal<NativeRouteEventGate.RouteToken> nativeRouteEmission = new ThreadLocal<>();
     private final AtomicBoolean nativeStreamDrainScheduled = new AtomicBoolean();
     private final Runnable nativeStreamDrain = this::drainNativeStreamEvents;
+
+    private static final class PendingServerRequestRoute {
+        final NativeRouteEventGate.RouteToken routeToken;
+        final String sourceThreadId;
+        final String turnId;
+        final String method;
+
+        PendingServerRequestRoute(NativeRouteEventGate.RouteToken routeToken, JSONObject params,
+                                  String method) {
+            this.routeToken = routeToken;
+            this.sourceThreadId = routeToken == null ? "" : routeToken.getSourceThreadId();
+            this.turnId = protocolTurnId(params);
+            this.method = method == null ? "" : method;
+        }
+
+        boolean sameIdentity(PendingServerRequestRoute other) {
+            return other != null && routeToken != null && routeToken.belongsToSameRoute(other.routeToken)
+                && sourceThreadId.equals(other.sourceThreadId)
+                && turnId.equals(other.turnId)
+                && method.equals(other.method);
+        }
+
+        boolean matchesResolution(JSONObject params) {
+            return requestRouteIdentityMatches(sourceThreadId, turnId, params);
+        }
+    }
+
+    private static final class DeferredTaskCompletion {
+        final String threadId;
+        final String turnId;
+        final boolean failed;
+        final long notBeforeMs;
+
+        DeferredTaskCompletion(String threadId, String turnId, boolean failed, long notBeforeMs) {
+            this.threadId = threadId;
+            this.turnId = turnId;
+            this.failed = failed;
+            this.notBeforeMs = notBeforeMs;
+        }
+    }
+
+    private static final class ProvisionalTurnStart {
+        final String threadId;
+        final String turnId;
+        final JSONObject turn;
+
+        ProvisionalTurnStart(String threadId, String turnId, JSONObject turn) {
+            this.threadId = threadId;
+            this.turnId = turnId;
+            this.turn = turn == null ? new JSONObject() : turn;
+        }
+    }
+
+    /**
+     * Pure request-to-turn correlation for explicit context compaction.
+     *
+     * App-server versions disagree on where the dedicated turn id first appears: the compact RPC
+     * response, turn/started, or the contextCompaction item lifecycle. Keep a short-lived pending
+     * request per thread and bind the first different turn. The primary turn id is retained only
+     * so a late item lifecycle can repair an older accidental auxiliary overwrite.
+     */
+    static final class CompactionTurnTracker {
+        private static final class Pending {
+            final String primaryTurnId;
+            final long expiresAtMs;
+            boolean rpcAcknowledged;
+
+            Pending(String primaryTurnId, long expiresAtMs) {
+                this.primaryTurnId = primaryTurnId == null ? "" : primaryTurnId;
+                this.expiresAtMs = expiresAtMs;
+            }
+        }
+
+        private final Map<String, Pending> pendingByThread = new ConcurrentHashMap<>();
+        private final Map<String, String> primaryTurnByAuxiliaryTurn = new ConcurrentHashMap<>();
+        private final Set<String> completedAuxiliaryTurns = ConcurrentHashMap.newKeySet();
+        private final Map<String, Long> terminalAuxiliaryTurnDeadlines = new ConcurrentHashMap<>();
+
+        synchronized void requestStarted(String sourceThread, String primaryTurnId, long nowMs) {
+            if (sourceThread == null || sourceThread.isEmpty()) return;
+            pendingByThread.put(sourceThread, new Pending(
+                primaryTurnId, nowMs + COMPACTION_TURN_BIND_WINDOW_MS));
+        }
+
+        synchronized void requestFailed(String sourceThread) {
+            if (sourceThread != null && !sourceThread.isEmpty()) pendingByThread.remove(sourceThread);
+        }
+
+        synchronized void requestSucceeded(String sourceThread, long nowMs) {
+            Pending pending = activePending(sourceThread, nowMs);
+            if (pending != null) pending.rpcAcknowledged = true;
+        }
+
+        synchronized boolean observeCandidate(String sourceThread, String turnId, long nowMs,
+                                                boolean strongEvidence, String primaryTurnHint) {
+            if (sourceThread == null || sourceThread.isEmpty() || turnId == null || turnId.isEmpty()) {
+                return false;
+            }
+            String key = turnKey(sourceThread, turnId);
+            if (primaryTurnByAuxiliaryTurn.containsKey(key)) return true;
+            Pending pending = activePending(sourceThread, nowMs);
+            if (pending == null) {
+                // A server-controlled automatic compaction has no client compact RPC. Only the
+                // contextCompaction lifecycle itself is strong enough to create an auxiliary turn.
+                if (!strongEvidence || (primaryTurnHint != null && !primaryTurnHint.isEmpty()
+                        && primaryTurnHint.equals(turnId))) return false;
+                primaryTurnByAuxiliaryTurn.put(key,
+                    primaryTurnHint == null ? "" : primaryTurnHint);
+                return true;
+            }
+            // An explicit compact request can first complete the active primary turn. Never bind
+            // that completion as the auxiliary compaction turn; wait for the different turn id.
+            if (!pending.primaryTurnId.isEmpty() && pending.primaryTurnId.equals(turnId)) return false;
+            // Before an RPC acknowledgement, an ordinary boundary with no prior primary identity
+            // could just be the user's next real turn. Wait for response/item evidence instead.
+            if (!strongEvidence && pending.primaryTurnId.isEmpty() && !pending.rpcAcknowledged) {
+                return false;
+            }
+            primaryTurnByAuxiliaryTurn.put(key, pending.primaryTurnId);
+            pendingByThread.remove(sourceThread);
+            return true;
+        }
+
+        synchronized boolean observeCandidate(String sourceThread, String turnId, long nowMs) {
+            return observeCandidate(sourceThread, turnId, nowMs, false, "");
+        }
+
+        private Pending activePending(String sourceThread, long nowMs) {
+            if (sourceThread == null || sourceThread.isEmpty()) return null;
+            Pending pending = pendingByThread.get(sourceThread);
+            if (pending != null && nowMs > pending.expiresAtMs) {
+                pendingByThread.remove(sourceThread);
+                return null;
+            }
+            return pending;
+        }
+
+        synchronized boolean isAuxiliaryTurn(String sourceThread, String turnId) {
+            return sourceThread != null && !sourceThread.isEmpty()
+                && turnId != null && !turnId.isEmpty()
+                && primaryTurnByAuxiliaryTurn.containsKey(turnKey(sourceThread, turnId));
+        }
+
+        synchronized String primaryTurnFor(String sourceThread, String turnId) {
+            if (sourceThread == null || turnId == null) return "";
+            return primaryTurnByAuxiliaryTurn.getOrDefault(turnKey(sourceThread, turnId), "");
+        }
+
+        synchronized boolean complete(String sourceThread, String turnId) {
+            if (sourceThread == null || turnId == null) return false;
+            String key = turnKey(sourceThread, turnId);
+            if (!primaryTurnByAuxiliaryTurn.containsKey(key)) return false;
+            terminalAuxiliaryTurnDeadlines.remove(key);
+            completedAuxiliaryTurns.add(key);
+            return true;
+        }
+
+        synchronized boolean observeLifecycleTerminal(
+                String sourceThread, String turnId, long nowMs) {
+            if (sourceThread == null || sourceThread.isEmpty()
+                    || turnId == null || turnId.isEmpty()) return false;
+            String key = turnKey(sourceThread, turnId);
+            if (!primaryTurnByAuxiliaryTurn.containsKey(key)
+                    || completedAuxiliaryTurns.contains(key)) return false;
+            return terminalAuxiliaryTurnDeadlines.putIfAbsent(
+                key, nowMs + COMPACTION_TERMINAL_SETTLE_MS) == null;
+        }
+
+        synchronized boolean hasPendingOrActiveCompaction(String sourceThread, long nowMs) {
+            if (activePending(sourceThread, nowMs) != null) return true;
+            String prefix = (sourceThread == null ? "" : sourceThread) + ":";
+            if (prefix.length() == 1) return false;
+            for (String key : primaryTurnByAuxiliaryTurn.keySet()) {
+                if (!key.startsWith(prefix) || completedAuxiliaryTurns.contains(key)) continue;
+                Long terminalDeadline = terminalAuxiliaryTurnDeadlines.get(key);
+                if (terminalDeadline != null && nowMs >= terminalDeadline) {
+                    terminalAuxiliaryTurnDeadlines.remove(key, terminalDeadline);
+                    completedAuxiliaryTurns.add(key);
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        synchronized boolean shouldQuarantineWeakStart(
+                String sourceThread, String turnId, long nowMs) {
+            if (turnId == null || turnId.isEmpty()) return false;
+            Pending pending = activePending(sourceThread, nowMs);
+            return pending != null && pending.primaryTurnId.isEmpty()
+                && !pending.rpcAcknowledged;
+        }
+
+        synchronized String pendingThreadIfUnambiguous(long nowMs) {
+            String candidate = "";
+            for (Map.Entry<String, Pending> entry : pendingByThread.entrySet()) {
+                if (nowMs > entry.getValue().expiresAtMs) {
+                    pendingByThread.remove(entry.getKey());
+                    continue;
+                }
+                if (!candidate.isEmpty()) return "";
+                candidate = entry.getKey();
+            }
+            return candidate;
+        }
+
+        synchronized void reset() {
+            pendingByThread.clear();
+            primaryTurnByAuxiliaryTurn.clear();
+            completedAuxiliaryTurns.clear();
+            terminalAuxiliaryTurnDeadlines.clear();
+        }
+    }
+
+    /**
+     * A short classification tombstone for the most recently completed primary turn per thread.
+     * It deliberately outlives the 500ms task-completion settle state: automatic compaction can
+     * publish its dedicated turn/started later, and that weak boundary must wait for item evidence
+     * instead of becoming a new primary turn.
+     */
+    static final class PrimaryCompletionTracker {
+        private static final class Tombstone {
+            final String turnId;
+            final long expiresAtMs;
+
+            Tombstone(String turnId, long expiresAtMs) {
+                this.turnId = turnId;
+                this.expiresAtMs = expiresAtMs;
+            }
+        }
+
+        private final Map<String, Tombstone> byThread = new ConcurrentHashMap<>();
+
+        synchronized void record(String sourceThread, String turnId, long nowMs) {
+            if (sourceThread == null || sourceThread.isEmpty()
+                    || turnId == null || turnId.isEmpty()) return;
+            byThread.put(sourceThread,
+                new Tombstone(turnId, nowMs + PRIMARY_COMPLETION_TOMBSTONE_MS));
+        }
+
+        synchronized boolean shouldQuarantineWeakStart(
+                String sourceThread, String candidateTurnId, long nowMs) {
+            Tombstone tombstone = active(sourceThread, nowMs);
+            return tombstone != null && candidateTurnId != null && !candidateTurnId.isEmpty()
+                && !candidateTurnId.equals(tombstone.turnId);
+        }
+
+        synchronized String primaryTurnHint(
+                String sourceThread, String candidateTurnId, long nowMs) {
+            Tombstone tombstone = active(sourceThread, nowMs);
+            if (tombstone == null || candidateTurnId == null
+                    || candidateTurnId.equals(tombstone.turnId)) return "";
+            return tombstone.turnId;
+        }
+
+        synchronized void clear(String sourceThread) {
+            if (sourceThread != null && !sourceThread.isEmpty()) byThread.remove(sourceThread);
+        }
+
+        private Tombstone active(String sourceThread, long nowMs) {
+            if (sourceThread == null || sourceThread.isEmpty()) return null;
+            Tombstone tombstone = byThread.get(sourceThread);
+            if (tombstone != null && nowMs > tombstone.expiresAtMs) {
+                byThread.remove(sourceThread, tombstone);
+                return null;
+            }
+            return tombstone;
+        }
+
+        synchronized void reset() {
+            byThread.clear();
+        }
+    }
 
     CodexAppServerBridge(Activity activity, WebView webView) {
         this.appContext = activity.getApplicationContext();
@@ -136,6 +439,17 @@ final class CodexAppServerBridge {
     String currentVisibleThreadId() { return visibleThreadId; }
     boolean isRunning() { return process != null || writer != null; }
 
+    synchronized void setNativeContinuationPending(String sourceThreadId, boolean pending) {
+        String sourceThread = sourceThreadId == null ? "" : sourceThreadId.trim();
+        if (sourceThread.isEmpty()) return;
+        if (pending) {
+            nativeContinuationPendingThreads.add(sourceThread);
+            return;
+        }
+        nativeContinuationPendingThreads.remove(sourceThread);
+        maybeFinalizeDeferredTaskCompletion(sourceThread);
+    }
+
     void sendDesktopRequest(JSONObject request) {
         try {
             logModelSelection(request);
@@ -143,7 +457,10 @@ final class CodexAppServerBridge {
             applyAndroidProviderOverrides(request);
             sendJson(request);
         }
-        catch (Exception e) { if (desktopBridge != null) desktopBridge.onAppServerError(request.opt("id"), e.getMessage()); }
+        catch (Exception e) {
+            forgetPrimaryRequest(request);
+            if (desktopBridge != null) desktopBridge.onAppServerError(request.opt("id"), e.getMessage());
+        }
     }
 
     static void applyAndroidProviderOverrides(JSONObject request) throws Exception {
@@ -444,9 +761,7 @@ final class CodexAppServerBridge {
     void newConversationAtCwd(String requestedCwd) {
         int generation = navigationGeneration.incrementAndGet();
         clearDeferredResume();
-        threadId = null;
         resetVisibleRoute(null, false);
-        activeTurnId = null;
         NativeChatDiagnostics.record(appContext, "conversation_route", navigationDetails(generation, "new"));
         try { sendThreadStart(requestedCwd); } catch (Exception e) { emit("onNativeError", e.getMessage()); }
     }
@@ -466,13 +781,14 @@ final class CodexAppServerBridge {
         clearDeferredResume();
         // Change the visible route synchronously, before history I/O and thread/resume.
         // Events from the previously displayed background turn are rejected immediately.
-        threadId = requestedThread;
-        resetVisibleRoute(requestedThread, false);
-        final NativeRouteEventGate.RouteToken routeToken =
-            nativeRouteEventGate.captureRouteToken(requestedThread);
+        final NativeRouteEventGate.RouteToken routeToken = resetVisibleRoute(requestedThread, false);
         primaryThreadIds.add(requestedThread);
-        activeTurnId = null;
         NativeChatDiagnostics.record(appContext, "conversation_route", navigationDetails(generation, shortId(requestedThread)));
+        final AtomicBoolean historyDeliveryResolved = new AtomicBoolean(false);
+        final NativeHistorySnapshot emptySnapshot = NativeHistoryParser.parse(new JSONArray());
+        final Runnable historyTimeout = scheduleHistoryLoadTimeout(
+            requestedThread, generation, routeToken, historyDeliveryResolved, emptySnapshot,
+            allowMissingRollout);
         new Thread(() -> {
             final long historyStartedAt = android.os.SystemClock.uptimeMillis();
             try {
@@ -487,7 +803,8 @@ final class CodexAppServerBridge {
                 if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
                 final boolean retainInMemoryThread = allowMissingRollout && sessionFile == null;
                 mainHandler.post(() -> {
-                    if (navigationGeneration.get() != generation || !requestedThread.equals(visibleThreadId)) return;
+                    if (!claimHistoryDelivery(requestedThread, generation, routeToken,
+                            historyDeliveryResolved, historyTimeout)) return;
                     // JSON, Base64 and message DTO parsing completed on the resume worker.
                     // Main only swaps one immutable snapshot before opening the event gate.
                     try {
@@ -496,40 +813,25 @@ final class CodexAppServerBridge {
                     } catch (Exception historyApplyError) {
                         Log.e(TAG, "Unable to apply prepared conversation history", historyApplyError);
                         failOpenVisibleRoute(routeToken);
-                        emit("onNativeError", "Unable to display conversation history: "
-                            + historyApplyError.getMessage());
+                        emitForRoute(routeToken, "onHistoryWarning",
+                            "Unable to display conversation history: " + historyApplyError.getMessage());
+                        continueConversationResume(
+                            requestedThread, generation, routeToken, allowMissingRollout);
                         return;
                     }
                     // The history snapshot must be installed before live events are released.
                     // Otherwise a queued delta can be painted briefly and then overwritten by the
                     // disk snapshot on the next main-loop turn.
                     markVisibleRouteReadyAndReplay(routeToken, historySnapshot);
-                    if (retainInMemoryThread) {
-                        NativeChatDiagnostics.record(appContext, "retained_empty_thread_restored",
-                            navigationDetails(generation, shortId(requestedThread)));
-                        emit("onReady", requestedThread);
-                        return;
-                    }
-                    try {
-                        if (deferResumeUntilInitialized(requestedThread, generation)) return;
-                        JSONObject resumeParams = new JSONObject().put("threadId", requestedThread);
-                        applyNativeMcpConfig(resumeParams);
-                        String permissionMode = configuredPermissionMode();
-                        NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
-                        Log.i(TAG, "RESUME_PERMISSIONS mode=" + permissionMode + " sandbox="
-                            + NativePermissionMode.sandbox(permissionMode));
-                        sendNavigationRequest("thread/resume", resumeParams, generation);
-                    } catch (Exception error) {
-                        emit("onNativeError", error.getMessage());
-                    }
+                    continueConversationResume(
+                        requestedThread, generation, routeToken, retainInMemoryThread);
                 });
             } catch (Exception e) {
                 final String historyError = e.getClass().getSimpleName() + ": "
                     + (e.getMessage() == null ? "Unable to read conversation history" : e.getMessage());
-                final NativeHistorySnapshot emptySnapshot = NativeHistoryParser.parse(new JSONArray());
                 mainHandler.post(() -> {
-                    if (navigationGeneration.get() != generation
-                            || !requestedThread.equals(visibleThreadId)) return;
+                    if (!claimHistoryDelivery(requestedThread, generation, routeToken,
+                            historyDeliveryResolved, historyTimeout)) return;
                     // Finish the Activity's loading state even when disk history is unavailable.
                     // Live output is more useful than a permanently blank route, so fail-open the
                     // gate before surfacing the explicit history error.
@@ -540,11 +842,85 @@ final class CodexAppServerBridge {
                         Log.w(TAG, "Unable to apply empty history fallback", callbackError);
                     }
                     failOpenVisibleRoute(routeToken);
-                    emit("onNativeError", historyError);
+                    emitForRoute(routeToken, "onHistoryWarning", historyError);
+                    continueConversationResume(
+                        requestedThread, generation, routeToken, allowMissingRollout);
                 });
             }
         }, "CodexConversationResume").start();
         return generation;
+    }
+
+    private Runnable scheduleHistoryLoadTimeout(
+            String requestedThread, int generation, NativeRouteEventGate.RouteToken routeToken,
+            AtomicBoolean historyDeliveryResolved, NativeHistorySnapshot emptySnapshot,
+            boolean retainedRuntimeFallback) {
+        Runnable timeout = () -> {
+            if (!isCurrentHistoryRoute(requestedThread, generation, routeToken)
+                    || !historyDeliveryResolved.compareAndSet(false, true)) return;
+            try {
+                NativeChatDiagnostics.record(appContext, "history_timeout",
+                    navigationDetails(generation, shortId(requestedThread))
+                        .put("timeoutMs", HISTORY_LOAD_TIMEOUT_MS)
+                        .put("deferredEvents", nativeRouteEventGate.deferredCount()));
+            } catch (Exception ignored) {}
+            try {
+                if (eventListener != null) eventListener.onHistoryPrepared(
+                    requestedThread, generation, emptySnapshot);
+            } catch (Exception callbackError) {
+                Log.w(TAG, "Unable to apply history timeout fallback", callbackError);
+            }
+            // A slow or wedged history reader must not hide an already-running model response.
+            // Late history is ignored by historyDeliveryResolved so it cannot overwrite replayed
+            // live output; the next visit can retry loading the persisted snapshot.
+            failOpenVisibleRoute(routeToken);
+            emitForRoute(routeToken, "onHistoryWarning",
+                "Conversation history loading timed out; live output has been restored");
+            continueConversationResume(
+                requestedThread, generation, routeToken, retainedRuntimeFallback);
+        };
+        mainHandler.postDelayed(timeout, HISTORY_LOAD_TIMEOUT_MS);
+        return timeout;
+    }
+
+    private boolean claimHistoryDelivery(
+            String requestedThread, int generation, NativeRouteEventGate.RouteToken routeToken,
+            AtomicBoolean historyDeliveryResolved, Runnable historyTimeout) {
+        if (!isCurrentHistoryRoute(requestedThread, generation, routeToken)
+                || !historyDeliveryResolved.compareAndSet(false, true)) return false;
+        mainHandler.removeCallbacks(historyTimeout);
+        return true;
+    }
+
+    private void continueConversationResume(
+            String requestedThread, int generation, NativeRouteEventGate.RouteToken routeToken,
+            boolean retainedInMemoryThread) {
+        if (!isCurrentHistoryRoute(requestedThread, generation, routeToken)) return;
+        if (retainedInMemoryThread) {
+            NativeChatDiagnostics.record(appContext, "retained_runtime_restored",
+                navigationDetails(generation, shortId(requestedThread)));
+            emitForRoute(routeToken, "onReady", requestedThread);
+            return;
+        }
+        try {
+            if (deferResumeUntilInitialized(requestedThread, generation)) return;
+            JSONObject resumeParams = new JSONObject().put("threadId", requestedThread);
+            applyNativeMcpConfig(resumeParams);
+            String permissionMode = configuredPermissionMode();
+            NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
+            Log.i(TAG, "RESUME_PERMISSIONS mode=" + permissionMode + " sandbox="
+                + NativePermissionMode.sandbox(permissionMode));
+            sendNavigationRequest("thread/resume", resumeParams, generation);
+        } catch (Exception error) {
+            emitNativeErrorForRoute(routeToken, error.getMessage());
+        }
+    }
+
+    private boolean isCurrentHistoryRoute(
+            String requestedThread, int generation, NativeRouteEventGate.RouteToken routeToken) {
+        return navigationGeneration.get() == generation
+            && requestedThread.equals(visibleThreadId)
+            && nativeRouteEventGate.isCurrent(routeToken);
     }
 
     void loadSubagentHistory(String subagentThreadId, int generation) {
@@ -677,13 +1053,33 @@ final class CodexAppServerBridge {
     }
 
     void compactThread(String nativeRequestId) {
-        if (threadId == null || threadId.trim().isEmpty()) return;
+        final String requestedThread;
+        final String primaryTurn;
+        synchronized (nativeRouteDeliveryLock) {
+            requestedThread = threadId;
+            primaryTurn = activeTurnId;
+        }
+        if (requestedThread == null || requestedThread.trim().isEmpty()) return;
+        compactionTurnTracker.requestStarted(
+            requestedThread, primaryTurn, System.currentTimeMillis());
+        compactRequestThreadId = requestedThread;
         try {
             compactNativeRequestId = nativeRequestId;
             if (webView != null) emit("onCompactStatus", "started");
-            compactRequestId = sendRequest("thread/compact/start", new JSONObject().put("threadId", threadId));
+            int requestId = nextId.getAndIncrement();
+            compactRequestId = requestId;
+            JSONObject request = new JSONObject()
+                .put("method", "thread/compact/start")
+                .put("id", requestId)
+                .put("params", new JSONObject().put("threadId", requestedThread));
+            rememberPrimaryRequest(request);
+            sendJson(request);
         } catch (Exception e) {
+            pendingCompactRequestThreads.remove(serverRequestRouteKey(compactRequestId));
+            compactRequestId = -1;
+            compactionTurnTracker.requestFailed(requestedThread);
             emitCompactionRpcResult(false, e.getMessage());
+            compactRequestThreadId = null;
             if (webView != null) emit("onCompactStatus", "failed");
             emit("onNativeError", e.getMessage());
         }
@@ -693,7 +1089,8 @@ final class CodexAppServerBridge {
         if (webView == null) {
             try {
                 emit("onCompactionRpcResult", new JSONObject()
-                    .put("threadId", threadId == null ? "" : threadId)
+                    .put("threadId", compactRequestThreadId == null
+                        ? (threadId == null ? "" : threadId) : compactRequestThreadId)
                     .put("requestId", compactNativeRequestId == null ? JSONObject.NULL : compactNativeRequestId)
                     .put("success", success)
                     .put("error", error == null ? "" : error)
@@ -754,9 +1151,16 @@ final class CodexAppServerBridge {
      */
     int steerMessage(String text, String attachmentsJson, String skillsJson) {
         if (text == null) text = "";
-        String thread = threadId;
-        String turn = activeTurnId;
-        if (thread == null || thread.isEmpty() || turn == null || turn.isEmpty()) return -1;
+        String thread;
+        String turn;
+        NativeRouteEventGate.RouteToken requestRoute;
+        synchronized (nativeRouteDeliveryLock) {
+            thread = threadId;
+            turn = activeTurnId;
+            if (thread == null || thread.isEmpty() || turn == null || turn.isEmpty()) return -1;
+            requestRoute = nativeRouteEventGate.captureRouteToken(thread);
+            if (!nativeRouteEventGate.isCurrent(requestRoute)) return -1;
+        }
         try {
             JSONArray attachments;
             try { attachments = new JSONArray(attachmentsJson == null ? "[]" : attachmentsJson); }
@@ -793,11 +1197,11 @@ final class CodexAppServerBridge {
                 .put("expectedTurnId", turn)
                 .put("input", input);
             int requestId = nextId.getAndIncrement();
-            pendingSteerRequestIds.add(requestId);
+            pendingSteerRequestRoutes.put(requestId, requestRoute);
             try {
                 sendJson(new JSONObject().put("method", "turn/steer").put("id", requestId).put("params", params));
             } catch (Exception error) {
-                pendingSteerRequestIds.remove(requestId);
+                pendingSteerRequestRoutes.remove(requestId);
                 throw error;
             }
             return requestId;
@@ -819,35 +1223,62 @@ final class CodexAppServerBridge {
     }
 
     void respondUserInput(String rawRequest, String answersJson) {
+        Object requestId = null;
+        JSONObject requestParams = null;
+        NativeRouteEventGate.RouteToken requestRoute = null;
         try {
             JSONObject request = new JSONObject(rawRequest == null ? "{}" : rawRequest);
-            Object requestId = request.opt("requestId");
+            requestId = request.opt("requestId");
             if (requestId == null || requestId == JSONObject.NULL) return;
+            requestParams = request.optJSONObject("params");
+            requestRoute = routeForServerRequestResponse(requestId, requestParams);
             JSONObject result = new JSONObject();
             result.put("answers", new JSONObject(answersJson == null ? "{}" : answersJson));
             sendJson(new JSONObject().put("id", requestId).put("result", result));
-        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+            retireServerRequestRoute(requestId);
+        } catch (Exception e) {
+            if (requestRoute == null && requestParams != null) {
+                requestRoute = captureBlockingRequestRoute(requestParams);
+            }
+            if (requestRoute == null && hasAnyRequestRouteIdentity(requestParams)) {
+                Log.w(TAG, "Unable to answer stale user-input request", e);
+                return;
+            }
+            emitNativeErrorForRoute(requestRoute, e.getMessage());
+        }
     }
 
     void respondApprovalRequest(String rawRequest, String decision) {
+        Object requestId = null;
+        JSONObject requestParams = null;
+        NativeRouteEventGate.RouteToken requestRoute = null;
         try {
             JSONObject request = new JSONObject(rawRequest == null ? "{}" : rawRequest);
-            Object requestId = request.opt("requestId");
+            requestId = request.opt("requestId");
             String method = request.optString("method", "");
             if (requestId == null || requestId == JSONObject.NULL || method.isEmpty()) return;
-            JSONObject result = NativeApprovalProtocol.result(method, request.optJSONObject("params"), decision);
+            requestParams = request.optJSONObject("params");
+            requestRoute = routeForServerRequestResponse(requestId, requestParams);
+            JSONObject result = NativeApprovalProtocol.result(method, requestParams, decision);
             sendJson(new JSONObject().put("id", requestId).put("result", result));
+            retireServerRequestRoute(requestId);
             Log.i(TAG, "APPROVAL_RESPONSE method=" + method + " decision=" + decision);
-        } catch (Exception e) { emit("onNativeError", e.getMessage()); }
+        } catch (Exception e) {
+            if (requestRoute == null && requestParams != null) {
+                requestRoute = captureBlockingRequestRoute(requestParams);
+            }
+            if (requestRoute == null && hasAnyRequestRouteIdentity(requestParams)) {
+                Log.w(TAG, "Unable to answer stale approval request", e);
+                return;
+            }
+            emitNativeErrorForRoute(requestRoute, e.getMessage());
+        }
     }
 
 
     private synchronized void clearDeferredResume() {
         deferredResumeThreadId = null;
         deferredResumeGeneration = -1;
-        mainHandler.removeCallbacks(nativeStreamDrain);
-        nativeStreamDrainScheduled.set(false);
-        nativeStreamBatcher.clear();
     }
 
     /** Returns true when the resume will be sent by the initialize-response handler. */
@@ -927,7 +1358,15 @@ final class CodexAppServerBridge {
         JSONObject request = new JSONObject().put("method", method).put("id", id).put("params", params);
         rememberPrimaryRequest(request);
         pendingNavigationGenerations.put(id, generation);
-        sendJson(request);
+        pendingNavigationMethods.put(id, method);
+        try {
+            sendJson(request);
+        } catch (Exception error) {
+            pendingNavigationGenerations.remove(id);
+            pendingNavigationMethods.remove(id);
+            pendingPrimaryThreadTitles.remove(id);
+            throw error;
+        }
         return id;
     }
 
@@ -935,7 +1374,12 @@ final class CodexAppServerBridge {
         int id = nextId.getAndIncrement();
         JSONObject request = new JSONObject().put("method", method).put("id", id).put("params", params);
         rememberPrimaryRequest(request);
-        sendJson(request);
+        try {
+            sendJson(request);
+        } catch (Exception error) {
+            forgetPrimaryRequest(request);
+            throw error;
+        }
         return id;
     }
 
@@ -1073,11 +1517,23 @@ final class CodexAppServerBridge {
                 if (!isHighFrequencyNotification(message.optString("method", ""))) {
                     android.util.Log.d(TAG, "RECV " + messageSummary(message));
                 }
-                handleMessage(message);
+                handleMessageFromProcess(activeProcess, generation, message);
             }
         } catch (Exception e) {
             if (isCurrentServerProcess(activeProcess, generation)) emit("onNativeError", "app-server output stopped: " + e.getMessage());
         }
+    }
+
+    /**
+     * Keeps one stdout message linearized with stop/start. A generation check performed before
+     * parsing is insufficient: stop() could clear request tombstones and install a new process
+     * before the old message mutates route state. Both operations use this bridge monitor, so an
+     * old message either completes before stop or is rejected after the new generation wins.
+     */
+    private synchronized void handleMessageFromProcess(
+            Process activeProcess, int generation, JSONObject message) throws Exception {
+        if (serverGeneration.get() != generation || process != activeProcess) return;
+        handleMessage(message);
     }
 
     private void readStderr(Process activeProcess, int generation) {
@@ -1094,26 +1550,38 @@ final class CodexAppServerBridge {
 
     private void handleMessage(JSONObject message) throws Exception {
         rememberTurnStart(message);
-        if (suppressSyntheticInterruptCompletion(message)) return;
+        resolveOutgoingRequestTracking(message);
         if (message.has("id") && message.has("method")) {
             String inboundMethod = message.optString("method", "");
             if (NativeApprovalProtocol.isApprovalMethod(inboundMethod)) {
                 JSONObject inboundParams = message.optJSONObject("params");
-                String requestedThread = inboundParams == null ? "" : inboundParams.optString("threadId", "");
-                if (requestedThread.isEmpty()) requestedThread = threadId;
-                NativeTaskNotificationManager.notifyEvent(appContext, requestedThread,
-                    NativeTaskNotificationPolicy.APPROVAL, String.valueOf(message.opt("id")), "");
-                emit("onApprovalRequest", new JSONObject()
-                    .put("requestId", message.opt("id"))
-                    .put("method", inboundMethod)
-                    .put("params", message.optJSONObject("params")).toString());
+                NativeRouteEventGate.RouteToken requestRoute = captureBlockingRequestRoute(inboundParams);
+                String requestedThread = protocolThreadId(inboundParams);
+                if (requestedThread.isEmpty() && requestRoute != null) {
+                    requestedThread = requestRoute.getSourceThreadId();
+                }
+                if (!requestedThread.isEmpty()) {
+                    NativeTaskNotificationManager.notifyEvent(appContext, requestedThread,
+                        NativeTaskNotificationPolicy.APPROVAL, String.valueOf(message.opt("id")), "");
+                }
+                rememberServerRequestRoute(message.opt("id"), requestRoute,
+                    inboundParams, inboundMethod);
+                if (requestRoute != null) {
+                    emitForRoute(requestRoute, "onApprovalRequest", new JSONObject()
+                        .put("requestId", message.opt("id"))
+                        .put("method", inboundMethod)
+                        .put("params", message.optJSONObject("params")).toString());
+                }
                 Log.i(TAG, "APPROVAL_REQUEST method=" + inboundMethod);
                 return;
             }
             if (inboundMethod.contains("requestUserInput") || "item/tool/requestUserInput".equals(inboundMethod)) {
                 JSONObject inboundParams = message.optJSONObject("params");
-                String requestedThread = inboundParams == null ? "" : inboundParams.optString("threadId", "");
-                if (requestedThread.isEmpty()) requestedThread = threadId;
+                NativeRouteEventGate.RouteToken requestRoute = captureBlockingRequestRoute(inboundParams);
+                String requestedThread = protocolThreadId(inboundParams);
+                if (requestedThread.isEmpty() && requestRoute != null) {
+                    requestedThread = requestRoute.getSourceThreadId();
+                }
                 String questionDetail = "";
                 JSONArray questions = inboundParams == null ? null : inboundParams.optJSONArray("questions");
                 if (questions != null && questions.length() > 0) {
@@ -1121,12 +1589,18 @@ final class CodexAppServerBridge {
                     if (firstQuestion != null) questionDetail = firstQuestion.optString("header",
                         firstQuestion.optString("question", ""));
                 }
-                NativeTaskNotificationManager.notifyEvent(appContext, requestedThread,
-                    NativeTaskNotificationPolicy.ANSWER, String.valueOf(message.opt("id")), questionDetail);
-                emit("onUserInputRequest", new JSONObject()
-                    .put("requestId", message.opt("id"))
-                    .put("method", inboundMethod)
-                    .put("params", message.optJSONObject("params")).toString());
+                if (!requestedThread.isEmpty()) {
+                    NativeTaskNotificationManager.notifyEvent(appContext, requestedThread,
+                        NativeTaskNotificationPolicy.ANSWER, String.valueOf(message.opt("id")), questionDetail);
+                }
+                rememberServerRequestRoute(message.opt("id"), requestRoute,
+                    inboundParams, inboundMethod);
+                if (requestRoute != null) {
+                    emitForRoute(requestRoute, "onUserInputRequest", new JSONObject()
+                        .put("requestId", message.opt("id"))
+                        .put("method", inboundMethod)
+                        .put("params", message.optJSONObject("params")).toString());
+                }
                 return;
             }
         }
@@ -1178,7 +1652,9 @@ final class CodexAppServerBridge {
         }
         if (desktopBridge != null) desktopBridge.onAppServerMessage(message);
         int steerResponseId = message.optInt("id", -1);
-        if (steerResponseId >= 0 && pendingSteerRequestIds.remove(steerResponseId)) {
+        NativeRouteEventGate.RouteToken steerRoute = steerResponseId < 0
+            ? null : pendingSteerRequestRoutes.remove(steerResponseId);
+        if (steerRoute != null) {
             JSONObject event = new JSONObject().put("requestId", steerResponseId).put("accepted", !message.has("error"));
             if (message.has("error")) {
                 JSONObject error = message.optJSONObject("error");
@@ -1186,10 +1662,23 @@ final class CodexAppServerBridge {
                     : error.optString("message", "Unable to steer the active turn"));
                 if (error != null && error.has("data")) event.put("data", error.opt("data"));
             }
-            emit("onSteerResult", event.toString());
+            emitForRoute(steerRoute, "onSteerResult", event.toString());
+            scheduleDeferredTaskCompletionCheck(steerRoute.getSourceThreadId());
             return;
         }
         if (message.has("error")) {
+            int failedRequestId = message.optInt("id", -1);
+            Integer failedNavigationGeneration = pendingNavigationGenerations.remove(failedRequestId);
+            String failedNavigationMethod = pendingNavigationMethods.remove(failedRequestId);
+            pendingPrimaryThreadTitles.remove(failedRequestId);
+            if (failedNavigationMethod != null && eventListener != null
+                    && (failedNavigationGeneration == null
+                        || failedNavigationGeneration != navigationGeneration.get())) {
+                NativeChatDiagnostics.record(appContext, "ignored_navigation_error", new JSONObject()
+                    .put("method", failedNavigationMethod)
+                    .put("generation", failedNavigationGeneration));
+                return;
+            }
             String goalThread = pendingGoalGetRequests.remove(message.optInt("id", -1));
             if (goalThread != null) {
                 Log.w(TAG, "Unable to read thread goal for " + shortId(goalThread) + ": "
@@ -1204,9 +1693,12 @@ final class CodexAppServerBridge {
                 return;
             }
             if (message.optInt("id", -1) == compactRequestId) {
+                String failedCompactThread = compactRequestThreadId;
                 compactRequestId = -1;
+                compactionTurnTracker.requestFailed(failedCompactThread);
                 String compactError = message.getJSONObject("error").optString("message", message.toString());
                 emitCompactionRpcResult(false, compactError);
+                compactRequestThreadId = null;
                 if (webView != null) emit("onCompactStatus", "failed");
             }
             if (message.optInt("id", -1) == editRollbackRequestId) {
@@ -1252,6 +1744,7 @@ final class CodexAppServerBridge {
             if (id == compactRequestId) {
                 compactRequestId = -1;
                 emitCompactionRpcResult(true, "");
+                compactRequestThreadId = null;
                 if (webView != null) emit("onCompactStatus", "completed");
             }
             JSONObject result = message.optJSONObject("result");
@@ -1262,17 +1755,31 @@ final class CodexAppServerBridge {
                 String pendingTitle = pendingPrimaryThreadTitles.remove(responseId);
                 if (pendingTitle != null && desktopBridge != null) CodexTaskStore.markRunning(appContext, resultThreadId, pendingTitle);
                 Integer responseGeneration = pendingNavigationGenerations.remove(responseId);
-                boolean acceptForNative = eventListener == null || (responseGeneration != null
-                    && responseGeneration == navigationGeneration.get()
-                    && (visibleThreadId == null || visibleThreadId.equals(resultThreadId)));
+                String navigationMethod = pendingNavigationMethods.remove(responseId);
+                boolean acceptForNative;
+                NativeRouteEventGate.RouteToken readyRoute = null;
+                synchronized (nativeRouteDeliveryLock) {
+                    acceptForNative = eventListener == null || (responseGeneration != null
+                        && responseGeneration == navigationGeneration.get()
+                        && (visibleThreadId == null || visibleThreadId.equals(resultThreadId)));
+                    if (acceptForNative) {
+                        boolean sameResumeRoute = "thread/resume".equals(navigationMethod)
+                            && resultThreadId.equals(visibleThreadId);
+                        readyRoute = sameResumeRoute
+                            ? nativeRouteEventGate.captureRouteToken(resultThreadId)
+                            : resetVisibleRoute(resultThreadId, true);
+                    }
+                }
                 if (acceptForNative) {
-                    threadId = resultThreadId;
-                    resetVisibleRoute(resultThreadId, true);
-                    emit("onReady", resultThreadId);
+                    emitForRoute(readyRoute, "onReady", resultThreadId);
                 } else {
                     NativeChatDiagnostics.record(appContext, "ignored_navigation_result", new JSONObject()
                         .put("thread", shortId(resultThreadId)).put("generation", responseGeneration));
                 }
+            } else {
+                pendingNavigationGenerations.remove(id);
+                pendingNavigationMethods.remove(id);
+                pendingPrimaryThreadTitles.remove(id);
             }
             return;
         }
@@ -1298,7 +1805,28 @@ final class CodexAppServerBridge {
             return;
         }
         if ("serverRequest/resolved".equals(method) && params != null) {
-            if (desktopBridge == null) emit("onUserInputResolved", params.toString());
+            String requestKey = serverRequestRouteKey(params.opt("requestId"));
+            PendingServerRequestRoute pendingRequest = ambiguousServerRequestRouteKeys.contains(requestKey)
+                ? null : pendingServerRequestRoutes.remove(requestKey);
+            NativeRouteEventGate.RouteToken requestRoute = null;
+            if (pendingRequest != null) {
+                if (!pendingRequest.matchesResolution(params)) {
+                    Log.w(TAG, "Ignoring resolved request with mismatched route identity");
+                    return;
+                }
+                synchronized (nativeRouteDeliveryLock) {
+                    if (nativeRouteEventGate.isCurrent(pendingRequest.routeToken)) {
+                        requestRoute = pendingRequest.routeToken;
+                    }
+                }
+            }
+            if (requestRoute == null) requestRoute = captureBlockingRequestRoute(params);
+            if (desktopBridge == null && requestRoute != null) {
+                emitForRoute(requestRoute, "onUserInputResolved", params.toString());
+            }
+            if (pendingRequest != null) {
+                scheduleDeferredTaskCompletionCheck(pendingRequest.sourceThreadId);
+            }
             return;
         }
         if (!primaryEvent && "item/completed".equals(method) && params != null) {
@@ -1436,14 +1964,14 @@ final class CodexAppServerBridge {
             agentDeltaChars = 0;
             String itemId = item == null ? "" : item.optString("id", "");
             if (!itemId.isEmpty()) streamedAgentItemIds.remove(itemId);
-            // Completed agent messages are authoritative even when a provider omits phase.
-            // Seal a commentary/missing-phase item without ending the turn; idle status below
-            // is the protocol-level completion signal. This also repairs a detached Activity.
+            // A completed agent message seals only that text item. The authoritative turn
+            // boundary is the real turn/completed notification; neither a final answer item nor
+            // thread idle may synthesize it without risking interruption of compaction or another
+            // continuation owned by the same server turn.
             String completedText = extractAgentMessageText(item);
             if (webView != null && !completedText.isEmpty()) {
                 emit(finalAnswer ? "onFinalAnswer" : "onAssistantItemComplete", completedText);
             }
-            if (finalAnswer) scheduleMissingTurnCompletion(params);
         } else if (primaryEvent && ("item/reasoning/summaryTextDelta".equals(method) || "item/reasoning/textDelta".equals(method)) && params != null) {
             String delta = params.optString("delta", "");
             emitProtocolDeltaEvent("reasoningDelta", params, delta);
@@ -1475,26 +2003,34 @@ final class CodexAppServerBridge {
         } else if ("thread/status/changed".equals(method) && isIdleThreadStatus(params)) {
             completeVisibleTurnFromIdle(params);
         } else if ("turn/completed".equals(method)) {
-            String completedKey = turnKey(params);
-            boolean uiAlreadyCompleted = completedKey != null && uiCompletedTurns.remove(completedKey);
+            String completedThread = protocolThreadId(params);
+            String completedTurnId = protocolTurnId(params);
+            if (isAuxiliaryCompactionTurnCompletion(compactionTurnTracker, params)) {
+                clearPendingTurn(params);
+                compactionTurnTracker.complete(completedThread, completedTurnId);
+                NativeChatDiagnostics.record(appContext, "compaction_turn_complete", new JSONObject()
+                    .put("thread", shortId(completedThread)).put("turn", shortId(completedTurnId)));
+                maybeFinalizeDeferredTaskCompletion(completedThread);
+                return;
+            }
+            boolean exactPrimaryCompletion = primaryEvent
+                && isExactActivePrimaryTurn(completedThread, completedTurnId);
+            boolean hasPendingContinuation = exactPrimaryCompletion
+                && hasPendingContinuation(completedThread);
+            if (exactPrimaryCompletion) {
+                primaryCompletionTracker.record(
+                    completedThread, completedTurnId, System.currentTimeMillis());
+            }
             clearPendingTurn(params);
-            String completedThread = params == null ? "" : params.optString("threadId", "");
-            if (completedThread.isEmpty() && params != null) {
-                JSONObject completedTurn = params.optJSONObject("turn");
-                if (completedTurn != null) completedThread = completedTurn.optString("threadId", "");
-            }
-            if (primaryEvent && !uiAlreadyCompleted) {
+            if (exactPrimaryCompletion) {
                 emitProtocolLifecycleEvent("turnCompleted", params, params == null ? null : params.optJSONObject("turn"));
-                emit("onTurnComplete", "");
+                emit("onTurnComplete", turnLifecycleCallbackPayload(
+                    params, hasPendingContinuation));
             }
-            if (isPrimaryTurn(params)) {
+            if (exactPrimaryCompletion) {
                 boolean failed = turnFailed(params);
-                JSONObject completedTurnObject = params == null ? null : params.optJSONObject("turn");
-                String completedTurnId = completedTurnObject == null ? "" : completedTurnObject.optString("id", "");
-                CodexTaskStore.markCompleted(appContext, completedThread, failed);
-                NativeChatDiagnostics.record(appContext, primaryEvent ? "turn_complete" : "background_turn_complete", new JSONObject()
-                    .put("thread", shortId(completedThread)).put("failed", failed));
-                if (!uiAlreadyCompleted || failed) notifyTaskCompleted(completedThread, failed, completedTurnId);
+                recordOrFinalizeTaskCompletion(
+                    completedThread, completedTurnId, failed, hasPendingContinuation);
             }
         } else if (primaryEvent && "error".equals(method) && params != null) {
             // Error notifications with willRetry=true are part of one turn. Keep their protocol
@@ -1587,6 +2123,17 @@ final class CodexAppServerBridge {
             (normalized.endsWith("started") || normalized.endsWith("start")
                 || normalized.endsWith("completed") || normalized.endsWith("complete")
                 || normalized.endsWith("failed") || normalized.endsWith("cancelled") || normalized.endsWith("canceled"));
+    }
+
+    private static boolean isContextCompactionTerminalSignal(
+            String method, JSONObject params) {
+        if ("item/completed".equals(method) && isContextCompactionItem(params)) return true;
+        String normalized = normalizeProtocolName(method);
+        if (!(normalized.contains("contextcompaction")
+                || normalized.contains("contextcompacted"))) return false;
+        return normalized.endsWith("completed") || normalized.endsWith("complete")
+            || normalized.endsWith("compacted") || normalized.endsWith("failed")
+            || normalized.endsWith("cancelled") || normalized.endsWith("canceled");
     }
 
     private void emitProtocolCompactionLifecycle(String method, JSONObject params) {
@@ -1804,27 +2351,287 @@ final class CodexAppServerBridge {
     }
 
     private void rememberTurnStart(JSONObject message) {
-        JSONObject turn = null;
         JSONObject result = message.optJSONObject("result");
-        if (result != null) turn = result.optJSONObject("turn");
+        JSONObject params = message.optJSONObject("params");
+        JSONObject turn = result == null ? null : result.optJSONObject("turn");
         if (turn == null) {
-            JSONObject params = message.optJSONObject("params");
             if (params != null) turn = params.optJSONObject("turn");
         }
-        if (turn == null || !turn.has("id")) return;
-        String thread = turn.optString("threadId", "");
-        if (thread.isEmpty()) {
-            JSONObject params = message.optJSONObject("params");
-            if (params != null) thread = params.optString("threadId", "");
+        String method = message.optString("method", "");
+        String turnId = turn == null ? protocolTurnId(params) : turn.optString("id", "");
+        if (turnId.isEmpty()) turnId = protocolTurnId(params);
+        String sourceThread = turn == null ? protocolThreadId(params)
+            : turn.optString("threadId", turn.optString("thread_id", ""));
+        if (sourceThread.isEmpty()) sourceThread = protocolThreadId(params);
+
+        long nowMs = System.currentTimeMillis();
+        String responseKey = message.has("id") && !message.has("method")
+            ? serverRequestRouteKey(message.opt("id")) : "";
+        String compactResponseThread = responseKey.isEmpty()
+            ? null : pendingCompactRequestThreads.get(responseKey);
+        String primaryStartResponseThread = responseKey.isEmpty()
+            ? null : pendingPrimaryTurnStartRequestThreads.get(responseKey);
+        boolean compactRpcResponse = compactResponseThread != null;
+        boolean primaryStartRpcResponse = primaryStartResponseThread != null;
+        if (sourceThread.isEmpty() && compactRpcResponse) {
+            sourceThread = compactResponseThread;
         }
-        if (thread.isEmpty()) return;
-        long startedAtSeconds = turn.optLong("startedAt", 0L);
-        String turnId = turn.optString("id");
-        if (thread.equals(threadId)) activeTurnId = turnId;
-        turnStartedAtMs.put(turnKey(thread, turnId),
-            startedAtSeconds > 0 ? startedAtSeconds * 1000L : System.currentTimeMillis());
-        scheduleTurnRuntimeDiagnostics(thread, turnId);
-        scheduleTurnStallDiagnostics(thread, turnId);
+        if (sourceThread.isEmpty() && primaryStartRpcResponse) {
+            sourceThread = primaryStartResponseThread;
+        }
+
+        boolean compactionSignal = isContextCompactionSignal(method, params);
+        if (sourceThread.isEmpty() && (compactRpcResponse || compactionSignal)) {
+            sourceThread = compactionTurnTracker.pendingThreadIfUnambiguous(nowMs);
+        }
+
+        boolean turnBoundarySignal = "turn/started".equals(method) || "turn/completed".equals(method);
+        String primaryTurnHint = compactionSignal
+            ? compactionPrimaryTurnHint(sourceThread, turnId, nowMs)
+            : activeTurnForThread(sourceThread);
+        boolean auxiliaryTurn = compactionTurnTracker.isAuxiliaryTurn(sourceThread, turnId);
+        if (!auxiliaryTurn && (compactRpcResponse || compactionSignal || turnBoundarySignal)) {
+            auxiliaryTurn = compactionTurnTracker.observeCandidate(
+                sourceThread, turnId, nowMs,
+                compactRpcResponse || compactionSignal, primaryTurnHint);
+        }
+        if (auxiliaryTurn) {
+            provisionalTurnStarts.remove(sourceThread);
+            repairAuxiliaryActiveTurn(sourceThread, turnId);
+            if (isContextCompactionTerminalSignal(method, params)
+                    && compactionTurnTracker.observeLifecycleTerminal(
+                        sourceThread, turnId, nowMs)) {
+                scheduleDeferredTaskCompletionCheck(
+                    sourceThread, COMPACTION_TERMINAL_SETTLE_MS + 50L);
+            }
+        } else if (!compactionSignal && !"turn/started".equals(method)) {
+            promoteProvisionalTurnStart(sourceThread, turnId);
+        }
+
+        if (!auxiliaryTurn && "turn/started".equals(method)
+                && compactionTurnTracker.shouldQuarantineWeakStart(
+                    sourceThread, turnId, nowMs)) {
+            Log.i(TAG, "Quarantining turn start until compact RPC identity is known turn="
+                + shortId(turnId));
+            return;
+        }
+        if (auxiliaryTurn) return;
+
+        if (!isTurnStartObservation(message, method, turn) || sourceThread.isEmpty() || turnId.isEmpty()) {
+            return;
+        }
+        boolean confirmedPrimaryStart = primaryStartRpcResponse
+            || hasPendingPrimaryTurnStart(sourceThread);
+        boolean postCompletionWeakStart = !confirmedPrimaryStart
+            && primaryCompletionTracker.shouldQuarantineWeakStart(
+                sourceThread, turnId, nowMs);
+        long startedAtSeconds = turn == null ? 0L : turn.optLong("startedAt", 0L);
+        if (!rememberActiveTurn(sourceThread, turnId, confirmedPrimaryStart)) return;
+        String key = turnKey(sourceThread, turnId);
+        Long previousStart = turnStartedAtMs.putIfAbsent(key,
+            startedAtSeconds > 0 ? startedAtSeconds * 1000L : nowMs);
+        if (previousStart == null) {
+            scheduleTurnRuntimeDiagnostics(sourceThread, turnId);
+            scheduleTurnStallDiagnostics(sourceThread, turnId);
+        }
+        if (postCompletionWeakStart) {
+            provisionalTurnStarts.put(sourceThread,
+                new ProvisionalTurnStart(sourceThread, turnId, turn));
+            return;
+        }
+        provisionalTurnStarts.remove(sourceThread);
+        emitMainTurnStarted(sourceThread, turnId, turn);
+    }
+
+    private void resolveOutgoingRequestTracking(JSONObject message) {
+        if (message == null || !message.has("id") || message.has("method")) return;
+        String requestKey = serverRequestRouteKey(message.opt("id"));
+        if (requestKey.isEmpty()) return;
+        String primaryStartThread = pendingPrimaryTurnStartRequestThreads.remove(requestKey);
+        if (primaryStartThread != null) {
+            scheduleDeferredTaskCompletionCheck(primaryStartThread);
+        }
+        String compactThread = pendingCompactRequestThreads.remove(requestKey);
+        if (compactThread == null) return;
+        if (message.has("error")) {
+            compactionTurnTracker.requestFailed(compactThread);
+            maybeFinalizeDeferredTaskCompletion(compactThread);
+        } else {
+            compactionTurnTracker.requestSucceeded(
+                compactThread, System.currentTimeMillis());
+            scheduleDeferredTaskCompletionCheck(
+                compactThread, COMPACTION_TURN_BIND_WINDOW_MS + 250L);
+        }
+    }
+
+    static boolean isTurnStartObservation(JSONObject message, String method, JSONObject turn) {
+        if ("turn/started".equals(method)) return true;
+        if (message == null || !message.has("result") || turn == null) return false;
+        String status = turn.optString("status", "").replace("_", "")
+            .replace("-", "").toLowerCase(java.util.Locale.ROOT);
+        return !"completed".equals(status) && !"failed".equals(status)
+            && !"cancelled".equals(status) && !"canceled".equals(status)
+            && !"interrupted".equals(status);
+    }
+
+    private void repairAuxiliaryActiveTurn(String sourceThread, String auxiliaryTurn) {
+        synchronized (nativeRouteDeliveryLock) {
+            if (sourceThread == null || !sourceThread.equals(threadId)
+                    || auxiliaryTurn == null || !auxiliaryTurn.equals(activeTurnId)) return;
+            String primaryTurn = compactionTurnTracker.primaryTurnFor(sourceThread, auxiliaryTurn);
+            activeTurnId = !primaryTurn.isEmpty()
+                    && turnStartedAtMs.containsKey(turnKey(sourceThread, primaryTurn))
+                ? primaryTurn : null;
+            activeTurnConfirmedPrimary = activeTurnId != null;
+        }
+    }
+
+    private void emitMainTurnStarted(String sourceThread, String turnId, JSONObject turn) {
+        String key = turnKey(sourceThread, turnId);
+        if (!emittedTurnStartedTurns.add(key)) return;
+        JSONObject params = turnLifecycleParams(sourceThread, turnId, turn);
+        emitProtocolLifecycleEvent("turnStarted", params, turn);
+    }
+
+    static JSONObject turnLifecycleParams(String sourceThread, String turnId, JSONObject turn) {
+        JSONObject params = new JSONObject();
+        try {
+            String safeThread = sourceThread == null ? "" : sourceThread;
+            String safeTurnId = turnId == null ? "" : turnId;
+            JSONObject safeTurn = turn == null
+                ? new JSONObject() : new JSONObject(turn.toString());
+            if (!safeTurnId.isEmpty() && safeTurn.optString("id", "").isEmpty()) {
+                safeTurn.put("id", safeTurnId);
+            }
+            if (!safeThread.isEmpty()
+                    && safeTurn.optString("threadId", safeTurn.optString("thread_id", "")).isEmpty()) {
+                safeTurn.put("threadId", safeThread);
+            }
+            params.put("threadId", safeThread)
+                .put("turnId", safeTurnId)
+                .put("turn", safeTurn);
+        } catch (Exception ignored) {}
+        return params;
+    }
+
+    static boolean isAuxiliaryCompactionTurnCompletion(
+            CompactionTurnTracker tracker, JSONObject params) {
+        return tracker != null && params != null && tracker.isAuxiliaryTurn(
+            protocolThreadId(params), protocolTurnId(params));
+    }
+
+    private boolean isExactActivePrimaryTurn(String sourceThread, String turnId) {
+        if (sourceThread == null || sourceThread.isEmpty() || turnId == null || turnId.isEmpty()) {
+            return false;
+        }
+        synchronized (nativeRouteDeliveryLock) {
+            return sourceThread.equals(threadId) && sourceThread.equals(visibleThreadId)
+                && turnId.equals(activeTurnId)
+                && !compactionTurnTracker.isAuxiliaryTurn(sourceThread, turnId);
+        }
+    }
+
+    static String turnLifecycleCallbackPayload(JSONObject params) {
+        return turnLifecycleCallbackPayload(params, false);
+    }
+
+    static String turnLifecycleCallbackPayload(
+            JSONObject params, boolean hasPendingContinuation) {
+        JSONObject turn = params == null ? null : params.optJSONObject("turn");
+        JSONObject payload = turnLifecycleParams(
+            protocolThreadId(params), protocolTurnId(params), turn);
+        try { payload.put("hasPendingContinuation", hasPendingContinuation); }
+        catch (Exception ignored) {}
+        return payload.toString();
+    }
+
+    private String activeTurnForThread(String sourceThread) {
+        synchronized (nativeRouteDeliveryLock) {
+            return sourceThread != null && sourceThread.equals(threadId) && activeTurnId != null
+                ? activeTurnId : "";
+        }
+    }
+
+    private String compactionPrimaryTurnHint(
+            String sourceThread, String candidateTurn, long nowMs) {
+        String completedPrimary = primaryCompletionTracker.primaryTurnHint(
+            sourceThread, candidateTurn, nowMs);
+        synchronized (nativeRouteDeliveryLock) {
+            if (sourceThread != null && sourceThread.equals(threadId)
+                    && activeTurnId != null && !activeTurnId.isEmpty()) {
+                if (activeTurnId.equals(candidateTurn) && !activeTurnConfirmedPrimary
+                        && !completedPrimary.isEmpty()) {
+                    return completedPrimary;
+                }
+                return activeTurnId;
+            }
+        }
+        return completedPrimary;
+    }
+
+    private boolean hasPendingPrimaryTurnStart(String sourceThread) {
+        if (sourceThread == null || sourceThread.isEmpty()) return false;
+        for (String pendingThread : pendingPrimaryTurnStartRequestThreads.values()) {
+            if (sourceThread.equals(pendingThread)) return true;
+        }
+        return false;
+    }
+
+    private void promoteProvisionalTurnStart(String sourceThread, String turnId) {
+        if (sourceThread == null || sourceThread.isEmpty() || turnId == null || turnId.isEmpty()) {
+            return;
+        }
+        ProvisionalTurnStart provisional = provisionalTurnStarts.get(sourceThread);
+        if (provisional == null || !turnId.equals(provisional.turnId)) return;
+        synchronized (nativeRouteDeliveryLock) {
+            if (!sourceThread.equals(threadId) || !sourceThread.equals(visibleThreadId)
+                    || !turnId.equals(activeTurnId)) return;
+            activeTurnConfirmedPrimary = true;
+        }
+        if (!provisionalTurnStarts.remove(sourceThread, provisional)) return;
+        primaryCompletionTracker.clear(sourceThread);
+        deferredTaskCompletions.remove(sourceThread);
+        emitMainTurnStarted(sourceThread, turnId, provisional.turn);
+    }
+
+    private boolean rememberActiveTurn(String sourceThread, String turn,
+                                       boolean confirmedPrimaryStart) {
+        synchronized (nativeRouteDeliveryLock) {
+            if (sourceThread != null && sourceThread.equals(threadId)
+                    && sourceThread.equals(visibleThreadId)) {
+                if (activeTurnId != null && !activeTurnId.isEmpty()
+                        && !activeTurnId.equals(turn) && !confirmedPrimaryStart
+                        && turnStartedAtMs.containsKey(turnKey(sourceThread, activeTurnId))) {
+                    Log.w(TAG, "Ignoring unverified turn replacement active=" + shortId(activeTurnId)
+                        + " candidate=" + shortId(turn));
+                    return false;
+                }
+                activeTurnId = turn;
+                activeTurnConfirmedPrimary = confirmedPrimaryStart;
+                if (confirmedPrimaryStart) {
+                    primaryCompletionTracker.clear(sourceThread);
+                    provisionalTurnStarts.remove(sourceThread);
+                    deferredTaskCompletions.remove(sourceThread);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Retained for focused delivery tests that model an ordinary unconfirmed notification. */
+    private boolean rememberActiveTurn(String sourceThread, String turn) {
+        return rememberActiveTurn(sourceThread, turn, false);
+    }
+
+    private void clearActiveTurnIfMatches(String sourceThread, String turn) {
+        synchronized (nativeRouteDeliveryLock) {
+            if (sourceThread != null && sourceThread.equals(threadId)
+                    && turn != null && turn.equals(activeTurnId)) {
+                activeTurnId = null;
+                activeTurnConfirmedPrimary = false;
+            }
+        }
     }
 
     private void scheduleTurnStallDiagnostics(String thread, String turn) {
@@ -1997,6 +2804,23 @@ final class CodexAppServerBridge {
         }
     }
 
+    private static int appendHistoricalProcess(
+            JSONArray messages, StringBuilder reasoning, StringBuilder command, JSONArray tools,
+            long reasoningStartedAtMs, long finishedAtMs) throws Exception {
+        boolean hasProcess = reasoning.length() > 0 || command.length() > 0 || tools.length() > 0;
+        if (!hasProcess) return -1;
+        long reasoningDuration = historyReasoningDurationSeconds(
+            reasoningStartedAtMs, finishedAtMs, reasoning.length() > 0);
+        JSONObject process = new JSONObject().put("duration", reasoningDuration)
+            .put("reasoning", reasoning.toString().trim())
+            .put("command", command.toString().trim()).put("tools", tools)
+            .put("reasoningUnavailable", reasoning.length() == 0);
+        String encoded = NativeBase64.encode(
+            process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        messages.put(new JSONObject().put("role", "activity").put("content", "PROCESS2|" + encoded));
+        return messages.length() - 1;
+    }
+
     static JSONArray readConversationHistory(File sessionFile) throws Exception {
         JSONArray messages = new JSONArray();
         StringBuilder reasoning = new StringBuilder();
@@ -2010,6 +2834,7 @@ final class CodexAppServerBridge {
         boolean sawEventMessage = false;
         int lastProcessIndex = -1;
         long reasoningStartedAtMs = 0L;
+        long latestRecordAtMs = 0L;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(sessionFile), java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -2018,6 +2843,7 @@ final class CodexAppServerBridge {
                 JSONObject payload = record.optJSONObject("payload");
                 if (payload == null) continue;
                 long recordAtMs = parseRecordTimestampMs(record.optString("timestamp", ""));
+                if (recordAtMs > 0L) latestRecordAtMs = recordAtMs;
                 boolean eventMessageRecord = "event_msg".equals(record.optString("type"));
                 if (eventMessageRecord) sawEventMessage = true;
                 JSONObject historicalCompaction = historicalCompactionItem(record, payload, recordAtMs);
@@ -2069,17 +2895,24 @@ final class CodexAppServerBridge {
                     continue;
                 }
                 if ("event_msg".equals(record.optString("type")) && "task_complete".equals(payload.optString("type"))) {
+                    int pendingProcessIndex = appendHistoricalProcess(
+                        messages, reasoning, command, tools, reasoningStartedAtMs, recordAtMs);
+                    if (pendingProcessIndex >= 0) {
+                        lastProcessIndex = pendingProcessIndex;
+                        reasoning.setLength(0); command.setLength(0); tools = new JSONArray();
+                        reasoningStartedAtMs = 0L;
+                    }
                     long durationMs = payload.optLong("duration_ms", 0L);
                     if (lastProcessIndex >= 0 && durationMs > 0) {
                         JSONObject processMessage = messages.optJSONObject(lastProcessIndex);
                         String contentValue = processMessage == null ? "" : processMessage.optString("content", "");
                         if (contentValue.startsWith("PROCESS2|")) try {
-                            String json = new String(android.util.Base64.decode(contentValue.substring(9), android.util.Base64.DEFAULT), java.nio.charset.StandardCharsets.UTF_8);
+                            String json = new String(NativeBase64.decode(contentValue.substring(9)), java.nio.charset.StandardCharsets.UTF_8);
                             JSONObject process = new JSONObject(json);
                             if (process.optLong("duration", 0L) <= 0L) {
                                 process.put("duration", Math.max(1L, durationMs / 1000L));
                             }
-                            String encoded = android.util.Base64.encodeToString(process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+                            String encoded = NativeBase64.encode(process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
                             processMessage.put("content", "PROCESS2|" + encoded);
                             messages.put(lastProcessIndex, processMessage);
                         } catch (Exception ignored) {}
@@ -2098,20 +2931,19 @@ final class CodexAppServerBridge {
                     }
                     continue;
                 }
-                if ("function_call".equals(payloadType)) {
+                if ("function_call".equals(payloadType) || "custom_tool_call".equals(payloadType)) {
                     String callId = payload.optString("call_id", payload.optString("id", ""));
                     String name = payload.optString("name", "tool");
-                    String arguments = payload.optString("arguments", "");
-                    JSONObject args;
-                    try { args = new JSONObject(arguments); }
-                    catch (Exception ignored) { args = new JSONObject().put("raw", arguments); }
+                    Object arguments = "custom_tool_call".equals(payloadType)
+                        ? payload.opt("input") : payload.opt("arguments");
+                    JSONObject args = historicalToolArguments(arguments);
                     calls.put(callId, new JSONObject().put("id", callId).put("name", name).put("arguments", args));
                     continue;
                 }
-                if ("function_call_output".equals(payloadType)) {
+                if ("function_call_output".equals(payloadType) || "custom_tool_call_output".equals(payloadType)) {
                     String callId = payload.optString("call_id", "");
                     JSONObject call = calls.remove(callId);
-                    String output = payload.optString("output", "");
+                    String output = historicalToolOutput(payload.opt("output"));
                     if (call != null) {
                         JSONObject historyItem = historyToolCard(call, output);
                         if ("commandExecution".equals(historyItem.optString("type"))) {
@@ -2174,18 +3006,9 @@ final class CodexAppServerBridge {
                         }
                         pendingUserMessage = null;
                     }
-                    boolean hasProcess = reasoning.length() > 0 || command.length() > 0 || tools.length() > 0;
-                    if (hasProcess) {
-                        long reasoningDuration = historyReasoningDurationSeconds(
-                            reasoningStartedAtMs, recordAtMs, reasoning.length() > 0);
-                        JSONObject process = new JSONObject().put("duration", reasoningDuration)
-                            .put("reasoning", reasoning.toString().trim())
-                            .put("command", command.toString().trim()).put("tools", tools)
-                            .put("reasoningUnavailable", reasoning.length() == 0);
-                        String encoded = android.util.Base64.encodeToString(process.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
-                        messages.put(new JSONObject().put("role", "activity").put("content", "PROCESS2|" + encoded));
-                        lastProcessIndex = messages.length() - 1;
-                    }
+                    int processIndex = appendHistoricalProcess(
+                        messages, reasoning, command, tools, reasoningStartedAtMs, recordAtMs);
+                    if (processIndex >= 0) lastProcessIndex = processIndex;
                     reasoning.setLength(0); command.setLength(0); tools = new JSONArray();
                     reasoningStartedAtMs = 0L;
                 }
@@ -2207,6 +3030,8 @@ final class CodexAppServerBridge {
                 }
             }
         }
+        appendHistoricalProcess(
+            messages, reasoning, command, tools, reasoningStartedAtMs, latestRecordAtMs);
         appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
         if (pendingUserMessage != null && !sawEventMessage
                 && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
@@ -2422,6 +3247,50 @@ final class CodexAppServerBridge {
             .put("status", "started".equals(kind) ? "working" : kind);
     }
 
+    /** Normalize both JSON function arguments and raw custom-tool input into one history shape. */
+    static JSONObject historicalToolArguments(Object value) throws Exception {
+        if (value instanceof JSONObject) {
+            try { return new JSONObject(value.toString()); }
+            catch (Exception ignored) { return new JSONObject(); }
+        }
+        String raw = value == null || value == JSONObject.NULL ? "" : String.valueOf(value);
+        try { return new JSONObject(raw); }
+        catch (Exception ignored) { return new JSONObject().put("raw", raw); }
+    }
+
+    /** Custom tool outputs are persisted as content-part arrays, unlike legacy string outputs. */
+    static String historicalToolOutput(Object value) {
+        StringBuilder output = new StringBuilder();
+        appendHistoricalToolOutput(value, output);
+        return output.toString().trim();
+    }
+
+    private static void appendHistoricalToolOutput(Object value, StringBuilder output) {
+        if (value == null || value == JSONObject.NULL) return;
+        if (value instanceof JSONArray) {
+            JSONArray parts = (JSONArray) value;
+            for (int index = 0; index < parts.length(); index++) {
+                appendHistoricalToolOutput(parts.opt(index), output);
+            }
+            return;
+        }
+        if (value instanceof JSONObject) {
+            JSONObject part = (JSONObject) value;
+            Object nested = part.has("text") ? part.opt("text")
+                : part.has("content") ? part.opt("content")
+                : part.has("output") ? part.opt("output")
+                : part.has("message") ? part.opt("message")
+                : part.toString();
+            appendHistoricalToolOutput(nested, output);
+            return;
+        }
+        String text = String.valueOf(value);
+        if (text.isEmpty()) return;
+        if (output.length() > 0 && output.charAt(output.length() - 1) != '\n'
+                && text.charAt(0) != '\n') output.append('\n');
+        output.append(text);
+    }
+
     static JSONObject historyToolCard(JSONObject call, String output) throws Exception {
         String name = call.optString("name", "tool");
         JSONObject args = call.optJSONObject("arguments");
@@ -2433,7 +3302,8 @@ final class CodexAppServerBridge {
                 ? ((JSONArray) commandValue).join(" ").replace("\"", "")
                 : args.optString("command", args.optString("cmd", args.optString("raw", name)));
             JSONObject result = new JSONObject().put("type", "commandExecution").put("command", commandText)
-                .put("aggregatedOutput", output).put("status", "completed");
+                .put("aggregatedOutput", output);
+            result.put("status", NativeCommandOutputStore.resolvedCommandStatus(result, output));
             if (args.has("cwd")) result.put("cwd", args.optString("cwd", ""));
             return result;
         }
@@ -2588,22 +3458,6 @@ final class CodexAppServerBridge {
         return value.length() <= 8 ? value : value.substring(0, 8);
     }
 
-    private boolean suppressSyntheticInterruptCompletion(JSONObject message) {
-        if (!"turn/completed".equals(message.optString("method"))) return false;
-        JSONObject params = message.optJSONObject("params");
-        String key = turnKey(params);
-        if (key == null) return false;
-        if (!syntheticCompletedTurns.remove(key)) return false;
-        pendingFinalTurns.remove(key);
-        turnStartedAtMs.remove(key);
-        uiCompletedTurns.remove(key);
-        JSONObject turn = params.optJSONObject("turn");
-        String completedTurn = turn == null ? params.optString("turnId", "") : turn.optString("id", "");
-        String completedThread = params.optString("threadId", "");
-        if (completedThread.equals(threadId) && completedTurn.equals(activeTurnId)) activeTurnId = null;
-        return true;
-    }
-
     static boolean isAgentMessageItem(JSONObject params) {
         JSONObject item = params == null ? null : params.optJSONObject("item");
         return item != null && "agentmessage".equals(normalizeItemType(item.optString("type", item.optString("item_type", ""))));
@@ -2631,99 +3485,28 @@ final class CodexAppServerBridge {
         String turn = activeTurnId;
         if (turn == null || statusThread.isEmpty() || !statusThread.equals(threadId)) return;
         String key = turnKey(statusThread, turn);
-        // Ignore initial/resume idle notifications. Only a remembered running turn may
-        // close the native loading state.
-        if (!turnStartedAtMs.containsKey(key) || !uiCompletedTurns.add(key)) return;
-        pendingFinalTurns.remove(key);
-        turnStartedAtMs.remove(key);
-        activeTurnId = null;
-        Log.i(TAG, "Closing native turn from thread idle status turn=" + shortId(turn));
-        emit("onTurnComplete", "");
-        // Keep drawer/task state consistent even when the provider never emits the trailing
-        // turn/completed. A real completion may still correct this to failed milliseconds later.
-        CodexTaskStore.markCompleted(appContext, statusThread, false);
-        notifyTaskCompleted(statusThread, false, turn);
-    }
-
-    static boolean shouldSynthesizeMissingTurnCompletion(boolean pending, boolean hasActiveRequests,
-                                                          int consecutiveIdleChecks) {
-        return pending && !hasActiveRequests
-            && consecutiveIdleChecks >= MISSING_TURN_COMPLETION_IDLE_CHECKS;
-    }
-
-    private void scheduleMissingTurnCompletion(JSONObject params) {
-        String key = turnKey(params);
-        if (key == null || !pendingFinalTurns.add(key)) return;
-        String thread = params.optString("threadId");
-        String turnId = params.optString("turnId");
-        new Thread(() -> {
-            int consecutiveIdleChecks = 0;
-            long waitingSince = System.currentTimeMillis();
-            long nextWarningAt = waitingSince + MISSING_TURN_COMPLETION_WARNING_MS;
-            try {
-                while (pendingFinalTurns.contains(key)) {
-                    Thread.sleep(MISSING_TURN_COMPLETION_CHECK_MS);
-                    if (!pendingFinalTurns.contains(key)) return;
-
-                    LocalApiProxy proxy = apiProxy;
-                    boolean hasActiveRequests = proxy != null && proxy.hasActiveRequests();
-                    consecutiveIdleChecks = hasActiveRequests ? 0 : consecutiveIdleChecks + 1;
-                    long checkTime = System.currentTimeMillis();
-                    if (hasActiveRequests && checkTime >= nextWarningAt) {
-                        android.util.Log.w(TAG, "Still waiting for real turn/completed while upstream requests are active for "
-                            + turnId + " waitedMs=" + (checkTime - waitingSince));
-                        nextWarningAt = checkTime + MISSING_TURN_COMPLETION_WARNING_MS;
-                    }
-                    if (!shouldSynthesizeMissingTurnCompletion(true, hasActiveRequests, consecutiveIdleChecks)) {
-                        continue;
-                    }
-                    if (!pendingFinalTurns.remove(key)) return;
-                    turnStartedAtMs.remove(key);
-                    if (thread.equals(threadId) && turnId.equals(activeTurnId)) activeTurnId = null;
-
-                    long now = System.currentTimeMillis();
-                    long started = turnStartedAtMs.getOrDefault(key, now - 1000L);
-                    syntheticCompletedTurns.add(key);
-                    JSONObject turn = new JSONObject()
-                        .put("id", turnId)
-                        .put("items", new JSONArray())
-                        .put("itemsView", "notLoaded")
-                        .put("status", "completed")
-                        .put("error", JSONObject.NULL)
-                        .put("startedAt", started / 1000L)
-                        .put("completedAt", now / 1000L)
-                        .put("durationMs", Math.max(1000L, now - started));
-                    JSONObject completed = new JSONObject().put("method", "turn/completed")
-                        .put("params", new JSONObject().put("threadId", thread).put("turn", turn));
-                    android.util.Log.w(TAG, "Synthesizing missing turn/completed after upstream became idle for " + turnId);
-                    if (desktopBridge != null) desktopBridge.onAppServerMessage(completed);
-                    JSONObject syntheticParams = completed.optJSONObject("params");
-                    if (isPrimaryEvent(syntheticParams)) emit("onTurnComplete", "");
-                    if (isPrimaryTurn(syntheticParams)) {
-                        CodexTaskStore.markCompleted(appContext, thread, false);
-                        notifyTaskCompleted(thread, false, turnId);
-                    }
-                    sendRequest("turn/interrupt", new JSONObject().put("threadId", thread).put("turnId", turnId));
-                    return;
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                syntheticCompletedTurns.remove(key);
-                android.util.Log.e(TAG, "Failed to complete final answer turn", e);
-            }
-        }, "CodexTurnCompletionFallback").start();
+        // thread/status/changed=idle is transport-level state, not a turn terminal barrier. It can
+        // occur between a primary turn and a dedicated compaction/continuation turn. Closing here
+        // races the authoritative turn/completed notification and interrupts otherwise live work.
+        if (turnStartedAtMs.containsKey(key)) {
+            Log.i(TAG, "Observed thread idle while awaiting authoritative completion turn="
+                + shortId(turn));
+        }
     }
 
     private void clearPendingTurn(JSONObject params) {
         String key = turnKey(params);
         if (key == null) return;
-        pendingFinalTurns.remove(key);
         turnStartedAtMs.remove(key);
+        emittedTurnStartedTurns.remove(key);
         JSONObject turn = params == null ? null : params.optJSONObject("turn");
         String completedTurn = turn == null ? params.optString("turnId", "") : turn.optString("id", "");
         String completedThread = params == null ? "" : params.optString("threadId", "");
-        if (completedThread.equals(threadId) && completedTurn.equals(activeTurnId)) activeTurnId = null;
+        ProvisionalTurnStart provisional = provisionalTurnStarts.get(completedThread);
+        if (provisional != null && completedTurn.equals(provisional.turnId)) {
+            provisionalTurnStarts.remove(completedThread, provisional);
+        }
+        clearActiveTurnIfMatches(completedThread, completedTurn);
     }
 
     private static String turnKey(JSONObject params) {
@@ -2764,12 +3547,42 @@ final class CodexAppServerBridge {
         if (params == null) return;
         String requestedThread = params.optString("threadId", params.optString("thread_id", ""));
         if (!requestedThread.isEmpty()) primaryThreadIds.add(requestedThread);
+        String requestKey = serverRequestRouteKey(request.opt("id"));
+        if ("turn/start".equals(method) && !requestedThread.isEmpty() && !requestKey.isEmpty()) {
+            pendingPrimaryTurnStartRequestThreads.put(requestKey, requestedThread);
+        } else if ("thread/compact/start".equals(method) && !requestedThread.isEmpty()) {
+            String primaryTurn = "";
+            synchronized (nativeRouteDeliveryLock) {
+                if (requestedThread.equals(threadId) && activeTurnId != null) {
+                    primaryTurn = activeTurnId;
+                }
+            }
+            compactionTurnTracker.requestStarted(
+                requestedThread, primaryTurn, System.currentTimeMillis());
+            scheduleDeferredTaskCompletionCheck(
+                requestedThread, COMPACTION_TURN_BIND_WINDOW_MS + 250L);
+            if (!requestKey.isEmpty()) pendingCompactRequestThreads.put(requestKey, requestedThread);
+        }
         String title = extractTaskTitle(params);
         if ("turn/start".equals(method) && !requestedThread.isEmpty()) {
             CodexTaskStore.markRunning(appContext, requestedThread, title);
         } else if ("thread/start".equals(method) && desktopBridge != null) {
             int requestId = request.optInt("id", -1);
             if (requestId >= 0) pendingPrimaryThreadTitles.put(requestId, title);
+        }
+    }
+
+    private void forgetPrimaryRequest(JSONObject request) {
+        if (request == null) return;
+        String requestKey = serverRequestRouteKey(request.opt("id"));
+        if (!requestKey.isEmpty()) {
+            String primaryStartThread = pendingPrimaryTurnStartRequestThreads.remove(requestKey);
+            if (primaryStartThread != null) maybeFinalizeDeferredTaskCompletion(primaryStartThread);
+            String compactThread = pendingCompactRequestThreads.remove(requestKey);
+            if (compactThread != null) {
+                compactionTurnTracker.requestFailed(compactThread);
+                maybeFinalizeDeferredTaskCompletion(compactThread);
+            }
         }
     }
 
@@ -2835,6 +3648,163 @@ final class CodexAppServerBridge {
             isContextCompactionSignal(method, params));
     }
 
+    private void emitVisibleRouteEventIfAccepted(JSONObject params, String function, String value) {
+        NativeRouteEventGate.RouteToken routeToken;
+        synchronized (nativeRouteDeliveryLock) {
+            routeToken = nativeRouteEventGate.captureRouteToken(protocolThreadId(params));
+            if (!shouldAcceptNotificationForRoute("", params, routeToken)) return;
+        }
+        emitForRoute(routeToken, function, value);
+    }
+
+    private void emitVisibleProtocolLifecycleIfAccepted(
+            String kind, JSONObject params, JSONObject details) {
+        if (webView != null || params == null) return;
+        try {
+            JSONObject payload = new JSONObject()
+                .put("kind", kind)
+                .put("threadId", protocolThreadId(params))
+                .put("turnId", protocolTurnId(params))
+                .put("itemId", protocolItemId(params))
+                .put("sequence", nativeProtocolSequence.incrementAndGet())
+                .put("timestampMs", System.currentTimeMillis());
+            if (details != null) payload.put("details", details);
+            emitVisibleRouteEventIfAccepted(params, "onProtocolEvent", payload.toString());
+        } catch (Exception ignored) {}
+    }
+
+    /** Blocking server requests without a thread id may only bind to a proven active turn. */
+    static boolean hasVerifiableRequestRoute(JSONObject params, String activeTurn) {
+        if (params == null) return false;
+        if (!protocolThreadId(params).isEmpty()) return true;
+        String candidateTurn = protocolTurnId(params);
+        return !candidateTurn.isEmpty() && activeTurn != null && candidateTurn.equals(activeTurn);
+    }
+
+    private static boolean hasAnyRequestRouteIdentity(JSONObject params) {
+        return params != null
+            && (!protocolThreadId(params).isEmpty() || !protocolTurnId(params).isEmpty());
+    }
+
+    private NativeRouteEventGate.RouteToken captureBlockingRequestRoute(JSONObject params) {
+        synchronized (nativeRouteDeliveryLock) {
+            if (!hasVerifiableRequestRoute(params, activeTurnId)) return null;
+            NativeRouteEventGate.RouteToken routeToken =
+                nativeRouteEventGate.captureRouteToken(protocolThreadId(params));
+            if (!nativeRouteEventGate.isCurrent(routeToken)) return null;
+            if (webView != null) {
+                return routeToken;
+            }
+            return shouldAcceptNotificationForRoute("", params, routeToken) ? routeToken : null;
+        }
+    }
+
+    private void rememberServerRequestRoute(Object requestId,
+                                            NativeRouteEventGate.RouteToken routeToken,
+                                            JSONObject params, String method) {
+        String key = serverRequestRouteKey(requestId);
+        if (key.isEmpty()) return;
+        synchronized (pendingServerRequestRoutes) {
+            if (ambiguousServerRequestRouteKeys.contains(key)) return;
+            PendingServerRequestRoute existing = pendingServerRequestRoutes.get(key);
+            if (routeToken == null) {
+                if (existing != null) {
+                    if (!existing.method.equals(method == null ? "" : method)
+                            || !existing.matchesResolution(params)) {
+                        pendingServerRequestRoutes.remove(key);
+                        ambiguousServerRequestRouteKeys.add(key);
+                    }
+                } else if (!seenServerRequestRouteKeys.add(key)) {
+                    ambiguousServerRequestRouteKeys.add(key);
+                }
+                return;
+            }
+            PendingServerRequestRoute candidate = new PendingServerRequestRoute(routeToken, params, method);
+            if (existing == null && !seenServerRequestRouteKeys.add(key)) {
+                ambiguousServerRequestRouteKeys.add(key);
+                Log.w(TAG, "Reused server request id; visible resolution will require route identity");
+                return;
+            }
+            if (existing == null) {
+                pendingServerRequestRoutes.put(key, candidate);
+            } else if (!existing.sameIdentity(candidate)) {
+                pendingServerRequestRoutes.remove(key);
+                ambiguousServerRequestRouteKeys.add(key);
+                Log.w(TAG, "Ambiguous server request id; visible resolution will require route identity");
+            }
+        }
+    }
+
+    static String serverRequestRouteKey(Object requestId) {
+        if (requestId == null || requestId == JSONObject.NULL) return "";
+        if (requestId instanceof Number) return "number:" + requestId;
+        if (requestId instanceof String) return "string:" + requestId;
+        return requestId.getClass().getName() + ":" + requestId;
+    }
+
+    static boolean requestRouteIdentityMatches(String sourceThreadId, String turnId,
+                                               JSONObject params) {
+        if (params == null) return false;
+        String resolvedThread = protocolThreadId(params);
+        if (!resolvedThread.isEmpty() && !resolvedThread.equals(sourceThreadId)) return false;
+        String resolvedTurn = protocolTurnId(params);
+        if (resolvedTurn.isEmpty()) return true;
+        if (turnId == null || turnId.isEmpty()) return !resolvedThread.isEmpty();
+        return resolvedTurn.equals(turnId);
+    }
+
+    private NativeRouteEventGate.RouteToken routeForServerRequestResponse(
+            Object requestId, JSONObject requestParams) {
+        PendingServerRequestRoute pending = pendingServerRequestRoutes.get(
+            serverRequestRouteKey(requestId));
+        if (pending != null && pending.matchesResolution(requestParams)) {
+            synchronized (nativeRouteDeliveryLock) {
+                if (nativeRouteEventGate.isCurrent(pending.routeToken)) return pending.routeToken;
+            }
+            NativeRouteEventGate.RouteToken recaptured = captureBlockingRequestRoute(requestParams);
+            return recaptured == null ? pending.routeToken : recaptured;
+        }
+        return captureBlockingRequestRoute(requestParams);
+    }
+
+    private void retireServerRequestRoute(Object requestId) {
+        String key = serverRequestRouteKey(requestId);
+        if (key.isEmpty()) return;
+        PendingServerRequestRoute removed = pendingServerRequestRoutes.remove(key);
+        if (removed != null) scheduleDeferredTaskCompletionCheck(removed.sourceThreadId);
+    }
+
+    /** Emits with the route captured at source instead of re-binding a late event to the UI now. */
+    private void emitForRoute(NativeRouteEventGate.RouteToken routeToken,
+                              String function, String value) {
+        if (routeToken == null) return;
+        NativeRouteEventGate.RouteToken previous = nativeRouteEmission.get();
+        nativeRouteEmission.set(routeToken);
+        try {
+            emit(function, value);
+        } finally {
+            if (previous == null) nativeRouteEmission.remove();
+            else nativeRouteEmission.set(previous);
+        }
+    }
+
+    private void emitNativeErrorForRoute(NativeRouteEventGate.RouteToken routeToken,
+                                         String message) {
+        String safeMessage = message == null ? "Native request failed" : message;
+        if (routeToken == null) {
+            emit("onNativeError", safeMessage);
+            return;
+        }
+        if (webView != null) {
+            emitForRoute(routeToken, "onNativeError", safeMessage);
+            return;
+        }
+        synchronized (nativeRouteDeliveryLock) {
+            if (!nativeRouteEventGate.isCurrent(routeToken)) return;
+            enqueueAdmittedNativeEventLocked("onNativeError", safeMessage, routeToken);
+        }
+    }
+
     /**
      * A resumed native conversation has a visible thread identity before its disk history is
      * ready.  Accepting that thread's protocol events during the gap lets emit() queue them for
@@ -2851,39 +3821,68 @@ final class CodexAppServerBridge {
             && !visibleThread.isEmpty() && !routeReady;
     }
 
-    private void resetVisibleRoute(String thread, boolean ready) {
-        visibleThreadId = thread;
-        visibleRouteReady = ready;
-        nativeRouteEventGate.resetRoute(navigationGeneration.get(), thread, ready);
-        // A delayed main-loop drain from route A must never mutate the newly selected route B.
-        mainHandler.removeCallbacks(nativeStreamDrain);
-        nativeStreamDrainScheduled.set(false);
-        nativeStreamBatcher.clear();
+    private NativeRouteEventGate.RouteToken resetVisibleRoute(String thread, boolean ready) {
+        synchronized (nativeRouteDeliveryLock) {
+            if (visibleThreadId != null && !visibleThreadId.equals(thread)) {
+                provisionalTurnStarts.remove(visibleThreadId);
+            }
+            threadId = thread;
+            visibleThreadId = thread;
+            visibleRouteReady = ready;
+            activeTurnId = null;
+            activeTurnConfirmedPrimary = false;
+            nativeRouteEventGate.resetRoute(navigationGeneration.get(), thread, ready);
+            // Keep an already queued/running drain as the scheduler owner. Its extracted route-A
+            // events fail the token check; discard only queued routed events so a global backend
+            // failure remains visible without creating a reset-vs-running-drain missed wakeup.
+            nativeStreamBatcher.clearRoutedEvents();
+            return nativeRouteEventGate.captureRouteToken(thread);
+        }
     }
 
     private void markVisibleRouteReadyAndReplay(NativeRouteEventGate.RouteToken routeToken,
                                                 NativeHistorySnapshot historySnapshot) {
         if (webView != null) {
-            visibleRouteReady = true;
+            synchronized (nativeRouteDeliveryLock) {
+                if (nativeRouteEventGate.isCurrent(routeToken)) visibleRouteReady = true;
+            }
             return;
         }
-        if (!nativeRouteEventGate.isCurrent(routeToken)) return;
-        java.util.List<NativeRouteEventGate.Event> pending = nativeRouteEventGate.markReadyAndReplay(
-            routeToken, historySnapshot == null ? java.util.Collections.emptySet()
-                : historySnapshot.getCompletedProtocolItemIds());
-        visibleRouteReady = true;
-        replayVisibleRouteEvents(routeToken, pending);
+        synchronized (nativeRouteDeliveryLock) {
+            if (!nativeRouteEventGate.isCurrent(routeToken)) return;
+            java.util.List<NativeRouteEventGate.Event> pending = nativeRouteEventGate.markReadyAndReplay(
+                routeToken, historySnapshot == null ? java.util.Collections.emptySet()
+                    : historySnapshot.getCompletedProtocolItemIds(),
+                historyTailAssistantText(historySnapshot));
+            visibleRouteReady = true;
+            replayVisibleRouteEventsLocked(routeToken, pending);
+        }
+    }
+
+    static String historyTailAssistantText(NativeHistorySnapshot historySnapshot) {
+        if (historySnapshot == null) return "";
+        java.util.List<NativeChatMessage> messages = historySnapshot.getMessages();
+        for (int index = messages.size() - 1; index >= 0; index--) {
+            NativeChatMessage message = messages.get(index);
+            if (message.getRole() == NativeChatRole.ACTIVITY) continue;
+            return message.getRole() == NativeChatRole.ASSISTANT ? message.getContent() : "";
+        }
+        return "";
     }
 
     private void failOpenVisibleRoute(NativeRouteEventGate.RouteToken routeToken) {
-        if (webView != null || !nativeRouteEventGate.isCurrent(routeToken)) return;
-        java.util.List<NativeRouteEventGate.Event> pending = nativeRouteEventGate.failOpen(routeToken);
-        visibleRouteReady = true;
-        replayVisibleRouteEvents(routeToken, pending);
+        if (webView != null) return;
+        synchronized (nativeRouteDeliveryLock) {
+            if (!nativeRouteEventGate.isCurrent(routeToken)) return;
+            java.util.List<NativeRouteEventGate.Event> pending = nativeRouteEventGate.failOpen(routeToken);
+            visibleRouteReady = true;
+            replayVisibleRouteEventsLocked(routeToken, pending);
+        }
     }
 
-    private void replayVisibleRouteEvents(NativeRouteEventGate.RouteToken routeToken,
-                                          java.util.List<NativeRouteEventGate.Event> pending) {
+    /** Caller holds nativeRouteDeliveryLock so a newly admitted live event cannot overtake replay. */
+    private void replayVisibleRouteEventsLocked(NativeRouteEventGate.RouteToken routeToken,
+                                                java.util.List<NativeRouteEventGate.Event> pending) {
         if (!pending.isEmpty()) {
             try {
                 NativeChatDiagnostics.record(appContext, "route_events_replayed", new JSONObject()
@@ -2892,13 +3891,15 @@ final class CodexAppServerBridge {
                     .put("events", pending.size()));
             } catch (Exception ignored) {}
         }
-        for (NativeRouteEventGate.Event event : pending) enqueueAdmittedNativeEvent(
+        for (NativeRouteEventGate.Event event : pending) enqueueAdmittedNativeEventLocked(
             event.function, event.value, routeToken);
     }
 
     static boolean isVisibleRouteFunction(String function) {
         if (function == null) return false;
         switch (function) {
+            case "onReady":
+            case "onHistoryWarning":
             case "onProtocolEvent":
             case "onProtocolDelta":
             case "onCommandDeltaV2":
@@ -2980,12 +3981,101 @@ final class CodexAppServerBridge {
         return !candidate.isEmpty() && (primaryThreadIds.contains(candidate) || candidate.equals(threadId));
     }
 
-    private static boolean turnFailed(JSONObject params) {
+    static boolean turnFailed(JSONObject params) {
         if (params == null) return false;
         JSONObject turn = params.optJSONObject("turn");
         if (turn == null) return false;
+        String status = normalizeProtocolName(turn.optString("status", ""));
+        if ("failed".equals(status) || "interrupted".equals(status)
+                || "cancelled".equals(status) || "canceled".equals(status)) return true;
         Object error = turn.opt("error");
         return error != null && error != JSONObject.NULL;
+    }
+
+    private boolean hasPendingContinuation(String sourceThread) {
+        if (sourceThread == null || sourceThread.isEmpty()) return false;
+        if (nativeContinuationPendingThreads.contains(sourceThread)
+                || compactionTurnTracker.hasPendingOrActiveCompaction(
+                    sourceThread, System.currentTimeMillis())) return true;
+        for (String pendingThread : pendingPrimaryTurnStartRequestThreads.values()) {
+            if (sourceThread.equals(pendingThread)) return true;
+        }
+        for (NativeRouteEventGate.RouteToken route : pendingSteerRequestRoutes.values()) {
+            if (route != null && sourceThread.equals(route.getSourceThreadId())) return true;
+        }
+        for (PendingServerRequestRoute request : pendingServerRequestRoutes.values()) {
+            if (request != null && sourceThread.equals(request.sourceThreadId)) return true;
+        }
+        return false;
+    }
+
+    private void recordOrFinalizeTaskCompletion(
+            String completedThread, String completedTurnId, boolean failed,
+            boolean hasPendingContinuation) {
+        long nowMs = System.currentTimeMillis();
+        DeferredTaskCompletion completion = new DeferredTaskCompletion(
+            completedThread, completedTurnId, failed, nowMs + TASK_COMPLETION_SETTLE_MS);
+        deferredTaskCompletions.put(completedThread, completion);
+        scheduleDeferredTaskCompletionCheck(completedThread, TASK_COMPLETION_SETTLE_MS);
+        if (hasPendingContinuation) {
+            try {
+                NativeChatDiagnostics.record(appContext, "turn_completion_deferred", new JSONObject()
+                    .put("thread", shortId(completedThread)).put("turn", shortId(completedTurnId))
+                    .put("failed", failed));
+            } catch (Exception ignored) {}
+            scheduleDeferredTaskCompletionCheck(
+                completedThread, COMPACTION_TURN_BIND_WINDOW_MS + 250L);
+            return;
+        }
+    }
+
+    private void maybeFinalizeDeferredTaskCompletion(String sourceThread) {
+        if (sourceThread == null || sourceThread.isEmpty()) return;
+        DeferredTaskCompletion completion = deferredTaskCompletions.get(sourceThread);
+        if (completion == null) return;
+        long nowMs = System.currentTimeMillis();
+        if (nowMs < completion.notBeforeMs) {
+            scheduleDeferredTaskCompletionCheck(
+                sourceThread, Math.max(1L, completion.notBeforeMs - nowMs));
+            return;
+        }
+        synchronized (nativeRouteDeliveryLock) {
+            if (sourceThread.equals(threadId) && activeTurnId != null && !activeTurnId.isEmpty()) {
+                if (!activeTurnId.equals(completion.turnId) && activeTurnConfirmedPrimary) {
+                    // A newer primary turn now owns task state; its own completion will finalize it.
+                    deferredTaskCompletions.remove(sourceThread, completion);
+                }
+                return;
+            }
+        }
+        if (hasPendingContinuation(sourceThread)
+                || !deferredTaskCompletions.remove(sourceThread, completion)) return;
+        finalizeTaskCompletion(completion);
+    }
+
+    private void scheduleDeferredTaskCompletionCheck(String sourceThread) {
+        scheduleDeferredTaskCompletionCheck(sourceThread, 150L);
+    }
+
+    private void scheduleDeferredTaskCompletionCheck(String sourceThread, long delayMs) {
+        if (sourceThread == null || sourceThread.isEmpty()) return;
+        // Let the routed resolution callback update Activity continuation state first. The check
+        // then observes the native hint instead of racing a rejected steer being queued locally.
+        mainHandler.postDelayed(() -> {
+            synchronized (CodexAppServerBridge.this) {
+                maybeFinalizeDeferredTaskCompletion(sourceThread);
+            }
+        }, Math.max(0L, delayMs));
+    }
+
+    private void finalizeTaskCompletion(DeferredTaskCompletion completion) {
+        CodexTaskStore.markCompleted(appContext, completion.threadId, completion.failed);
+        try {
+            NativeChatDiagnostics.record(appContext, "turn_complete", new JSONObject()
+                .put("thread", shortId(completion.threadId)).put("turn", shortId(completion.turnId))
+                .put("failed", completion.failed));
+        } catch (Exception ignored) {}
+        notifyTaskCompleted(completion.threadId, completion.failed, completion.turnId);
     }
 
     private void notifyTaskCompleted(String completedThread, boolean failed, String token) {
@@ -3016,8 +4106,18 @@ final class CodexAppServerBridge {
 
     private void dispatchNativeEvent(String function, String value,
                                      NativeRouteEventGate.RouteToken routeToken) {
-        if (routeToken != null && !nativeRouteEventGate.isCurrent(routeToken)) return;
-        EventListener listener = eventListener;
+        if (routeToken == null) {
+            EventListener listener = eventListener;
+            if (listener != null) listener.onEvent(function, value);
+            return;
+        }
+        EventListener listener;
+        synchronized (nativeRouteDeliveryLock) {
+            if (!nativeRouteEventGate.isCurrent(routeToken)) return;
+            listener = eventListener;
+        }
+        // Do not hold the delivery lock across application callbacks; the route check above is
+        // the linearization point and avoids lock-order inversions with synchronized RPC methods.
         if (listener != null) listener.onEvent(function, value);
     }
 
@@ -3032,8 +4132,19 @@ final class CodexAppServerBridge {
     }
 
     private void drainNativeStreamEvents() {
-        nativeStreamDrainScheduled.set(false);
-        dispatchNativeEvents(nativeStreamBatcher.drain());
+        java.util.List<NativeStreamEventBatcher.Event> events = nativeStreamBatcher.drain();
+        try {
+            dispatchNativeEvents(events);
+        } finally {
+            // scheduled stays true for both queued and actively running drains. An event offered
+            // during dispatch therefore cannot be stranded: either this recheck schedules it, or
+            // its producer wins the same false->true CAS after the flag is cleared.
+            nativeStreamDrainScheduled.set(false);
+            if (!nativeStreamBatcher.isEmpty()
+                    && nativeStreamDrainScheduled.compareAndSet(false, true)) {
+                mainHandler.post(nativeStreamDrain);
+            }
+        }
     }
 
     private NativeRouteEventGate.RouteToken routeTokenForEmission() {
@@ -3042,28 +4153,20 @@ final class CodexAppServerBridge {
     }
 
     /** Queue an event already admitted by NativeRouteEventGate. */
-    private void enqueueAdmittedNativeEvent(String function, String value,
-                                            NativeRouteEventGate.RouteToken routeToken) {
+    private void enqueueAdmittedNativeEventLocked(String function, String value,
+                                                  NativeRouteEventGate.RouteToken routeToken) {
+        boolean urgent;
         if (isHighFrequencyEmission(function)) {
-            boolean drainNow = nativeStreamBatcher.offer(function, value, routeToken);
-            if (nativeStreamDrainScheduled.compareAndSet(false, true)) {
-                mainHandler.postDelayed(nativeStreamDrain, drainNow ? 0L : NATIVE_STREAM_BATCH_MS);
-            } else if (drainNow) {
-                mainHandler.removeCallbacks(nativeStreamDrain);
-                mainHandler.post(nativeStreamDrain);
-            }
-            return;
+            urgent = nativeStreamBatcher.offer(function, value, routeToken);
+        } else {
+            // Lifecycle/completion/error events are FIFO barriers and must never merge with one
+            // another or let a later delta cross them.
+            nativeStreamBatcher.offerSeparate(function, value, routeToken);
+            urgent = true;
         }
-
-        // Freeze the preceding delta batch now. A later delta must never jump across this
-        // completion/tool/lifecycle barrier merely because both main-loop tasks are still queued.
-        mainHandler.removeCallbacks(nativeStreamDrain);
-        nativeStreamDrainScheduled.set(false);
-        java.util.List<NativeStreamEventBatcher.Event> beforeBarrier = nativeStreamBatcher.drain();
-        mainHandler.post(() -> {
-            dispatchNativeEvents(beforeBarrier);
-            dispatchNativeEvent(function, value, routeToken);
-        });
+        if (nativeStreamDrainScheduled.compareAndSet(false, true)) {
+            mainHandler.postDelayed(nativeStreamDrain, urgent ? 0L : NATIVE_STREAM_BATCH_MS);
+        }
     }
 
     private void emit(String function, String value) {
@@ -3072,22 +4175,26 @@ final class CodexAppServerBridge {
         }
         final String safeValue = value == null ? "" : value;
         if (webView == null) {
-            if (isVisibleRouteFunction(function)) {
-                NativeRouteEventGate.RouteToken routeToken = routeTokenForEmission();
-                NativeRouteEventGate.Admission admission = nativeRouteEventGate.offer(
-                    routeToken, function, safeValue);
-                if (admission != NativeRouteEventGate.Admission.DISPATCH_NOW) return;
-                enqueueAdmittedNativeEvent(function, safeValue, routeToken);
-            } else {
-                // Backend/history failures are deliberately global and immediate: a closed route
-                // gate must never hide the only explanation for an otherwise blank screen.
-                enqueueAdmittedNativeEvent(function, safeValue, null);
+            synchronized (nativeRouteDeliveryLock) {
+                if (isVisibleRouteFunction(function)) {
+                    NativeRouteEventGate.RouteToken routeToken = routeTokenForEmission();
+                    NativeRouteEventGate.Admission admission = nativeRouteEventGate.offer(
+                        routeToken, function, safeValue);
+                    if (admission != NativeRouteEventGate.Admission.DISPATCH_NOW) return;
+                    enqueueAdmittedNativeEventLocked(function, safeValue, routeToken);
+                } else {
+                    // Backend/history failures are deliberately global and immediate: a closed
+                    // route gate must never hide the explanation for an otherwise blank screen.
+                    enqueueAdmittedNativeEventLocked(function, safeValue, null);
+                }
             }
             return;
         }
 
         final String quoted = JSONObject.quote(safeValue);
+        final NativeRouteEventGate.RouteToken routeToken = nativeRouteEmission.get();
         mainHandler.post(() -> {
+            if (routeToken != null && !nativeRouteEventGate.isCurrent(routeToken)) return;
             if (eventListener != null) eventListener.onEvent(function, safeValue);
             webView.evaluateJavascript(
                 "window.codex && window.codex." + function + "(" + quoted + ")", null);
@@ -3099,25 +4206,38 @@ final class CodexAppServerBridge {
         // a slow ProcessBuilder.start() from the previous configuration can publish an old
         // process after a new start() has already completed.
         serverGeneration.incrementAndGet();
-        threadId = null;
         resetVisibleRoute(null, false);
-        activeTurnId = null;
         initializeRequestId = -1;
         mcpStatusRequestId = -1;
         appServerInitialized = false;
         deferredResumeThreadId = null;
         deferredResumeGeneration = -1;
-        mainHandler.removeCallbacks(nativeStreamDrain);
-        nativeStreamDrainScheduled.set(false);
-        nativeStreamBatcher.clear();
+        synchronized (nativeRouteDeliveryLock) {
+            mainHandler.removeCallbacks(nativeStreamDrain);
+            nativeStreamDrainScheduled.set(false);
+            nativeStreamBatcher.clear();
+        }
         turnStartedAtMs.clear();
-        pendingFinalTurns.clear();
-        syntheticCompletedTurns.clear();
-        uiCompletedTurns.clear();
+        emittedTurnStartedTurns.clear();
         streamedAgentItemIds.clear();
         pendingGoalGetRequests.clear();
-        pendingSteerRequestIds.clear();
+        pendingNavigationGenerations.clear();
+        pendingNavigationMethods.clear();
+        pendingPrimaryTurnStartRequestThreads.clear();
+        pendingCompactRequestThreads.clear();
+        pendingSteerRequestRoutes.clear();
+        pendingServerRequestRoutes.clear();
+        seenServerRequestRouteKeys.clear();
+        ambiguousServerRequestRouteKeys.clear();
         autoClearingCompletedGoalThreads.clear();
+        nativeContinuationPendingThreads.clear();
+        deferredTaskCompletions.clear();
+        provisionalTurnStarts.clear();
+        compactionTurnTracker.reset();
+        primaryCompletionTracker.reset();
+        compactRequestId = -1;
+        compactRequestThreadId = null;
+        compactNativeRequestId = null;
         try { if (writer != null) writer.close(); } catch (Exception ignored) {}
         writer = null;
         if (process != null) process.destroy();

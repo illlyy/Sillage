@@ -172,8 +172,102 @@ public class NativeRouteEventGateTest {
         assertEquals(expected.toString(), replay.get(0).value);
     }
 
+    @Test
+    public void legacyTailOverlapFiltersOnlyMissingIdAssistantLinesFromMatchingTurn() {
+        NativeRouteEventGate gate = new NativeRouteEventGate();
+        gate.resetRoute(50, "thread-a", false);
+        NativeRouteEventGate.RouteToken token = gate.captureRouteToken();
+
+        gate.offer(token, "onProtocolEvent",
+            itemLifecycle("itemStarted", "turn-overlap", "", "agentMessage", null));
+        String mixedJsonl = protocolDelta("assistantDelta", "turn-overlap", "", "duplicate")
+            + protocolDelta("reasoningDelta", "turn-overlap", "", "reasoning stays")
+            + protocolDelta("assistantDelta", "turn-other", "", "other turn stays")
+            + protocolDelta("assistantDelta", "turn-overlap", "known-item", "known item stays");
+        gate.offer(token, "onProtocolDelta", mixedJsonl);
+        gate.offer(token, "onProtocolEvent",
+            itemLifecycle("itemCompleted", "turn-overlap", "", "agentMessage",
+                "Answer  \r\nsecond line\n"));
+        gate.offer(token, "onProtocolEvent",
+            lifecycle("turnCompleted", "turn-overlap", ""));
+        gate.offer(token, "onProtocolEvent",
+            itemLifecycle("toolCompleted", "turn-overlap", "", "webSearch", null));
+
+        List<NativeRouteEventGate.Event> replay = gate.markReadyAndReplay(
+            token, Collections.emptySet(), "Answer\nsecond line");
+
+        // The started/completed assistant lifecycle is removed, while the mixed JSONL event is
+        // retained with only its proven-overlapping assistant line deleted.
+        assertEquals(3, replay.size());
+        assertEquals("onProtocolDelta", replay.get(0).function);
+        assertFalse(replay.get(0).value.contains("duplicate"));
+        assertTrue(replay.get(0).value.contains("reasoning stays"));
+        assertTrue(replay.get(0).value.contains("other turn stays"));
+        assertTrue(replay.get(0).value.contains("known item stays"));
+        assertTrue(replay.get(1).value.contains("turnCompleted"));
+        assertTrue(replay.get(2).value.contains("toolCompleted"));
+    }
+
+    @Test
+    public void legacyTailDoesNotFilterWithoutMatchingAuthoritativeCompletion() {
+        NativeRouteEventGate gate = new NativeRouteEventGate();
+        gate.resetRoute(51, "thread-a", false);
+        NativeRouteEventGate.RouteToken token = gate.captureRouteToken();
+        gate.offer(token, "onProtocolDelta",
+            protocolDelta("assistantDelta", "turn-a", "", "must remain"));
+        gate.offer(token, "onProtocolEvent",
+            itemLifecycle("assistantCompleted", "turn-a", "", "agentMessage", "Different"));
+
+        List<NativeRouteEventGate.Event> replay = gate.markReadyAndReplay(
+            token, Collections.emptySet(), "History tail");
+        assertEquals(2, replay.size());
+        assertTrue(replay.get(0).value.contains("must remain"));
+        assertTrue(replay.get(1).value.contains("Different"));
+    }
+
+    @Test
+    public void legacyTailDoesNotGuessWhenMatchingCompletionHasNoTurnId() {
+        NativeRouteEventGate gate = new NativeRouteEventGate();
+        gate.resetRoute(52, "thread-a", false);
+        NativeRouteEventGate.RouteToken token = gate.captureRouteToken();
+        gate.offer(token, "onProtocolDelta",
+            protocolDelta("assistantDelta", "", "", "must remain"));
+        gate.offer(token, "onProtocolEvent",
+            itemLifecycle("assistantCompleted", "", "", "agentMessage", "Same text"));
+
+        List<NativeRouteEventGate.Event> replay = gate.markReadyAndReplay(
+            token, Collections.emptySet(), "Same text");
+        assertEquals(2, replay.size());
+        assertTrue(replay.get(0).value.contains("must remain"));
+        assertTrue(replay.get(1).value.contains("Same text"));
+    }
+
     private static String delta(String itemId, String value) {
         return "{\"kind\":\"assistantDelta\",\"threadId\":\"thread-a\","
             + "\"itemId\":\"" + itemId + "\",\"delta\":\"" + value + "\"}\n";
+    }
+
+    private static String protocolDelta(String kind, String turnId, String itemId, String value) {
+        return "{\"kind\":" + org.json.JSONObject.quote(kind)
+            + ",\"threadId\":\"thread-a\",\"turnId\":" + org.json.JSONObject.quote(turnId)
+            + ",\"itemId\":" + org.json.JSONObject.quote(itemId)
+            + ",\"delta\":" + org.json.JSONObject.quote(value) + "}\n";
+    }
+
+    private static String lifecycle(String kind, String turnId, String itemId) {
+        return "{\"kind\":" + org.json.JSONObject.quote(kind)
+            + ",\"threadId\":\"thread-a\",\"turnId\":" + org.json.JSONObject.quote(turnId)
+            + ",\"itemId\":" + org.json.JSONObject.quote(itemId) + "}";
+    }
+
+    private static String itemLifecycle(String kind, String turnId, String itemId,
+                                        String itemType, String content) {
+        String item = "{\"type\":" + org.json.JSONObject.quote(itemType)
+            + (content == null ? "" : ",\"content\":" + org.json.JSONObject.quote(content))
+            + "}";
+        return "{\"kind\":" + org.json.JSONObject.quote(kind)
+            + ",\"threadId\":\"thread-a\",\"turnId\":" + org.json.JSONObject.quote(turnId)
+            + ",\"itemId\":" + org.json.JSONObject.quote(itemId)
+            + ",\"item\":" + item + "}";
     }
 }

@@ -10,7 +10,7 @@ import androidx.compose.runtime.setValue
  * into contradictory combinations while AnimatedContent or predictive back composes two pages.
  */
 internal enum class SettingsPage {
-    ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND,
+    ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND, TYPOGRAPHY,
     MCP, MCP_EDITOR, SKILLS,
     OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY,
     DEVELOPER, ABOUT,
@@ -21,7 +21,7 @@ internal val SettingsPage.navigationDepth: Int
         SettingsPage.ROOT -> 0
         SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
-        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER,
+        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
         SettingsPage.ABOUT -> 1
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE,
         SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR -> 2
@@ -37,7 +37,7 @@ internal val SettingsPage.previousPage: SettingsPage?
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
         SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
-        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER,
+        SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
         SettingsPage.ABOUT -> SettingsPage.ROOT
     }
 

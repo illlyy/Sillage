@@ -85,6 +85,44 @@ public class NativeCommandOutputStoreTest {
     }
 
     @Test
+    public void resolvesFailedStatusFromAuthoritativeCommandEvidence() throws Exception {
+        assertEquals("failed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject().put("status", "failed").put("exitCode", 0), "ok"));
+        assertEquals("failed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject().put("status", "completed").put("exit_code", 126), ""));
+        assertEquals("failed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject().put("status", "completed"),
+            "exec_command failed: Permission denied"));
+        assertEquals("failed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject(), "Exit code: 2\nWall time: 0.1 seconds\nOutput:\nmissing"));
+    }
+
+    @Test
+    public void ordinaryErrorTextDoesNotBecomeAFailedCommand() throws Exception {
+        assertEquals("completed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject(), "printed error: expected test fixture"));
+        assertEquals("completed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject(), "documentation example: exec_command failed: Permission denied"));
+        assertEquals("completed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject().put("exitCode", 0),
+            "exec_command failed appears in the command's own successful output"));
+        assertEquals("completed", NativeCommandOutputStore.resolvedCommandStatus(
+            new JSONObject(),
+            "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nwarning: Permission denied"));
+    }
+
+    @Test
+    public void compactionRepairsLegacySyntheticCompletedStatus() throws Exception {
+        JSONObject compact = new JSONObject(NativeCommandOutputStore.compactCommandItem(
+            new JSONObject()
+                .put("status", "completed")
+                .put("command", "restricted-command")
+                .put("aggregatedOutput", "exec_command failed: Permission denied")));
+
+        assertEquals("failed", compact.getString("status"));
+    }
+
+    @Test
     public void cacheEvictsOldStreamsWithinMemoryBudget() throws Exception {
         String output = repeated("z", 1024 * 1024);
         String firstReference = "";
