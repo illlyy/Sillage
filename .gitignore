@@ -38,6 +38,9 @@ ehthumbs.db
 Thumbs.db
 # Fcode private monorepo: local state and generated work directories
 /.tmp/
+
+# Internal project documentation, never uploaded to GitHub.
+/docs/
 *.log
 *.aab
 *.tar
