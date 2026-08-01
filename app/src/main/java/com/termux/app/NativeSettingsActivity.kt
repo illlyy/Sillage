@@ -680,7 +680,7 @@ class NativeSettingsActivity : ComponentActivity() {
                     }
                 }
                 when (dialog) {
-                    "language" -> ChoiceDialog(
+                    "language" -> SettingsChoiceDialog(
                         tr(lang, "选择语言", "Choose language"),
                         listOf("system" to tr(lang, "跟随系统", "System"), "zh" to "简体中文", "en" to "English"),
                         language, { dialog = null },
@@ -1416,7 +1416,7 @@ private fun OverlaySettingsPage(
     }
 
     selectedGesture?.let { setting ->
-        ChoiceDialog(
+        SettingsChoiceDialog(
             title = setting.title,
             options = overlayActionOptions(lang),
             selected = gestureValues[setting.key] ?: setting.fallback,
@@ -5305,7 +5305,7 @@ private fun EmptySettingsState(icon: ImageVector, title: String, body: String) {
 }
 
 @Composable
-private fun ChoiceDialog(title: String, options: List<Pair<String, String>>, selected: String, onDismiss: () -> Unit, onSelected: (String) -> Unit) {
+private fun SettingsChoiceDialog(title: String, options: List<Pair<String, String>>, selected: String, onDismiss: () -> Unit, onSelected: (String) -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss, title = { Text(title) },
         text = { Column {
