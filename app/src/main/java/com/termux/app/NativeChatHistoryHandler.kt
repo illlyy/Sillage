@@ -90,7 +90,7 @@ import org.json.JSONObject
                 var title = conversationTitleCache[task.threadId] ?: task.title
                 val fallbackTitle = title.startsWith("Codex 任务")
                 if (fallbackTitle) {
-                    val resolvedTitle = CodexAppServerBridge.resolveConversationTitle(task.threadId)
+                    val resolvedTitle = CodexAppServerBridgeHistory.resolveConversationTitle(task.threadId)
                     if (resolvedTitle.isNotBlank()) {
                         title = resolvedTitle
                         conversationTitleCache[task.threadId] = resolvedTitle

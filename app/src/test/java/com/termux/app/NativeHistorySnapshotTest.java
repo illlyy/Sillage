@@ -213,7 +213,7 @@ public class NativeHistorySnapshotTest {
             ),
             "[]", "", -1, 0, 0L, Collections.emptySet());
 
-        assertEquals("", CodexAppServerBridge.historyTailAssistantText(snapshot));
+        assertEquals("", CodexAppServerBridgeHistory.historyTailAssistantText(snapshot));
     }
 
     @Test
@@ -226,40 +226,40 @@ public class NativeHistorySnapshotTest {
             ),
             "[]", "", -1, 0, 0L, Collections.emptySet());
 
-        assertEquals("answer", CodexAppServerBridge.historyTailAssistantText(snapshot));
+        assertEquals("answer", CodexAppServerBridgeHistory.historyTailAssistantText(snapshot));
     }
 
     @Test
     public void sourceLessBlockingRequestRequiresTheCurrentTurnIdentity() throws Exception {
-        assertTrue(CodexAppServerBridge.hasVerifiableRequestRoute(
+        assertTrue(CodexAppServerBridgeProtocol.hasVerifiableRequestRoute(
             new JSONObject().put("turnId", "turn-current"), "turn-current"));
-        assertFalse(CodexAppServerBridge.hasVerifiableRequestRoute(
+        assertFalse(CodexAppServerBridgeProtocol.hasVerifiableRequestRoute(
             new JSONObject().put("turnId", "turn-old"), "turn-current"));
-        assertFalse(CodexAppServerBridge.hasVerifiableRequestRoute(new JSONObject(), "turn-current"));
-        assertTrue(CodexAppServerBridge.hasVerifiableRequestRoute(
+        assertFalse(CodexAppServerBridgeProtocol.hasVerifiableRequestRoute(new JSONObject(), "turn-current"));
+        assertTrue(CodexAppServerBridgeProtocol.hasVerifiableRequestRoute(
             new JSONObject().put("threadId", "thread-a"), "turn-current"));
     }
 
     @Test
     public void serverRequestRouteKeysPreserveJsonRpcIdType() {
-        assertFalse(CodexAppServerBridge.serverRequestRouteKey(1)
-            .equals(CodexAppServerBridge.serverRequestRouteKey("1")));
-        assertEquals(CodexAppServerBridge.serverRequestRouteKey(1),
-            CodexAppServerBridge.serverRequestRouteKey(Integer.valueOf(1)));
+        assertFalse(CodexAppServerBridgeProtocol.serverRequestRouteKey(1)
+            .equals(CodexAppServerBridgeProtocol.serverRequestRouteKey("1")));
+        assertEquals(CodexAppServerBridgeProtocol.serverRequestRouteKey(1),
+            CodexAppServerBridgeProtocol.serverRequestRouteKey(Integer.valueOf(1)));
     }
 
     @Test
     public void resolvedRequestIdentityCannotCrossThreadsOrTurns() throws Exception {
-        assertTrue(CodexAppServerBridge.requestRouteIdentityMatches(
+        assertTrue(CodexAppServerBridgeProtocol.requestRouteIdentityMatches(
             "thread-a", "turn-a", new JSONObject()
                 .put("threadId", "thread-a").put("turnId", "turn-a")));
-        assertFalse(CodexAppServerBridge.requestRouteIdentityMatches(
+        assertFalse(CodexAppServerBridgeProtocol.requestRouteIdentityMatches(
             "thread-a", "turn-a", new JSONObject()
                 .put("threadId", "thread-b").put("turnId", "turn-a")));
-        assertFalse(CodexAppServerBridge.requestRouteIdentityMatches(
+        assertFalse(CodexAppServerBridgeProtocol.requestRouteIdentityMatches(
             "thread-a", "turn-a", new JSONObject()
                 .put("threadId", "thread-a").put("turnId", "turn-b")));
-        assertFalse(CodexAppServerBridge.requestRouteIdentityMatches(
+        assertFalse(CodexAppServerBridgeProtocol.requestRouteIdentityMatches(
             "thread-a", "", new JSONObject().put("turnId", "turn-b")));
     }
 

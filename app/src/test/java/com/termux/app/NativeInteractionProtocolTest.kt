@@ -36,7 +36,7 @@ class NativeInteractionProtocolTest {
     @Test
     fun persistedImplementPlanPromptBecomesSyntheticDisplayMessage() {
         val plan = "## Steps\n\n- Add tests\n- Implement"
-        val normalized = CodexAppServerBridge.normalizeHistoricalUserText(
+        val normalized = CodexAppServerBridgeHistory.normalizeHistoricalUserText(
             "${CodexAppServerBridge.IMPLEMENT_PLAN_PROMPT_PREFIX}\n$plan",
         )
 

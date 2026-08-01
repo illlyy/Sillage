@@ -14,7 +14,7 @@ import org.junit.Test;
 public class CodexPlanHistoryTest {
     @Test
     public void proposedPlanSplitsFromSurroundingAssistantText() throws Exception {
-        JSONArray parts = CodexAppServerBridge.splitHistoricalAssistantContent(
+        JSONArray parts = CodexAppServerBridgeHistory.splitHistoricalAssistantContent(
             "Preface\n<proposed_plan>\n# Final plan\n\n- first\n- second\n</proposed_plan>\nPostscript");
 
         assertEquals(3, parts.length());
@@ -28,7 +28,7 @@ public class CodexPlanHistoryTest {
 
     @Test
     public void malformedPlanTagsCannotDisableMarkdownRendering() throws Exception {
-        JSONArray parts = CodexAppServerBridge.splitHistoricalAssistantContent(
+        JSONArray parts = CodexAppServerBridgeHistory.splitHistoricalAssistantContent(
             "<proposed_plan>\n# Plan\n- item");
 
         assertEquals(1, parts.length());
@@ -106,7 +106,7 @@ public class CodexPlanHistoryTest {
             StringBuilder content = new StringBuilder();
             for (JSONObject record : records) content.append(record).append('\n');
             Files.writeString(file, content.toString(), StandardCharsets.UTF_8);
-            return CodexAppServerBridge.readConversationHistory(file.toFile());
+            return CodexAppServerBridgeHistory.readConversationHistory(file.toFile());
         } finally {
             Files.deleteIfExists(file);
         }

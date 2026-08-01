@@ -545,7 +545,7 @@ public class CodexModelPipelineTest {
                     .put("multi_agent_version", "v2").put("multi_agent_mode", "proactive"))
                 .toString() + "\n");
         }
-        String diagnostic = CodexAppServerBridge.readTurnRuntimeDiagnostic(session, "turn-1");
+        String diagnostic = CodexAppServerBridgeHistory.readTurnRuntimeDiagnostic(session, "turn-1");
         assertNotNull(diagnostic);
         assertTrue(diagnostic.contains("effort=ultra"));
         assertTrue(diagnostic.contains("multiAgentVersion=v2"));
@@ -569,7 +569,7 @@ public class CodexModelPipelineTest {
                     .put("multi_agent_version", "v2").put("multi_agent_mode", "proactive"))
                 .toString() + "\n");
         }
-        String diagnostic = CodexAppServerBridge.readTurnRuntimeDiagnostic(session, "child-turn");
+        String diagnostic = CodexAppServerBridgeHistory.readTurnRuntimeDiagnostic(session, "child-turn");
         assertNotNull(diagnostic);
         assertTrue(diagnostic.contains("source=subagent(depth=1)"));
         assertFalse(diagnostic.contains("source=vscode"));
@@ -598,12 +598,12 @@ public class CodexModelPipelineTest {
     public void bridgeLogSummaryNeverIncludesPayloadOrSecrets() throws Exception {
         JSONObject message = new JSONObject().put("id", "request-1").put("result", new JSONObject()
             .put("apiKey", "secret-value").put("prompt", "private prompt"));
-        String summary = CodexAppServerBridge.messageSummary(message);
+        String summary = CodexAppServerBridgeProtocol.messageSummary(message);
         assertTrue(summary.contains("id=request-1"));
         assertTrue(summary.contains("result=true"));
         assertFalse(summary.contains("secret-value"));
         assertFalse(summary.contains("private prompt"));
-        String stderr = CodexAppServerBridge.redactSensitiveLogLine(
+        String stderr = CodexAppServerBridgeProtocol.redactSensitiveLogLine(
             "authorization: Bearer sk-supersecret123 api_key=another-secret");
         assertFalse(stderr.contains("sk-supersecret123"));
         assertFalse(stderr.contains("another-secret"));
@@ -617,7 +617,7 @@ public class CodexModelPipelineTest {
             .put("model_provider", "old");
         JSONObject request = new JSONObject().put("method", "thread/start")
             .put("params", new JSONObject().put("config", config));
-        CodexAppServerBridge.applyAndroidProviderOverrides(request);
+        CodexAppServerBridgeProtocol.applyAndroidProviderOverrides(request);
         JSONObject params = request.getJSONObject("params");
         assertEquals("ilyop_android", params.getString("modelProvider"));
         assertEquals("gpt-5.6-sol", config.getString("model"));
@@ -626,7 +626,7 @@ public class CodexModelPipelineTest {
 
         JSONObject turn = new JSONObject().put("method", "turn/start")
             .put("params", new JSONObject().put("model", "gpt-5.6-sol").put("effort", "high"));
-        CodexAppServerBridge.applyAndroidProviderOverrides(turn);
+        CodexAppServerBridgeProtocol.applyAndroidProviderOverrides(turn);
         assertEquals("high", turn.getJSONObject("params").getString("effort"));
     }
     @Test
@@ -733,31 +733,31 @@ public class CodexModelPipelineTest {
     public void finalAnswerClassificationDoesNotTreatCommentaryAsFinal() throws Exception {
         JSONObject params = new JSONObject().put("item", new JSONObject()
             .put("type", "agentMessage").put("phase", "commentary"));
-        assertTrue(CodexAppServerBridge.isAgentMessageItem(params));
-        assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+        assertTrue(CodexAppServerBridgeProtocol.isAgentMessageItem(params));
+        assertFalse(CodexAppServerBridgeProtocol.isFinalAgentMessage(params));
 
         params.getJSONObject("item").remove("phase");
-        assertTrue(CodexAppServerBridge.isAgentMessageItem(params));
-        assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+        assertTrue(CodexAppServerBridgeProtocol.isAgentMessageItem(params));
+        assertFalse(CodexAppServerBridgeProtocol.isFinalAgentMessage(params));
 
         params.getJSONObject("item").put("phase", "final_answer");
-        assertTrue(CodexAppServerBridge.isFinalAgentMessage(params));
+        assertTrue(CodexAppServerBridgeProtocol.isFinalAgentMessage(params));
 
         params.getJSONObject("item").put("type", "collabAgentToolCall");
-        assertFalse(CodexAppServerBridge.isAgentMessageItem(params));
-        assertFalse(CodexAppServerBridge.isFinalAgentMessage(params));
+        assertFalse(CodexAppServerBridgeProtocol.isAgentMessageItem(params));
+        assertFalse(CodexAppServerBridgeProtocol.isFinalAgentMessage(params));
     }
 
     @Test
     public void nestedThreadIdleStatusIsRecognizedWithoutMakingItATurnBoundary() throws Exception {
         JSONObject params = new JSONObject().put("threadId", "thread-1")
             .put("status", new JSONObject().put("type", "idle"));
-        assertTrue(CodexAppServerBridge.isIdleThreadStatus(params));
+        assertTrue(CodexAppServerBridgeProtocol.isIdleThreadStatus(params));
 
         params.getJSONObject("status").put("type", "active");
-        assertFalse(CodexAppServerBridge.isIdleThreadStatus(params));
-        assertFalse(CodexAppServerBridge.isIdleThreadStatus(new JSONObject().put("status", "idle")));
-        assertFalse(CodexAppServerBridge.isIdleThreadStatus(null));
+        assertFalse(CodexAppServerBridgeProtocol.isIdleThreadStatus(params));
+        assertFalse(CodexAppServerBridgeProtocol.isIdleThreadStatus(new JSONObject().put("status", "idle")));
+        assertFalse(CodexAppServerBridgeProtocol.isIdleThreadStatus(null));
     }
 
     @Test
@@ -775,7 +775,7 @@ public class CodexModelPipelineTest {
         assertEquals(8, restored.ultraConcurrentThreadLimit());
         assertEquals(11, restored.normalSubagentLimit);
 
-        String[] overrides = CodexAppServerBridge.agentConfigOverrides(7, 11);
+        String[] overrides = CodexAppServerBridgeProtocol.agentConfigOverrides(7, 11);
         assertArrayEquals(new String[]{
             "features.multi_agent_v2.enabled=false",
             "features.multi_agent_v2.max_concurrent_threads_per_session=8",
@@ -806,7 +806,7 @@ public class CodexModelPipelineTest {
             "suppress_unstable_features_warning=true",
             "features.multi_agent_v2.enabled=true",
             "features.multi_agent_v2.max_concurrent_threads_per_session=8"
-        }, CodexAppServerBridge.agentConfigOverrides(7, 11, true));
+        }, CodexAppServerBridgeProtocol.agentConfigOverrides(7, 11, true));
         StringBuilder v2Toml = new StringBuilder();
         CodexProviderStore.Profile.appendAgentConfig(v2Toml, v2Profile);
         assertTrue(v2Toml.toString().contains("enabled = true"));
@@ -1145,7 +1145,7 @@ public class CodexModelPipelineTest {
     @Test
     public void historicalSubagentActivityKeepsThreadIdentityAndWorkingState() throws Exception {
         String threadId = "019f6f24-83f6-70f2-80b6-0af81033832a";
-        JSONObject card = CodexAppServerBridge.historySubagentActivityCard(new JSONObject()
+        JSONObject card = CodexAppServerBridgeHistory.historySubagentActivityCard(new JSONObject()
             .put("type", "sub_agent_activity")
             .put("event_id", "call_52ab2f42")
             .put("agent_thread_id", threadId)
@@ -1161,7 +1161,7 @@ public class CodexModelPipelineTest {
 
     @Test
     public void spawnedAgentHistoryCardKeepsTaskAndCallIdentity() throws Exception {
-        JSONObject card = CodexAppServerBridge.historyToolCard(
+        JSONObject card = CodexAppServerBridgeHistory.historyToolCard(
             new JSONObject().put("id", "call_spawn_1").put("name", "spawn_agent")
                 .put("arguments", new JSONObject().put("task_name", "inspector")
                     .put("message", "Inspect the project")),
@@ -1206,7 +1206,7 @@ public class CodexModelPipelineTest {
                 writeRollout(writer, responseMessage("assistant", "inspection complete"));
             }
 
-            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            JSONArray history = CodexAppServerBridgeHistory.readConversationHistory(session);
             assertEquals(2, history.length());
             JSONObject activity = history.getJSONObject(0);
             assertEquals("activity", activity.getString("role"));
@@ -1251,7 +1251,7 @@ public class CodexModelPipelineTest {
                             .put("type", "input_text").put("text", "Exit code: 0\nOutput:\n/tmp\n")))));
             }
 
-            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            JSONArray history = CodexAppServerBridgeHistory.readConversationHistory(session);
             assertEquals(1, history.length());
             JSONObject activity = history.getJSONObject(0);
             assertEquals("activity", activity.getString("role"));
@@ -1268,11 +1268,11 @@ public class CodexModelPipelineTest {
 
     @Test
     public void historicalCommandCardInfersOnlyReliableFailureOutput() throws Exception {
-        JSONObject failed = CodexAppServerBridge.historyToolCard(
+        JSONObject failed = CodexAppServerBridgeHistory.historyToolCard(
             new JSONObject().put("name", "exec_command")
                 .put("arguments", new JSONObject().put("command", "restricted-command")),
             "exec_command failed: Permission denied");
-        JSONObject completed = CodexAppServerBridge.historyToolCard(
+        JSONObject completed = CodexAppServerBridgeHistory.historyToolCard(
             new JSONObject().put("name", "exec_command")
                 .put("arguments", new JSONObject().put("command", "render docs")),
             "Documentation example: exec_command failed with error");
@@ -1283,19 +1283,19 @@ public class CodexModelPipelineTest {
 
     @Test
     public void subagentRolloutStatusChangesOnlyAfterTaskComplete() throws Exception {
-        assertEquals("waiting", CodexAppServerBridge.subagentSessionStatus(null));
+        assertEquals("waiting", CodexAppServerBridgeProtocol.subagentSessionStatus(null));
         File session = File.createTempFile("subagent-status", ".jsonl");
         try {
             try (FileWriter writer = new FileWriter(session)) {
                 writer.write(new JSONObject().put("type", "event_msg")
                     .put("payload", new JSONObject().put("type", "task_started")).toString() + "\n");
             }
-            assertEquals("working", CodexAppServerBridge.subagentSessionStatus(session));
+            assertEquals("working", CodexAppServerBridgeProtocol.subagentSessionStatus(session));
             try (FileWriter writer = new FileWriter(session, true)) {
                 writer.write(new JSONObject().put("type", "event_msg")
                     .put("payload", new JSONObject().put("type", "task_complete")).toString() + "\n");
             }
-            assertEquals("done", CodexAppServerBridge.subagentSessionStatus(session));
+            assertEquals("done", CodexAppServerBridgeProtocol.subagentSessionStatus(session));
         } finally {
             assertTrue(session.delete() || !session.exists());
         }
@@ -1303,28 +1303,28 @@ public class CodexModelPipelineTest {
 
     @Test
     public void historicalReasoningDurationUsesRecordTimestamps() {
-        assertEquals(2L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, true));
-        assertEquals(1L, CodexAppServerBridge.historyReasoningDurationSeconds(0L, 0L, true));
-        assertEquals(0L, CodexAppServerBridge.historyReasoningDurationSeconds(1_000L, 3_500L, false));
+        assertEquals(2L, CodexAppServerBridgeHistory.historyReasoningDurationSeconds(1_000L, 3_500L, true));
+        assertEquals(1L, CodexAppServerBridgeHistory.historyReasoningDurationSeconds(0L, 0L, true));
+        assertEquals(0L, CodexAppServerBridgeHistory.historyReasoningDurationSeconds(1_000L, 3_500L, false));
     }
 
     @Test
     public void recordTimestampParserSupportsApi24CompatibleIsoForms() {
         assertEquals(java.time.Instant.parse("2026-07-22T10:20:30.123Z").toEpochMilli(),
-            CodexAppServerBridge.parseRecordTimestampMs("2026-07-22T10:20:30.123456Z"));
+            CodexAppServerBridgeHistory.parseRecordTimestampMs("2026-07-22T10:20:30.123456Z"));
         assertEquals(java.time.Instant.parse("2026-07-22T10:20:30.000+08:00").toEpochMilli(),
-            CodexAppServerBridge.parseRecordTimestampMs("2026-07-22T10:20:30+0800"));
-        assertEquals(0L, CodexAppServerBridge.parseRecordTimestampMs("not-a-timestamp"));
+            CodexAppServerBridgeHistory.parseRecordTimestampMs("2026-07-22T10:20:30+0800"));
+        assertEquals(0L, CodexAppServerBridgeHistory.parseRecordTimestampMs("not-a-timestamp"));
     }
 
     @Test
     public void nativeEventsOnlyTargetTheVisibleConversation() throws Exception {
         JSONObject a = new JSONObject().put("threadId", "thread-a");
         JSONObject b = new JSONObject().put("threadId", "thread-b");
-        assertTrue(CodexAppServerBridge.isVisibleThreadEvent(a, "thread-a"));
-        assertFalse(CodexAppServerBridge.isVisibleThreadEvent(b, "thread-a"));
-        assertFalse(CodexAppServerBridge.isVisibleThreadEvent(a, null));
-        assertTrue(CodexAppServerBridge.isVisibleThreadEvent(new JSONObject(), "thread-a"));
+        assertTrue(CodexAppServerBridgeProtocol.isVisibleThreadEvent(a, "thread-a"));
+        assertFalse(CodexAppServerBridgeProtocol.isVisibleThreadEvent(b, "thread-a"));
+        assertFalse(CodexAppServerBridgeProtocol.isVisibleThreadEvent(a, null));
+        assertTrue(CodexAppServerBridgeProtocol.isVisibleThreadEvent(new JSONObject(), "thread-a"));
     }
 
     @Test
@@ -1338,22 +1338,22 @@ public class CodexModelPipelineTest {
             .put("turnId", "child-turn")
             .put("item", new JSONObject().put("id", "command-1").put("type", "commandExecution"));
 
-        assertTrue(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+        assertTrue(CodexAppServerBridgeProtocol.shouldAcceptVisibleProtocolEvent(
             compaction, true, "thread-a", "primary-turn"));
-        assertTrue(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+        assertTrue(CodexAppServerBridgeProtocol.shouldAcceptVisibleProtocolEvent(
             new JSONObject().put("threadId", "thread-a").put("turnId", "compaction-turn"),
             true, "thread-a", "primary-turn", true));
-        assertFalse(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+        assertFalse(CodexAppServerBridgeProtocol.shouldAcceptVisibleProtocolEvent(
             command, true, "thread-a", "primary-turn"));
-        assertFalse(CodexAppServerBridge.shouldAcceptVisibleProtocolEvent(
+        assertFalse(CodexAppServerBridgeProtocol.shouldAcceptVisibleProtocolEvent(
             compaction, true, "thread-b", "primary-turn"));
     }
 
     @Test
     public void completedGoalIsRecognizedForAutomaticClear() throws Exception {
-        assertTrue(CodexAppServerBridge.isCompletedGoal(new JSONObject().put("status", "complete")));
-        assertFalse(CodexAppServerBridge.isCompletedGoal(new JSONObject().put("status", "active")));
-        assertFalse(CodexAppServerBridge.isCompletedGoal(null));
+        assertTrue(CodexAppServerBridgeProtocol.isCompletedGoal(new JSONObject().put("status", "complete")));
+        assertFalse(CodexAppServerBridgeProtocol.isCompletedGoal(new JSONObject().put("status", "active")));
+        assertFalse(CodexAppServerBridgeProtocol.isCompletedGoal(null));
     }
 
     @Test
@@ -1378,7 +1378,7 @@ public class CodexModelPipelineTest {
                 writeRollout(writer, responseMessage("assistant", "goal complete"));
             }
 
-            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            JSONArray history = CodexAppServerBridgeHistory.readConversationHistory(session);
 
             assertEquals(3, history.length());
             assertEquals("user", history.getJSONObject(0).getString("role"));
@@ -1400,7 +1400,7 @@ public class CodexModelPipelineTest {
                 writeRollout(writer, responseMessage("user", "legacy question"));
                 writeRollout(writer, responseMessage("assistant", "legacy answer"));
             }
-            JSONArray history = CodexAppServerBridge.readConversationHistory(session);
+            JSONArray history = CodexAppServerBridgeHistory.readConversationHistory(session);
             assertEquals(2, history.length());
             assertEquals("legacy question", history.getJSONObject(0).getString("content"));
             assertEquals("legacy answer", history.getJSONObject(1).getString("content"));
@@ -1414,8 +1414,8 @@ public class CodexModelPipelineTest {
         String prompt = "Continue the goal automatically.\n"
             + "<permissions instructions>secret</permissions instructions>\n"
             + "<skills_instructions>skills</skills_instructions>";
-        assertTrue(CodexAppServerBridge.isInjectedContextMessage(prompt));
-        assertFalse(CodexAppServerBridge.isInjectedContextMessage("please explain goal mode"));
+        assertTrue(CodexAppServerBridgeHistory.isInjectedContextMessage(prompt));
+        assertFalse(CodexAppServerBridgeHistory.isInjectedContextMessage("please explain goal mode"));
     }
 
     private static JSONObject responseMessage(String role, String text) throws Exception {

@@ -121,24 +121,24 @@ public class CodexAppServerCompactionTurnTest {
         JSONObject inProgress = new JSONObject().put("id", "turn").put("status", "inProgress");
         JSONObject completed = new JSONObject().put("id", "turn").put("status", "completed");
 
-        assertTrue(CodexAppServerBridge.isTurnStartObservation(
+        assertTrue(CodexAppServerBridgeProtocol.isTurnStartObservation(
             new JSONObject().put("method", "turn/started"), "turn/started", inProgress));
-        assertTrue(CodexAppServerBridge.isTurnStartObservation(
+        assertTrue(CodexAppServerBridgeProtocol.isTurnStartObservation(
             new JSONObject().put("id", 1).put("result", new JSONObject().put("turn", inProgress)),
             "", inProgress));
-        assertFalse(CodexAppServerBridge.isTurnStartObservation(
+        assertFalse(CodexAppServerBridgeProtocol.isTurnStartObservation(
             new JSONObject().put("method", "turn/completed"), "turn/completed", completed));
-        assertFalse(CodexAppServerBridge.isTurnStartObservation(
+        assertFalse(CodexAppServerBridgeProtocol.isTurnStartObservation(
             new JSONObject().put("id", 1).put("result", new JSONObject().put("turn", completed)),
             "", completed));
     }
 
     @Test
     public void completionCallbackCarriesStableIdentityAndContinuationState() throws Exception {
-        JSONObject params = CodexAppServerBridge.turnLifecycleParams(
+        JSONObject params = CodexAppServerBridgeProtocol.turnLifecycleParams(
             "thread", "turn", new JSONObject().put("status", "completed"));
         JSONObject payload = new JSONObject(
-            CodexAppServerBridge.turnLifecycleCallbackPayload(params, true));
+            CodexAppServerBridgeProtocol.turnLifecycleCallbackPayload(params, true));
 
         assertEquals("thread", payload.getString("threadId"));
         assertEquals("turn", payload.getString("turnId"));
@@ -156,8 +156,8 @@ public class CodexAppServerCompactionTurnTest {
 
         JSONObject auxiliary = completionParams("thread", "compact");
         JSONObject primary = completionParams("thread", "primary");
-        assertTrue(CodexAppServerBridge.isAuxiliaryCompactionTurnCompletion(tracker, auxiliary));
-        assertFalse(CodexAppServerBridge.isAuxiliaryCompactionTurnCompletion(tracker, primary));
+        assertTrue(CodexAppServerBridgeProtocol.isAuxiliaryCompactionTurnCompletion(tracker, auxiliary));
+        assertFalse(CodexAppServerBridgeProtocol.isAuxiliaryCompactionTurnCompletion(tracker, primary));
     }
 
     @Test
@@ -279,14 +279,14 @@ public class CodexAppServerCompactionTurnTest {
 
     @Test
     public void failedInterruptedAndCancelledStatusesAreAllFailures() throws Exception {
-        assertTrue(CodexAppServerBridge.turnFailed(completionParamsWithStatus("failed")));
-        assertTrue(CodexAppServerBridge.turnFailed(completionParamsWithStatus("interrupted")));
-        assertTrue(CodexAppServerBridge.turnFailed(completionParamsWithStatus("cancelled")));
-        assertTrue(CodexAppServerBridge.turnFailed(completionParamsWithStatus("canceled")));
-        assertFalse(CodexAppServerBridge.turnFailed(completionParamsWithStatus("completed")));
+        assertTrue(CodexAppServerBridgeProtocol.turnFailed(completionParamsWithStatus("failed")));
+        assertTrue(CodexAppServerBridgeProtocol.turnFailed(completionParamsWithStatus("interrupted")));
+        assertTrue(CodexAppServerBridgeProtocol.turnFailed(completionParamsWithStatus("cancelled")));
+        assertTrue(CodexAppServerBridgeProtocol.turnFailed(completionParamsWithStatus("canceled")));
+        assertFalse(CodexAppServerBridgeProtocol.turnFailed(completionParamsWithStatus("completed")));
         JSONObject errored = completionParamsWithStatus("completed");
         errored.getJSONObject("turn").put("error", new JSONObject().put("message", "boom"));
-        assertTrue(CodexAppServerBridge.turnFailed(errored));
+        assertTrue(CodexAppServerBridgeProtocol.turnFailed(errored));
     }
 
     @Test
