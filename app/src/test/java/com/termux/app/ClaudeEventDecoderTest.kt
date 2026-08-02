@@ -89,9 +89,10 @@ class ClaudeEventDecoderTest {
             "s1",
         )
         val request = events.first { it.first == "onUserInputRequest" }
-        val payload = JSONObject(request.second)
+        val payload = JSONObject(request.second).optJSONObject("params")
         assertEquals(toolUseId, payload.optString("toolUseId"))
         assertEquals("Choose a language", payload.optString("prompt"))
+        assertEquals(1, payload.optJSONArray("questions").length())
     }
 
     @Test

@@ -586,8 +586,11 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
             "onCompactionRpcResult" -> handleCompactionRpcResult(value)
             "onReady" -> {
                 // A late onReady from the previous conversation must not overwrite the
-                // goal/mode of the conversation the user has already selected.
-                if (currentThreadId != null && currentThreadId != value) return
+                // goal/mode of the conversation the user has already selected. The Claude
+                // bridge's session id is authoritative: a resume that failed on the CLI side
+                // starts a fresh session and the host must adopt it or stay unready forever.
+                val isClaudeBackend = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE
+                if (!isClaudeBackend && currentThreadId != null && currentThreadId != value) return
                 currentThreadId = value
                 chatState.currentThreadId = value
                 restoreGoalForThread(value)

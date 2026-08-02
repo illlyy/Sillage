@@ -147,7 +147,6 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             env.put("ANTHROPIC_API_KEY", apiKey);
             env.put("CLAUDE_CODE_ENTRYPOINT", "android-fcode");
             env.put("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
-            env.put("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1");
             if (!baseUrl.isEmpty()) env.put("ANTHROPIC_BASE_URL", baseUrl);
             if (configDir != null && !configDir.isEmpty()) env.put("CLAUDE_CONFIG_DIR", configDir);
             if (routeThroughMihomo) {
@@ -238,6 +237,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         String observed = decoder.observeSession(message);
         if (observed != null && !observed.isEmpty() && sessionId == null) {
             sessionId = observed;
+            ready = true;
             emit("onReady", observed);
             restoreClientGoal(observed);
             decoder.reset(observed);
@@ -262,35 +262,41 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             String toolUseId = request.optString("tool_use_id");
             String toolName = request.optString("tool_name", request.optString("title"));
             pendingApprovalToolUseIds.put(requestId, toolUseId);
+            boolean isCommand = "Bash".equals(toolName) || "Shell".equals(toolName) || "bash".equals(toolName);
+            JSONObject input = request.optJSONObject("input");
             JSONObject params = new JSONObject()
                 .put("threadId", visibleThreadId())
                 .put("requestId", requestId)
-                .put("tool_name", toolName)
                 .put("tool_use_id", toolUseId)
-                .put("input", request.opt("input"))
-                .put("message", request.optString("message"))
+                .put("tool_name", toolName)
+                .put("method", isCommand ? "execCommandApproval" : "toolApproval")
+                .put("command", input == null ? "" : input.optString("command", input.optString("cmd")))
+                .put("cwd", input == null ? "" : input.optString("cwd"))
+                .put("reason", request.optString("message"))
                 .put("title", request.optString("title", toolName))
+                .put("input", input == null ? JSONObject.NULL : input)
+                .put("message", request.optString("message"))
                 .put("description", request.optString("description"));
             emit("onApprovalRequest", params.toString());
         } else if ("hook_callback".equals(subtype)) {
-            respondControl(requestId, new JSONObject()
-                .put("subtype", "success")
-                .put("response", new JSONObject().put("continue", true)));
+            respondControl(requestId, new JSONObject().put("continue", true));
         } else if ("mcp_message".equals(subtype)) {
-            respondControl(requestId, new JSONObject()
-                .put("subtype", "error")
-                .put("error", "mcp_message not supported"));
+            respondControl(requestId, new JSONObject().put("error", "mcp_message not supported"));
         } else if ("interrupt".equals(subtype)) {
-            respondControl(requestId, new JSONObject().put("subtype", "success").put("response", new JSONObject()));
+            respondControl(requestId, new JSONObject());
         }
     }
 
     private void respondControl(String requestId, JSONObject responseBody) {
         try {
+            // The CLI correlates by request_id inside the nested response object.
             JSONObject response = new JSONObject()
                 .put("type", "control_response")
                 .put("request_id", requestId)
-                .put("response", responseBody);
+                .put("response", new JSONObject()
+                    .put("subtype", "success")
+                    .put("request_id", requestId)
+                    .put("response", responseBody));
             writeLine(response.toString());
         } catch (Exception e) {
             Log.w(TAG, "control response failed", e);
@@ -378,7 +384,9 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     @Override
     int steerMessage(String text, String attachmentsJson, String skillsJson) {
         sendMessage(text, "", "", "", "default", "");
-        return 0;
+        // Claude has no steer-result correlation; the host registers a fixed key that is
+        // never resolved (no onSteerResult), which is harmless and keeps the submit path intact.
+        return 1;
     }
 
     @Override
@@ -398,8 +406,12 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
 
     @Override
     int resumeConversation(String resumeThreadId) {
-        if (this.resumeThreadId.equals(resumeThreadId) && ready) return 0;
-        this.resumeThreadId = resumeThreadId == null ? "" : resumeThreadId;
+        String target = resumeThreadId == null ? "" : resumeThreadId;
+        // The process is already starting (or running) with this resume id: the attach path
+        // passes the retained thread at spawn, and ChatActivity calls resumeConversation
+        // again right after attach. Avoid a second spawn.
+        if (this.resumeThreadId.equals(target) && process != null) return 0;
+        this.resumeThreadId = target;
         spawn();
         return 0;
     }
@@ -560,9 +572,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             JSONObject body = new JSONObject()
                 .put("behavior", allow ? "allow" : "deny");
             if (!allow) body.put("message", "User rejected this tool call");
-            respondControl(requestId, new JSONObject()
-                .put("subtype", "success")
-                .put("response", body));
+            respondControl(requestId, body);
             pendingApprovalToolUseIds.remove(requestId);
         } catch (Exception e) {
             Log.w(TAG, "approval response failed", e);
@@ -606,7 +616,10 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     // ------------------------------------------------------------------ misc
 
     @Override
-    void compactThread() { /* Claude auto-compacts; nothing to do */ }
+    void compactThread() {
+        // Claude auto-compacts; report an immediate no-op completion so the UI never spins.
+        emit("onCompactStatus", "completed");
+    }
 
     @Override
     void compactThread(String nativeRequestId) { compactThread(); }

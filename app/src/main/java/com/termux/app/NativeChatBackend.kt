@@ -263,7 +263,6 @@ internal data class NativeBackendStartRequest(
         val retainedThread = notificationTargetThreadId.takeIf { it.isNotBlank() }
             ?: ClaudeNativeRuntime.currentThreadId()?.takeIf { it.isNotBlank() }
             ?: currentThreadId?.takeIf { it.isNotBlank() }
-        val bridgeWasRecreated = !ClaudeNativeRuntime.exists()
         bridge = ClaudeNativeRuntime.attach(
             this,
             this,
@@ -278,7 +277,9 @@ internal data class NativeBackendStartRequest(
             retainedThread.orEmpty(),
             routeThroughMihomo,
         )
-        if (!retainedThread.isNullOrBlank() && !bridgeWasRecreated) {
+        if (!retainedThread.isNullOrBlank()) {
+            // The bridge restarts internally when the target differs from its current session;
+            // this call always re-wires the UI state (loading route, history snapshot).
             resumeConversation(retainedThread, retainedRuntime = retainedRuntime)
         }
     }

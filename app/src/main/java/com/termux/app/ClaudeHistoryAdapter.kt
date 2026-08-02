@@ -34,7 +34,8 @@ internal object ClaudeHistoryAdapter {
             scanned++
             val sessionId = readSessionId(file) ?: continue
             val title = resolveTitle(file, sessionId)
-                .ifBlank { file.parentFile?.name ?: "Claude 会话" }
+                .ifBlank { firstUserPrompt(file, sessionId) }
+                .ifBlank { "Claude 会话" }
             val project = readProjectPath(file)
             result.add(
                 NativeConversation(
@@ -162,7 +163,7 @@ internal object ClaudeHistoryAdapter {
                     val line = reader.readLine() ?: break
                     if (line.isBlank()) continue
                     val entry = runCatching { JSONObject(line) }.getOrNull() ?: continue
-                    val cwd = entry.optString("cwd").ifBlank { entry.optString("cwd", "") }
+                    val cwd = entry.optString("cwd")
                     if (cwd.isNotBlank() && cwd != "null") return cwd
                 }
             }
@@ -186,6 +187,25 @@ internal object ClaudeHistoryAdapter {
             }
             if (title.isNotBlank()) return title.take(MAX_TITLE_CHARS)
         }
+        return ""
+    }
+
+    /** Lightweight AI title fallback: the first user prompt, truncated. */
+    private fun firstUserPrompt(file: File, sessionId: String): String {
+        try {
+            file.bufferedReader(Charsets.UTF_8).use { reader ->
+                var count = 0
+                while (count++ < 2000) {
+                    val line = reader.readLine() ?: break
+                    if (line.isBlank()) continue
+                    val entry = runCatching { JSONObject(line) }.getOrNull() ?: continue
+                    if (entry.optString("type") != "user") continue
+                    if (!entry.optString("sessionId").equals(sessionId, ignoreCase = true)) continue
+                    val text = extractText(entry.optJSONObject("message"))
+                    if (text.isNotBlank()) return text.trim().replace(Regex("\\s+"), " ").take(MAX_TITLE_CHARS)
+                }
+            }
+        } catch (ignored: Exception) {}
         return ""
     }
 

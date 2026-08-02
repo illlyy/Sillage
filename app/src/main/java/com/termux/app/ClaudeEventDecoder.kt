@@ -30,6 +30,9 @@ internal class ClaudeEventDecoder(
     /** thinking block accumulation (for ReasoningCompleted) */
     private var thinkingBuffer: StringBuilder? = null
 
+    /** content block index of the active thinking block, -1 when none */
+    private var activeThinkingIndex = -1
+
     /** text block accumulation for final assistant message fallback */
     private var textBuffer: StringBuilder? = null
 
@@ -49,6 +52,7 @@ internal class ClaudeEventDecoder(
         surfacedToolUses.clear()
         surfacedToolResults.clear()
         thinkingBuffer = null
+        activeThinkingIndex = -1
         textBuffer = null
         activeTurnId = ""
     }
@@ -76,7 +80,12 @@ internal class ClaudeEventDecoder(
     private fun decodeSystem(line: JSONObject) {
         when (line.optString("subtype")) {
             "init" -> Unit // capabilities negotiated by the bridge; no UI event needed
-            "compact_boundary" -> emit("onCompactStatus", "started")
+            "compact_boundary" -> {
+                // Claude compaction is instantaneous at the boundary; emit the full
+                // started -> completed pair so the UI never leaves a spinning capsule.
+                emit("onCompactStatus", "started")
+                emit("onCompactStatus", "completed")
+            }
             "permission_denied" -> {
                 val tool = line.optString("tool_name", line.optString("toolName"))
                 val message = line.optString("message").ifBlank { "工具调用被拒绝：$tool" }
@@ -99,7 +108,10 @@ internal class ClaudeEventDecoder(
             "content_block_start" -> {
                 val block = event.optJSONObject("content_block") ?: return
                 when (block.optString("type")) {
-                    "thinking" -> thinkingBuffer = StringBuilder()
+                    "thinking" -> {
+                        thinkingBuffer = StringBuilder()
+                        activeThinkingIndex = event.optInt("index", -1)
+                    }
                     "text" -> textBuffer = StringBuilder()
                     "tool_use" -> observeToolBlock(event.optInt("index", -1), block)
                     else -> Unit
@@ -129,7 +141,15 @@ internal class ClaudeEventDecoder(
             }
             "content_block_stop" -> {
                 val index = event.optInt("index", -1)
-                val blockId = pendingToolIdForIndex(index) ?: return
+                // Thinking blocks seal the reasoning panel when their block ends.
+                if (index == activeThinkingIndex) {
+                    thinkingBuffer?.let { buffer ->
+                        val full = buffer.toString()
+                        if (full.isNotBlank()) emit("onReasoningComplete", full)
+                    }
+                    thinkingBuffer = null
+                    activeThinkingIndex = -1
+                }
                 pendingToolIdForIndex(index)?.let { id ->
                     val input = runCatching {
                         JSONObject(pendingToolInputs.remove(id)?.toString().orEmpty())
@@ -229,11 +249,12 @@ internal class ClaudeEventDecoder(
                 val questions = input.optJSONArray("questions") ?: JSONArray()
                 val first = questions.optJSONObject(0) ?: JSONObject()
                 emit("onUserInputRequest", JSONObject()
-                    .put("requestId", id)
-                    .put("threadId", thread())
-                    .put("toolUseId", id)
-                    .put("prompt", first.optString("question", input.toString()))
-                    .put("questions", questions)
+                    .put("params", JSONObject()
+                        .put("threadId", thread())
+                        .put("requestId", id)
+                        .put("toolUseId", id)
+                        .put("prompt", first.optString("question", input.toString()))
+                        .put("questions", questions))
                     .toString())
             }
             "ExitPlanMode" -> {
@@ -274,6 +295,7 @@ internal class ClaudeEventDecoder(
         val turnId = activeTurnId.ifBlank { sessionId }
         val failed = isError
         thinkingBuffer = null
+        activeThinkingIndex = -1
         textBuffer = null
         emit("onTurnComplete", JSONObject()
             .put("threadId", thread())
@@ -297,6 +319,7 @@ internal class ClaudeEventDecoder(
         surfacedToolUses.clear()
         surfacedToolResults.clear()
         thinkingBuffer = null
+        activeThinkingIndex = -1
         textBuffer = null
     }
 }
