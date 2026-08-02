@@ -126,6 +126,7 @@ class NativeSettingsActivity : ComponentActivity() {
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         applyNativeStatusBarVisibility(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false))
         val providerStore = CodexProviderStore(prefs)
+        val claudeStore = ClaudeProviderStore(prefs)
         setContent {
             val navigator = remember { NativeSettingsNavigator() }
             val settingsScope = rememberCoroutineScope()
@@ -138,6 +139,8 @@ class NativeSettingsActivity : ComponentActivity() {
             var predictiveBackHandoff by remember { mutableStateOf(false) }
             var suppressNextPageTransition by remember { mutableStateOf(false) }
             var providerRevision by remember { mutableIntStateOf(0) }
+            var backendRevision by remember { mutableIntStateOf(0) }
+            var editingClaudeProfile by remember { mutableStateOf<ClaudeProfile?>(null) }
             val providerSnapshot = remember(providerRevision) { providerStore.snapshot() }
             var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
             var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
@@ -454,6 +457,35 @@ class NativeSettingsActivity : ComponentActivity() {
                                     providerRevision++
                                 }
                             },
+                            backendType = NativeBackendType.current(prefs),
+                            onBackendChange = { type ->
+                                NativeBackendType.set(prefs, type)
+                                backendRevision++
+                            },
+                            claudeProfiles = claudeStore.profiles(),
+                            activeClaudeId = claudeStore.active()?.id,
+                            claudeRevision = backendRevision,
+                            onClaudeAdd = { editingClaudeProfile = ClaudeProfile(id = java.util.UUID.randomUUID().toString(), name = "", apiKey = "") },
+                            onClaudeEdit = { editingClaudeProfile = claudeStore.find(it) },
+                            onClaudeSave = { profile ->
+                                settingsScope.launch {
+                                    withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.save(profile) }
+                                    backendRevision++
+                                }
+                            },
+                            onClaudeActivate = { id ->
+                                settingsScope.launch {
+                                    withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.activate(id) }
+                                    backendRevision++
+                                }
+                            },
+                            onClaudeDelete = { id ->
+                                settingsScope.launch {
+                                    withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.delete(id) }
+                                    backendRevision++
+                                }
+                            },
+                            claudeInstalled = ClaudeInstaller.isInstalled(),
                         )
                         SettingsPage.MODEL_EDITOR -> key(editingProfileId, providerRevision) {
                             ModelConfigurationEditor(
@@ -675,6 +707,27 @@ class NativeSettingsActivity : ComponentActivity() {
                                     CodexDependentFeature.SETUP -> Unit
                                 }
                             }
+                        },
+                    )
+                }
+                editingClaudeProfile?.let { profile ->
+                    ClaudeProfileEditorDialog(
+                        lang = lang,
+                        initial = profile,
+                        onDismiss = { editingClaudeProfile = null },
+                        onSave = { saved ->
+                            settingsScope.launch {
+                                withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.save(saved) }
+                                backendRevision++
+                            }
+                            editingClaudeProfile = null
+                        },
+                        onDelete = { id ->
+                            settingsScope.launch {
+                                withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.delete(id) }
+                                backendRevision++
+                            }
+                            editingClaudeProfile = null
                         },
                     )
                 }

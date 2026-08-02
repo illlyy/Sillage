@@ -28,13 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** Direct JSONL bridge to `codex app-server --stdio`; no Node.js or external Termux required. */
-final class CodexAppServerBridge {
+final class CodexAppServerBridge extends NativeBackendBridge {
     static final String IMPLEMENT_PLAN_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:";
     static final String IMPLEMENT_PLAN_DISPLAY_PREFIX = "IMPLEMENT_PLAN|";
-    interface EventListener {
-        void onEvent(String function, String value);
-        void onHistoryPrepared(String threadId, int generation, NativeHistorySnapshot snapshot);
-    }
 
     static final String TAG = "IlyopCodexBridge";
     static final java.util.regex.Pattern RECORD_TIMESTAMP_PATTERN = java.util.regex.Pattern.compile(
@@ -42,7 +38,7 @@ final class CodexAppServerBridge {
     private final Context appContext;
     private volatile WeakReference<Activity> activityRef;
     private final WebView webView;
-    private volatile EventListener eventListener;
+    private volatile NativeBackendBridge.EventListener eventListener;
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final Map<String, Long> turnStartedAtMs = new ConcurrentHashMap<>();
     /** Main conversation turns whose normalized start lifecycle was already emitted. */
@@ -410,7 +406,7 @@ final class CodexAppServerBridge {
         this.eventListener = null;
     }
 
-    CodexAppServerBridge(Activity activity, EventListener eventListener) {
+    CodexAppServerBridge(Activity activity, NativeBackendBridge.EventListener eventListener) {
         this.appContext = activity.getApplicationContext();
         this.activityRef = new WeakReference<>(activity);
         this.webView = null;
@@ -419,12 +415,12 @@ final class CodexAppServerBridge {
 
     void setDesktopBridge(CodexDesktopBridge bridge) { this.desktopBridge = bridge; }
 
-    void rebind(Activity activity, EventListener listener) {
+    void rebind(Activity activity, NativeBackendBridge.EventListener listener) {
         if (activity != null) this.activityRef = new WeakReference<>(activity);
         this.eventListener = listener;
     }
 
-    void detach(EventListener listener) {
+    void detach(NativeBackendBridge.EventListener listener) {
         if (this.eventListener != listener) return;
         this.eventListener = null;
         Activity boundActivity = boundActivity();
@@ -2818,11 +2814,11 @@ final class CodexAppServerBridge {
     private void dispatchNativeEvent(String function, String value,
                                      NativeRouteEventGate.RouteToken routeToken) {
         if (routeToken == null) {
-            EventListener listener = eventListener;
+            NativeBackendBridge.EventListener listener = eventListener;
             if (listener != null) listener.onEvent(function, value);
             return;
         }
-        EventListener listener;
+        NativeBackendBridge.EventListener listener;
         synchronized (nativeRouteDeliveryLock) {
             if (!nativeRouteEventGate.isCurrent(routeToken)) return;
             listener = eventListener;

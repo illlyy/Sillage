@@ -51,6 +51,24 @@ internal data class NativeBackendStartRequest(
     internal fun CodexChatActivity.isCodexCliInstalled(): Boolean =
         File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex").canExecute()
 
+    internal fun CodexChatActivity.isBackendCliInstalled(): Boolean {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        return if (NativeBackendType.current(prefs) == NativeBackendType.CLAUDE) {
+            File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "claude").canExecute()
+        } else {
+            isCodexCliInstalled()
+        }
+    }
+
+    internal fun CodexChatActivity.backendRuntimeExists(): Boolean {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        return if (NativeBackendType.current(prefs) == NativeBackendType.CLAUDE) {
+            ClaudeNativeRuntime.exists()
+        } else {
+            CodexNativeRuntime.exists()
+        }
+    }
+
     internal fun CodexChatActivity.maybeOfferCodexInstallOnFirstLaunch() {
         if (isCodexCliInstalled() || isFinishing || isDestroyed) return
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
@@ -98,6 +116,10 @@ internal data class NativeBackendStartRequest(
         // Catalog writes themselves are serialized, so the newest valid request always wins.
         val generation = ++backendStartGeneration
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        if (NativeBackendType.current(prefs) == NativeBackendType.CLAUDE) {
+            startClaudeBackend(generation, preferConfiguredDefault)
+            return
+        }
         val configuration = preparedConfiguration ?: currentBackendConfiguration(prefs)
         val profile = configuration.profile
 
@@ -189,6 +211,83 @@ internal data class NativeBackendStartRequest(
                 retainedRuntime = retainedRuntime && !bridgeWasRecreated,
             )
         }
+    }
+
+    /** Claude backend: attach via ClaudeNativeRuntime; the Claude bridge shares the same events. */
+    internal fun CodexChatActivity.startClaudeBackend(
+        generation: Int,
+        preferConfiguredDefault: Boolean = false,
+    ) {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        backendConfigurationLoaded = true
+        pendingBackendConfigurationReload = false
+        activeProfileId = ""
+        val store = ClaudeProviderStore(prefs)
+        val profile = store.active()
+        val claudeBin = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "claude")
+        if (profile == null) {
+            if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
+            bridge = null
+            chatState.ready = false
+            chatState.addError("没有可用的 Claude API 配置，请先返回首页在设置中创建。")
+            return
+        }
+        if (!claudeBin.canExecute()) {
+            if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
+            bridge = null
+            chatState.ready = false
+            chatState.addError("Claude CLI 尚未安装，请先返回首页在设置中下载。")
+            return
+        }
+        val model = profile.model.ifBlank { ClaudeProfile.DEFAULT_MODEL }
+        chatState.modelOptions.clear()
+        chatState.modelOptions.add(NativeModelOption(id = model, name = model, efforts = listOf("none"), defaultEffort = "none"))
+        chatState.selectedModel = model
+        chatState.modelLabel = model
+        chatState.selectedEffort = "none"
+        chatState.connectionLabel = "正在连接 Claude…"
+        chatState.ready = false
+
+        val permissionMode = NativePermissionMode.normalize(
+            prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS),
+        )
+        val claudePermissionMode = when (permissionMode) {
+            NativePermissionMode.READ_ONLY -> "plan"
+            NativePermissionMode.WORKSPACE -> "acceptEdits"
+            else -> "bypassPermissions"
+        }
+        val fingerprint = listOf(profile.apiKey, profile.baseUrl, model, claudePermissionMode).joinToString("\n")
+        val configDir = File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".claude").absolutePath
+        val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false)
+        val retainedRuntime = ClaudeNativeRuntime.exists()
+        val retainedThread = notificationTargetThreadId.takeIf { it.isNotBlank() }
+            ?: ClaudeNativeRuntime.currentThreadId()?.takeIf { it.isNotBlank() }
+            ?: currentThreadId?.takeIf { it.isNotBlank() }
+        val bridgeWasRecreated = !ClaudeNativeRuntime.exists()
+        bridge = ClaudeNativeRuntime.attach(
+            this,
+            this,
+            fingerprint,
+            claudeBin.absolutePath,
+            configDir,
+            profile.apiKey,
+            profile.baseUrl,
+            model,
+            claudePermissionMode,
+            allowedClaudeTools(permissionMode),
+            retainedThread.orEmpty(),
+            routeThroughMihomo,
+        )
+        if (!retainedThread.isNullOrBlank() && !bridgeWasRecreated) {
+            resumeConversation(retainedThread, retainedRuntime = retainedRuntime)
+        }
+    }
+
+    /** Claude tool allow-list for non-bypass permission modes; read-only gets a minimal set. */
+    internal fun CodexChatActivity.allowedClaudeTools(permissionMode: String): String = when (permissionMode) {
+        NativePermissionMode.READ_ONLY -> "Read,Grep,Glob,Bash(ls:*),Bash(cat:*),Bash(find:*),Bash(pwd:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),WebFetch,WebSearch"
+        NativePermissionMode.WORKSPACE -> "Read,Grep,Glob,WebFetch,WebSearch,Bash(ls:*),Bash(pwd:*),Bash(mkdir:*),Bash(cp:*),Bash(mv:*),Bash(rm:*),Bash(echo:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git branch:*),Bash(git checkout:*),Bash(git stash:*)"
+        else -> ""
     }
 
     internal fun CodexChatActivity.reloadProviderConfigurationIfChanged() {

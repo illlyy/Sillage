@@ -137,7 +137,7 @@ internal object NativeTurnCompletionDrainGate {
 }
 
 
-class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListener {
+class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener {
 
 
     companion object {
@@ -194,7 +194,7 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
 
     internal val compactionLifecycleTimeouts = HashMap<String, Runnable>()
 
-    internal var bridge: CodexAppServerBridge? = null
+    internal var bridge: NativeBackendBridge? = null
 
     internal val pendingNativeSteers = mutableMapOf<Int, PendingNativeSteer>()
 
@@ -555,16 +555,17 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
                     if (isFinishing || isDestroyed) return@post
                     runtimeStartAttempted = true
                     refreshConversations()
-                    if (isCodexCliInstalled()) {
+                    if (isBackendCliInstalled()) {
                         startBackend()
                     } else {
                         chatState.ready = false
-                        chatState.connectionLabel = nativeText(
-                            nativeLanguage,
-                            "Codex CLI 尚未安装",
-                            "Codex CLI is not installed",
-                        )
-                        maybeOfferCodexInstallOnFirstLaunch()
+                        val isClaude = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE
+                        chatState.connectionLabel = if (isClaude) {
+                            nativeText(nativeLanguage, "Claude CLI 尚未安装", "Claude CLI is not installed")
+                        } else {
+                            nativeText(nativeLanguage, "Codex CLI 尚未安装", "Codex CLI is not installed")
+                        }
+                        if (!isClaude) maybeOfferCodexInstallOnFirstLaunch()
                     }
                 }
             }
@@ -1027,9 +1028,9 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         // The WebUI intentionally takes exclusive ownership of the Codex backend. When its
         // host finishes, this Activity is still in the back stack with a reference to the old,
         // stopped bridge; rebuild it before accepting another native turn.
-        if (runtimeStartAttempted && !backendConfigurationLoaded && isCodexCliInstalled()) {
+        if (runtimeStartAttempted && !backendConfigurationLoaded && isBackendCliInstalled()) {
             startBackend(preferConfiguredDefault = true)
-        } else if (backendConfigurationLoaded && bridge != null && !CodexNativeRuntime.exists()) {
+        } else if (backendConfigurationLoaded && bridge != null && !backendRuntimeExists()) {
             bridge = null
             startBackend()
         } else {
@@ -1077,7 +1078,11 @@ class CodexChatActivity : ComponentActivity(), CodexAppServerBridge.EventListene
         persistLifecycleHandoffBeforeDetach()
         streamHandler.removeCallbacksAndMessages(null)
         getSharedPreferences("codex_mobile", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(taskPreferenceListener)
-        CodexNativeRuntime.detach(this)
+        if (NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE) {
+            ClaudeNativeRuntime.detach(this)
+        } else {
+            CodexNativeRuntime.detach(this)
+        }
         bridge = null
         super.onDestroy()
     }

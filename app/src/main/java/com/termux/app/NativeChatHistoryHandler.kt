@@ -42,6 +42,10 @@ import org.json.JSONObject
     internal fun CodexChatActivity.refreshConversations() {
         val generation = ++conversationRefreshGeneration
         android.util.Log.d("IlyopCodexTasks", "refresh generation=$generation")
+        if (NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE) {
+            refreshClaudeConversations(generation)
+            return
+        }
         val favorites = favoriteThreadIds()
         val snapshot = CodexTaskStore.current(this)
         val registeredProjectPaths = NativeDrawerProjectStore.registered(this).map(NativeDrawerProject::path)
@@ -106,8 +110,15 @@ import org.json.JSONObject
         }.apply { name = "CodexConversationMetadata" }.start()
     }
 
-    internal fun CodexChatActivity.applyConversationSnapshot(generation: Int, conversations: List<NativeConversation>) {
-        runOnUiThread {
+    /** Claude backend: conversations come from the transcript scan instead of the task store. */
+    internal fun CodexChatActivity.refreshClaudeConversations(generation: Int) {
+        Thread {
+            val conversations = ClaudeHistoryAdapter.listConversations(this)
+            applyConversationSnapshot(generation, conversations)
+        }.apply { name = "ClaudeConversationScan" }.start()
+    }
+
+    internal fun CodexChatActivity.applyConversationSnapshot(generation: Int, conversations: List<NativeConversation>) {        runOnUiThread {
             if (generation != conversationRefreshGeneration || isFinishing || isDestroyed) return@runOnUiThread
             android.util.Log.d("IlyopCodexTasks", "apply generation=$generation count=${conversations.size} first=${conversations.firstOrNull()?.title}")
             chatState.conversations.clear()
@@ -266,11 +277,27 @@ import org.json.JSONObject
             chatState.processingLabel = nativeText(nativeLanguage, "\u4efb\u52a1\u672a\u5b8c\u6210", "Task incomplete")
         }
         chatState.ready = false
-        chatState.connectionLabel = "\u6b63\u5728\u6062\u590d\u5bf9\u8bdd\u2026"
-        expectedHistoryGeneration = if (retainedRuntime) {
+        chatState.connectionLabel = "正在恢复对话…"
+        val isClaude = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE
+        expectedHistoryGeneration = if (isClaude) {
+            bridge?.resumeConversation(threadId) ?: -1
+        } else if (retainedRuntime) {
             bridge?.restoreRetainedConversation(threadId) ?: -1
         } else {
             bridge?.resumeConversation(threadId) ?: -1
+        }
+        if (isClaude) {
+            // Claude has no onHistoryPrepared; load a lightweight transcript snapshot instead.
+            val routeGeneration = expectedHistoryGeneration
+            Thread {
+                val snapshot = ClaudeHistoryAdapter.loadSnapshot(this, threadId)
+                if (snapshot == null) return@Thread
+                runOnUiThread {
+                    if (currentThreadId != threadId || expectedHistoryGeneration != routeGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                    applyPreparedHistory(threadId, snapshot, fresh = true)
+                }
+            }.apply { name = "ClaudeHistoryLoad" }.start()
+            return
         }
         if (cachedHistory != null) {
             val routeGeneration = expectedHistoryGeneration

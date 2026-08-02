@@ -88,6 +88,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.ArrowLeft01
 import me.rerere.hugeicons.stroke.ArrowRight01
+import me.rerere.hugeicons.stroke.Download04
 import me.rerere.hugeicons.stroke.Code
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Folder01
@@ -113,23 +114,305 @@ internal fun ModelConfigurationsPage(
     onAdd: () -> Unit,
     onEdit: (String) -> Unit,
     onActivate: (CodexProviderStore.Profile) -> Unit,
+    backendType: NativeBackendType = NativeBackendType.CODEX,
+    onBackendChange: (NativeBackendType) -> Unit = {},
+    claudeProfiles: List<ClaudeProfile> = emptyList(),
+    activeClaudeId: String? = null,
+    claudeRevision: Int = 0,
+    onClaudeAdd: () -> Unit = {},
+    onClaudeEdit: (String) -> Unit = {},
+    onClaudeSave: (ClaudeProfile) -> Unit = {},
+    onClaudeActivate: (String) -> Unit = {},
+    onClaudeDelete: (String) -> Unit = {},
+    claudeInstalled: Boolean = false,
 ) {
-    SettingsScaffold(tr(lang, "模型与 API", "Models & API"), tr(lang, "管理服务商、密钥和默认模型", "Manage providers, keys and default models"), onBack) { pad ->
+    var showInstall by remember { mutableStateOf(false) }
+    SettingsScaffold(tr(lang, "模型与 API", "Models & API"), tr(lang, "选择后端并管理 API 配置", "Choose a backend and manage API configurations"), onBack) { pad ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
-            if (profiles.isEmpty()) {
-                item { EmptySettingsState(HugeIcons.Sparkles, tr(lang, "还没有模型配置", "No model configurations"), tr(lang, "新建配置后，原生对话、WebUI 和终端会共用它。", "Native chat, WebUI and the terminal share the same configuration.")) }
-            } else {
-                item { SettingsSection(tr(lang, "配置", "Configurations")) }
-                items(profiles, key = { "${it.id}-$revision" }) { profile ->
-                    ProviderCard(lang, profile, profile.id == activeProfileId, { onEdit(profile.id) }, { onActivate(profile) })
+            item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    SettingsSection(tr(lang, "后端", "Backend"))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        BackendChoiceChip(
+                            label = tr(lang, "Codex", "Codex"),
+                            subtitle = tr(lang, "OpenAI 编程代理", "OpenAI coding agent"),
+                            selected = backendType == NativeBackendType.CODEX,
+                            onClick = { onBackendChange(NativeBackendType.CODEX) },
+                            modifier = Modifier.weight(1f),
+                        )
+                        BackendChoiceChip(
+                            label = tr(lang, "Claude", "Claude"),
+                            subtitle = tr(lang, "Anthropic Claude Code", "Anthropic Claude Code"),
+                            selected = backendType == NativeBackendType.CLAUDE,
+                            onClick = { onBackendChange(NativeBackendType.CLAUDE) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Text(
+                        tr(
+                            lang,
+                            "原生聊天会使用所选后端运行；两个后端各自的 API 配置相互独立。",
+                            "Native chat uses the selected backend; each backend keeps its own API configuration.",
+                        ),
+                        Modifier.padding(top = 8.dp, start = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
-            item {
-                Button(onAdd, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 18.dp).height(52.dp), shape = RoundedCornerShape(16.dp)) {
-                    Icon(HugeIcons.Add01, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "新建配置", "New configuration"))
+            if (backendType == NativeBackendType.CLAUDE) {
+                item { SettingsSection(tr(lang, "Claude 配置", "Claude configuration")) }
+                if (!claudeInstalled) {
+                    item {
+                        Surface(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                        ) {
+                            Column(Modifier.padding(16.dp)) {
+                                Text(tr(lang, "Claude CLI 尚未安装", "Claude CLI is not installed"), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    tr(lang, "需要下载官方 arm64 静态二进制（约 82 MB）后才能使用 Claude 后端。", "The official arm64 static binary (~82 MB) must be downloaded before the Claude backend can run."),
+                                    Modifier.padding(top = 4.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Button(
+                                    onClick = { showInstall = true },
+                                    Modifier.fillMaxWidth().padding(top = 10.dp),
+                                    shape = RoundedCornerShape(14.dp),
+                                ) {
+                                    Icon(HugeIcons.Download04, null, Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(tr(lang, "下载并安装 Claude CLI", "Download & install Claude CLI"))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (claudeProfiles.isEmpty()) {
+                    item { EmptySettingsState(HugeIcons.Sparkles, tr(lang, "还没有 Claude 配置", "No Claude configuration"), tr(lang, "创建后填写 API Key（可选 Base URL）即可使用。", "Create one and fill in your API key (base URL optional).")) }
+                } else {
+                    items(claudeProfiles, key = { "${it.id}-$claudeRevision" }) { profile ->
+                        ClaudeProfileCard(
+                            lang = lang,
+                            profile = profile,
+                            active = profile.id == activeClaudeId,
+                            onActivate = { onClaudeActivate(profile.id) },
+                            onEdit = { onClaudeEdit(profile.id) },
+                        )
+                    }
+                }
+                item {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClaudeAdd, Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                            Icon(HugeIcons.Add01, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "新建 Claude 配置", "New Claude configuration"))
+                        }
+                    }
+                }
+            } else {
+                if (profiles.isEmpty()) {
+                    item { EmptySettingsState(HugeIcons.Sparkles, tr(lang, "还没有模型配置", "No model configurations"), tr(lang, "新建配置后，原生对话、WebUI 和终端会共用它。", "Native chat, WebUI and the terminal share the same configuration.")) }
+                } else {
+                    item { SettingsSection(tr(lang, "配置", "Configurations")) }
+                    items(profiles, key = { "${it.id}-$revision" }) { profile ->
+                        ProviderCard(lang, profile, profile.id == activeProfileId, { onEdit(profile.id) }, { onActivate(profile) })
+                    }
+                }
+                item {
+                    Button(onAdd, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 18.dp).height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                        Icon(HugeIcons.Add01, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "新建配置", "New configuration"))
+                    }
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+    if (showInstall) {
+        ClaudeInstallDialog(
+            lang = lang,
+            onDismiss = { showInstall = false },
+        )
+    }
+}
+
+@Composable
+private fun ClaudeInstallDialog(
+    lang: String,
+    onDismiss: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var stage by remember { mutableStateOf(tr(lang, "准备中…", "Preparing…")) }
+    var percent by remember { mutableIntStateOf(-1) }
+    var done by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        ClaudeInstaller.installAsync(context, object : ClaudeInstaller.Progress {
+            override fun onStage(stageLabel: String, detail: String) {
+                stage = detail
+            }
+
+            override fun onDownloadProgress(downloaded: Long, total: Long, percentValue: Int) {
+                percent = percentValue
+                stage = tr(lang, "下载中 $percentValue%", "Downloading $percentValue%")
+            }
+
+            override fun onComplete(success: Boolean, error: String?) {
+                done = true
+                if (!success) failed = error
+            }
+        })
+    }
+    AlertDialog(
+        onDismissRequest = { if (done) onDismiss() },
+        icon = { if (failed == null && !done) CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) },
+        title = {
+            Text(
+                when {
+                    failed != null -> tr(lang, "安装失败", "Install failed")
+                    done -> tr(lang, "安装完成", "Installed")
+                    else -> tr(lang, "安装 Claude CLI", "Installing Claude CLI")
+                },
+            )
+        },
+        text = { Text(failed ?: stage) },
+        confirmButton = {
+            if (done) TextButton(onClick = onDismiss) { Text(tr(lang, "关闭", "Close")) }
+        },
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
+internal fun ClaudeProfileEditorDialog(
+    lang: String,
+    initial: ClaudeProfile?,
+    onDismiss: () -> Unit,
+    onSave: (ClaudeProfile) -> Unit,
+    onDelete: (String) -> Unit = {},
+) {
+    var name by remember { mutableStateOf(initial?.name ?: "") }
+    var apiKey by remember { mutableStateOf(initial?.apiKey ?: "") }
+    var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "") }
+    var model by remember { mutableStateOf(initial?.model ?: ClaudeProfile.DEFAULT_MODEL) }
+    val canSave = apiKey.isNotBlank()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initial == null) tr(lang, "新建 Claude 配置", "New Claude configuration") else tr(lang, "编辑 Claude 配置", "Edit Claude configuration")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SettingsTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = tr(lang, "名称", "Name"),
+                    placeholder = tr(lang, "例如：我的 Claude", "e.g. My Claude"),
+                )
+                SettingsTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = tr(lang, "API Key", "API Key"),
+                    placeholder = tr(lang, "sk-ant-…", "sk-ant-…"),
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                )
+                SettingsTextField(
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it },
+                    label = tr(lang, "Base URL（可选）", "Base URL (optional)"),
+                    placeholder = tr(lang, "留空使用官方 API", "Leave blank for the official API"),
+                )
+                SettingsTextField(
+                    value = model,
+                    onValueChange = { model = it },
+                    label = tr(lang, "模型", "Model"),
+                    placeholder = tr(lang, "sonnet / opus / haiku", "sonnet / opus / haiku"),
+                )
+                if (baseUrl.isNotBlank() && !isValidHttpUrl(baseUrl)) {
+                    Text(tr(lang, "Base URL 不是有效地址", "Base URL is not a valid address"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
+        confirmButton = {
+            TextButton(
+                enabled = canSave,
+                onClick = {
+                    onSave(
+                        (initial ?: ClaudeProfile(id = java.util.UUID.randomUUID().toString(), name = "", apiKey = ""))
+                            .copy(name = name, apiKey = apiKey, baseUrl = baseUrl, model = model),
+                    )
+                    onDismiss()
+                },
+            ) { Text(tr(lang, "保存", "Save")) }
+        },
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
+private fun BackendChoiceChip(
+    label: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                if (selected) {
+                    Spacer(Modifier.width(6.dp))
+                    Icon(HugeIcons.Tick02, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun ClaudeProfileCard(
+    lang: String,
+    profile: ClaudeProfile,
+    active: Boolean,
+    onActivate: () -> Unit,
+    onEdit: () -> Unit,
+) {
+    Card(
+        onClick = onEdit,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(profile.name.ifBlank { tr(lang, "未命名", "Unnamed") }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        if (active) Surface(Modifier.padding(start = 8.dp), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primary) {
+                            Text(tr(lang, "使用中", "Active"), Modifier.padding(horizontal = 7.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
+                        }
+                    }
+                    Text(profile.model.ifBlank { ClaudeProfile.DEFAULT_MODEL }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        if (profile.baseUrl.isBlank()) tr(lang, "官方 API", "Official API") else endpointLabel(profile.baseUrl),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(HugeIcons.ArrowRight01, null, Modifier.size(20.dp))
+            }
+            if (!active) TextButton(onActivate, Modifier.align(Alignment.End)) {
+                Text(tr(lang, "设为当前", "Use this profile"))
+            }
         }
     }
 }

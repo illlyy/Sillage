@@ -3,47 +3,41 @@ package com.termux.app;
 import android.app.Activity;
 import android.content.Context;
 
-import java.util.Map;
-
-/** Process-scoped owner for the native app-server so turns survive Compose Activity recreation. */
-final class CodexNativeRuntime {
-    private static CodexAppServerBridge bridge;
+/** Process-scoped owner for the Claude Code bridge; mirrors CodexNativeRuntime. */
+final class ClaudeNativeRuntime {
+    private static ClaudeAgentBridge bridge;
     private static String fingerprint;
     private static Context appContext;
     private static boolean lastAttachRecreatedBridge;
 
-    private CodexNativeRuntime() {}
+    private ClaudeNativeRuntime() {}
 
-    static synchronized CodexAppServerBridge attach(
+    static synchronized ClaudeAgentBridge attach(
             Activity activity,
             NativeBackendBridge.EventListener listener,
             String configurationFingerprint,
-            String baseUrl,
+            String claudeBinPath,
+            String configDir,
             String apiKey,
+            String baseUrl,
             String model,
-            String apiFormat,
-            boolean routeThroughMihomo,
-            boolean forwardReasoningContext,
-            int ultraSubagentLimit,
-            int normalSubagentLimit,
-            Map<String, String> transportEfforts,
-            boolean multiAgentV2,
-            boolean preventRecursiveSubagents) {
+            String permissionMode,
+            String allowedTools,
+            String resumeThreadId,
+            boolean routeThroughMihomo) {
         String requestedFingerprint = String.join("\n",
-            value(configurationFingerprint), value(baseUrl), value(apiKey), value(model), value(apiFormat),
-            String.valueOf(routeThroughMihomo), String.valueOf(forwardReasoningContext),
-            String.valueOf(ultraSubagentLimit), String.valueOf(normalSubagentLimit),
-            String.valueOf(transportEfforts), String.valueOf(multiAgentV2), String.valueOf(preventRecursiveSubagents));
+            value(configurationFingerprint), value(claudeBinPath), value(apiKey), value(baseUrl),
+            value(model), value(permissionMode), value(allowedTools), value(resumeThreadId),
+            String.valueOf(routeThroughMihomo));
         if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
         appContext = activity.getApplicationContext();
         lastAttachRecreatedBridge = bridge == null;
         if (bridge == null) {
             CodexTaskStore.markInterruptedTasks(activity.getApplicationContext());
-            bridge = new CodexAppServerBridge(activity, listener);
+            bridge = new ClaudeAgentBridge(activity, listener);
             fingerprint = requestedFingerprint;
-            bridge.start(baseUrl, apiKey, model, apiFormat, routeThroughMihomo,
-                forwardReasoningContext, ultraSubagentLimit, normalSubagentLimit,
-                transportEfforts, multiAgentV2, preventRecursiveSubagents);
+            bridge.start(claudeBinPath, configDir, apiKey, baseUrl, model, permissionMode,
+                allowedTools, resumeThreadId, routeThroughMihomo);
         } else {
             bridge.rebind(activity, listener);
         }
@@ -61,11 +55,6 @@ final class CodexNativeRuntime {
 
     static synchronized boolean isRunning() {
         return bridge != null && bridge.isRunning();
-    }
-
-    /** Re-probe MCP server status on demand (called from settings page). */
-    static synchronized void refreshMcpStatus() {
-        if (bridge != null) bridge.refreshMcpStatus();
     }
 
     static synchronized String currentThreadId() {
