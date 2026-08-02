@@ -12,7 +12,7 @@ import androidx.compose.runtime.setValue
 internal enum class SettingsPage {
     ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND, TYPOGRAPHY,
     MCP, MCP_EDITOR, SKILLS,
-    OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, WEB_UI, PROXY,
+    OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, CLAUDE_EDITOR, WEB_UI, PROXY,
     DEVELOPER, ABOUT,
 }
 
@@ -24,14 +24,14 @@ internal val SettingsPage.navigationDepth: Int
         SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
         SettingsPage.ABOUT -> 1
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE,
-        SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR -> 2
+        SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR, SettingsPage.CLAUDE_EDITOR -> 2
         SettingsPage.CHAT_BACKGROUND -> 3
     }
 
 internal val SettingsPage.previousPage: SettingsPage?
     get() = when (this) {
         SettingsPage.ROOT -> null
-        SettingsPage.MODEL_EDITOR -> SettingsPage.MODEL_CONFIGS
+        SettingsPage.MODEL_EDITOR, SettingsPage.CLAUDE_EDITOR -> SettingsPage.MODEL_CONFIGS
         SettingsPage.MCP_EDITOR -> SettingsPage.MCP
         SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
@@ -47,6 +47,9 @@ internal class NativeSettingsNavigator {
         private set
 
     var editingProfileId by mutableStateOf<String?>(null)
+        private set
+
+    var editingClaudeProfileId by mutableStateOf<String?>(null)
         private set
 
     var editingMcpKey by mutableStateOf<String?>(null)
@@ -69,6 +72,15 @@ internal class NativeSettingsNavigator {
     }
 
     fun finishProfileEditor() {
+        page = SettingsPage.MODEL_CONFIGS
+    }
+
+    fun openClaudeEditor(profileId: String?) {
+        editingClaudeProfileId = profileId
+        page = SettingsPage.CLAUDE_EDITOR
+    }
+
+    fun finishClaudeEditor() {
         page = SettingsPage.MODEL_CONFIGS
     }
 

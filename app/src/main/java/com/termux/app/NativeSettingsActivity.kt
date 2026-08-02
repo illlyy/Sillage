@@ -140,7 +140,6 @@ class NativeSettingsActivity : ComponentActivity() {
             var suppressNextPageTransition by remember { mutableStateOf(false) }
             var providerRevision by remember { mutableIntStateOf(0) }
             var backendRevision by remember { mutableIntStateOf(0) }
-            var editingClaudeProfile by remember { mutableStateOf<ClaudeProfile?>(null) }
             val providerSnapshot = remember(providerRevision) { providerStore.snapshot() }
             var theme by remember { mutableStateOf(FcodeAppearancePreferences.normalizeColorMode(prefs.getString(KEY_THEME, "system"))) }
             var colorPalette by remember { mutableStateOf(FcodeColorPalette.from(prefs.getString(FcodeAppearancePreferences.COLOR_PALETTE, FcodeColorPalette.ROSE.value)).value) }
@@ -465,23 +464,11 @@ class NativeSettingsActivity : ComponentActivity() {
                             claudeProfiles = claudeStore.profiles(),
                             activeClaudeId = claudeStore.active()?.id,
                             claudeRevision = backendRevision,
-                            onClaudeAdd = { editingClaudeProfile = ClaudeProfile(id = java.util.UUID.randomUUID().toString(), name = "", apiKey = "") },
-                            onClaudeEdit = { editingClaudeProfile = claudeStore.find(it) },
-                            onClaudeSave = { profile ->
-                                settingsScope.launch {
-                                    withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.save(profile) }
-                                    backendRevision++
-                                }
-                            },
+                            onClaudeAdd = { navigator.openClaudeEditor(null) },
+                            onClaudeEdit = { navigator.openClaudeEditor(it) },
                             onClaudeActivate = { id ->
                                 settingsScope.launch {
                                     withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.activate(id) }
-                                    backendRevision++
-                                }
-                            },
-                            onClaudeDelete = { id ->
-                                settingsScope.launch {
-                                    withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.delete(id) }
                                     backendRevision++
                                 }
                             },
@@ -493,6 +480,27 @@ class NativeSettingsActivity : ComponentActivity() {
                                 onBack = navigateBack,
                                 onSaved = { providerRevision++; navigator.finishProfileEditor() },
                                 onDeleted = { providerRevision++; navigator.finishProfileEditor() },
+                            )
+                        }
+                        SettingsPage.CLAUDE_EDITOR -> key(navigator.editingClaudeProfileId, backendRevision) {
+                            ClaudeConfigurationEditor(
+                                lang = lang,
+                                initial = navigator.editingClaudeProfileId?.let(claudeStore::find),
+                                onBack = navigateBack,
+                                onSave = { profile ->
+                                    settingsScope.launch {
+                                        withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.save(profile) }
+                                        backendRevision++
+                                    }
+                                    navigator.finishClaudeEditor()
+                                },
+                                onDelete = { id ->
+                                    settingsScope.launch {
+                                        withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.delete(id) }
+                                        backendRevision++
+                                    }
+                                    navigator.finishClaudeEditor()
+                                },
                             )
                         }
                         SettingsPage.MCP -> McpSettingsPage(
@@ -707,27 +715,6 @@ class NativeSettingsActivity : ComponentActivity() {
                                     CodexDependentFeature.SETUP -> Unit
                                 }
                             }
-                        },
-                    )
-                }
-                editingClaudeProfile?.let { profile ->
-                    ClaudeProfileEditorDialog(
-                        lang = lang,
-                        initial = profile,
-                        onDismiss = { editingClaudeProfile = null },
-                        onSave = { saved ->
-                            settingsScope.launch {
-                                withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.save(saved) }
-                                backendRevision++
-                            }
-                            editingClaudeProfile = null
-                        },
-                        onDelete = { id ->
-                            settingsScope.launch {
-                                withContext(kotlinx.coroutines.Dispatchers.IO) { claudeStore.delete(id) }
-                                backendRevision++
-                            }
-                            editingClaudeProfile = null
                         },
                     )
                 }

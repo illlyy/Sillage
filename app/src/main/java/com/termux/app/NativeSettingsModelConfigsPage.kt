@@ -121,9 +121,7 @@ internal fun ModelConfigurationsPage(
     claudeRevision: Int = 0,
     onClaudeAdd: () -> Unit = {},
     onClaudeEdit: (String) -> Unit = {},
-    onClaudeSave: (ClaudeProfile) -> Unit = {},
     onClaudeActivate: (String) -> Unit = {},
-    onClaudeDelete: (String) -> Unit = {},
     claudeInstalled: Boolean = false,
 ) {
     var showInstall by remember { mutableStateOf(false) }
@@ -284,10 +282,48 @@ private fun ClaudeInstallDialog(
 }
 
 @Composable
-internal fun ClaudeProfileEditorDialog(
+private fun ClaudePresetChip(label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+    ) {
+        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun ClaudeAuthChip(
+    label: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/**
+ * Full-page Claude profile editor (same shape as the Codex ModelConfigurationEditor):
+ * presets for new profiles, auth mode chips, primary model, collapsible tier/subagent/env
+ * sections, save bar and delete action.
+ */
+@Composable
+internal fun ClaudeConfigurationEditor(
     lang: String,
     initial: ClaudeProfile?,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
     onSave: (ClaudeProfile) -> Unit,
     onDelete: (String) -> Unit = {},
 ) {
@@ -319,35 +355,38 @@ internal fun ClaudeProfileEditorDialog(
         extraEnv = profile.extraEnv.toMutableMap()
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (initial == null) tr(lang, "新建 Claude 配置", "New Claude configuration") else tr(lang, "编辑 Claude 配置", "Edit Claude configuration")) },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()).heightIn(max = 560.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (initial == null) {
-                    Text(tr(lang, "模板", "Template"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        ClaudePresetChip(tr(lang, "官方 API", "Official API")) {
-                            applyPreset(ClaudePresets.OFFICIAL)
+    SettingsScaffold(
+        if (initial == null) tr(lang, "新建 Claude 配置", "New Claude configuration")
+        else tr(lang, "编辑 Claude 配置", "Edit Claude configuration"),
+        tr(lang, "认证方式、模型档位与附加环境变量", "Auth mode, model tiers and extra env"),
+        onBack,
+    ) { pad ->
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            if (initial == null) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        SettingsSection(tr(lang, "模板", "Template"))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ClaudePresetChip(tr(lang, "官方 API", "Official API")) { applyPreset(ClaudePresets.OFFICIAL) }
+                            ClaudePresetChip(tr(lang, "通用中转", "Generic relay")) { applyPreset(ClaudePresets.GENERIC_RELAY) }
+                            ClaudePresetChip("DeepSeek") { applyPreset(ClaudePresets.DEEPSEEK) }
+                            ClaudePresetChip("Kimi") { applyPreset(ClaudePresets.KIMI) }
                         }
-                        ClaudePresetChip(tr(lang, "通用中转", "Generic relay")) {
-                            applyPreset(ClaudePresets.GENERIC_RELAY)
-                        }
-                        ClaudePresetChip("DeepSeek") { applyPreset(ClaudePresets.DEEPSEEK) }
-                        ClaudePresetChip("Kimi") { applyPreset(ClaudePresets.KIMI) }
                     }
                 }
+            }
+            item { SettingsSection(tr(lang, "基本", "Basics")) }
+            item {
                 SettingsTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = tr(lang, "名称", "Name"),
                     placeholder = tr(lang, "例如：我的 Claude", "e.g. My Claude"),
                 )
-                Text(tr(lang, "认证方式", "Authentication"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            }
+            item { SettingsSection(tr(lang, "认证", "Authentication")) }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ClaudeAuthChip(
                         label = tr(lang, "Bearer Token", "Bearer Token"),
                         subtitle = tr(lang, "中转网关常用", "Relay gateways"),
@@ -363,6 +402,8 @@ internal fun ClaudeProfileEditorDialog(
                         modifier = Modifier.weight(1f),
                     )
                 }
+            }
+            item {
                 SettingsTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
@@ -370,38 +411,71 @@ internal fun ClaudeProfileEditorDialog(
                     placeholder = tr(lang, "sk-…", "sk-…"),
                     visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                 )
+            }
+            item {
                 SettingsTextField(
                     value = baseUrl,
                     onValueChange = { baseUrl = it },
                     label = tr(lang, "Base URL（可选）", "Base URL (optional)"),
                     placeholder = tr(lang, "留空使用官方 API", "Leave blank for the official API"),
                 )
+            }
+            if (baseUrl.isNotBlank() && !isValidHttpUrl(baseUrl)) {
+                item {
+                    Text(
+                        tr(lang, "Base URL 不是有效地址", "Base URL is not a valid address"),
+                        Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+            item { SettingsSection(tr(lang, "模型", "Models")) }
+            item {
                 SettingsTextField(
                     value = model,
                     onValueChange = { model = it },
                     label = tr(lang, "主模型", "Primary model"),
                     placeholder = tr(lang, "sonnet / opus / haiku", "sonnet / opus / haiku"),
                 )
-                TextButton(onClick = { showAdvanced = !showAdvanced }, modifier = Modifier.align(Alignment.Start)) {
+            }
+            item {
+                TextButton(
+                    onClick = { showAdvanced = !showAdvanced },
+                    Modifier.padding(horizontal = 12.dp),
+                ) {
                     Text(if (showAdvanced) tr(lang, "收起高级选项", "Hide advanced") else tr(lang, "高级模型与附加设置", "Advanced models & env"))
                 }
-                if (showAdvanced) {
+            }
+            if (showAdvanced) {
+                item {
                     SettingsTextField(value = haikuModel, onValueChange = { haikuModel = it }, label = tr(lang, "Haiku 档模型（空=主模型）", "Haiku tier (blank = primary)"), placeholder = "")
+                }
+                item {
                     SettingsTextField(value = sonnetModel, onValueChange = { sonnetModel = it }, label = tr(lang, "Sonnet 档模型（空=主模型）", "Sonnet tier (blank = primary)"), placeholder = "")
+                }
+                item {
                     SettingsTextField(value = opusModel, onValueChange = { opusModel = it }, label = tr(lang, "Opus 档模型（空=主模型）", "Opus tier (blank = primary)"), placeholder = "")
+                }
+                item {
                     SettingsTextField(value = subagentModel, onValueChange = { subagentModel = it }, label = tr(lang, "子代理模型（可选）", "Subagent model (optional)"), placeholder = "")
-                    Text(tr(lang, "附加环境变量", "Extra env vars"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    extraEnv.forEach { (key, value) ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                            Text("$key = $value", Modifier.weight(1f).padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                item { SettingsSection(tr(lang, "附加环境变量", "Extra env vars")) }
+                extraEnv.forEach { (key, value) ->
+                    item(key = "env-$key") {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(start = 16.dp)) {
+                            Text("$key = $value", Modifier.weight(1f).padding(horizontal = 8.dp), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             TextButton(onClick = { extraEnv = extraEnv.toMutableMap().apply { remove(key) } }) { Text(tr(lang, "删除", "Remove")) }
                         }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                }
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         SettingsTextField(value = newEnvKey, onValueChange = { newEnvKey = it }, label = tr(lang, "键", "Key"), placeholder = "ENABLE_TOOL_SEARCH", modifier = Modifier.weight(1f))
-                        Spacer(Modifier.width(6.dp))
                         SettingsTextField(value = newEnvValue, onValueChange = { newEnvValue = it }, label = tr(lang, "值", "Value"), placeholder = "true", modifier = Modifier.weight(1f))
                     }
+                }
+                item {
                     TextButton(
                         enabled = newEnvKey.isNotBlank(),
                         onClick = {
@@ -409,65 +483,45 @@ internal fun ClaudeProfileEditorDialog(
                             newEnvKey = ""
                             newEnvValue = ""
                         },
+                        modifier = Modifier.padding(horizontal = 12.dp),
                     ) { Text(tr(lang, "添加", "Add")) }
                 }
-                if (baseUrl.isNotBlank() && !isValidHttpUrl(baseUrl)) {
-                    Text(tr(lang, "Base URL 不是有效地址", "Base URL is not a valid address"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+            }
+            item {
+                Button(
+                    onClick = {
+                        onSave(
+                            (initial ?: ClaudeProfile(id = java.util.UUID.randomUUID().toString(), name = "", apiKey = ""))
+                                .copy(
+                                    name = name, apiKey = apiKey, apiKeyField = apiKeyField,
+                                    baseUrl = baseUrl, model = model,
+                                    haikuModel = haikuModel, sonnetModel = sonnetModel,
+                                    opusModel = opusModel, subagentModel = subagentModel,
+                                    extraEnv = extraEnv.toMap(),
+                                ),
+                        )
+                        onBack()
+                    },
+                    enabled = canSave,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp).height(52.dp),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Icon(HugeIcons.Tick02, null, Modifier.size(19.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(tr(lang, "保存配置", "Save configuration"))
                 }
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
-        confirmButton = {
-            TextButton(
-                enabled = canSave,
-                onClick = {
-                    onSave(
-                        (initial ?: ClaudeProfile(id = java.util.UUID.randomUUID().toString(), name = "", apiKey = ""))
-                            .copy(
-                                name = name, apiKey = apiKey, apiKeyField = apiKeyField,
-                                baseUrl = baseUrl, model = model,
-                                haikuModel = haikuModel, sonnetModel = sonnetModel,
-                                opusModel = opusModel, subagentModel = subagentModel,
-                                extraEnv = extraEnv.toMap(),
-                            ),
-                    )
-                    onDismiss()
-                },
-            ) { Text(tr(lang, "保存", "Save")) }
-        },
-        shape = RoundedCornerShape(28.dp),
-    )
-}
-
-@Composable
-private fun ClaudePresetChip(label: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
-    ) {
-        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.labelMedium)
-    }
-}
-
-@Composable
-private fun ClaudeAuthChip(
-    label: String,
-    subtitle: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        onClick = onClick,
-        modifier = modifier,
-        shape = RoundedCornerShape(16.dp),
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
-        border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (initial != null) {
+                item {
+                    TextButton(
+                        onClick = { onDelete(initial.id); onBack() },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    ) {
+                        Text(tr(lang, "删除此配置", "Delete this configuration"), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
         }
     }
 }
