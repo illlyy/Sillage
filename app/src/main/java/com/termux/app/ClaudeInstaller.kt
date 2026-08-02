@@ -58,6 +58,14 @@ internal object ClaudeInstaller {
                 extractClaude(archive, destination)
                 if (!destination.setExecutable(true, false)) throw IOException("无法设置可执行权限")
                 archive.delete()
+                // The official binary is dynamically linked against musl; install the loader.
+                if (ClaudeMuslRuntime.needsMuslLoader(destination) && !ClaudeMuslRuntime.isLoaderPresent()) {
+                    progress.onStage("musl", "正在安装 musl 运行时…")
+                    val muslError = ClaudeMuslRuntime.installBlocking(context) { _, detail ->
+                        progress.onStage("musl", detail)
+                    }
+                    if (muslError != null) throw IOException(muslError)
+                }
                 success = true
             } catch (t: Throwable) {
                 error = t.message ?: t.javaClass.simpleName

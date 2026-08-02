@@ -121,7 +121,18 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         sessionId = null;
         decoder.reset("");
         try {
+            // The official arm64 binary is dynamically linked against musl: exec it through the
+            // musl loader (`ld-musl-aarch64.so.1 <binary> ...`) when its ELF carries PT_INTERP.
+            File binary = new File(claudeBinPath);
             java.util.ArrayList<String> command = new java.util.ArrayList<>();
+            if (ClaudeMuslRuntime.INSTANCE.needsMuslLoader(binary)) {
+                File loader = ClaudeMuslRuntime.INSTANCE.loaderFile();
+                if (!loader.isFile()) {
+                    throw new IllegalStateException(
+                        "Claude CLI 需要 musl 运行时，请在设置中重新下载（会自动安装 musl）");
+                }
+                command.add(loader.getAbsolutePath());
+            }
             command.add(claudeBinPath);
             command.add("--output-format");
             command.add("stream-json");
@@ -143,7 +154,11 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                 command.add(UUID.randomUUID().toString());
             }
             ProcessBuilder builder = new ProcessBuilder(command);
-            builder.directory(new File(termuxHome()));
+            // The working directory must exist before fork: Android returns ENOENT from
+            // forkAndExec when the cwd is missing (bootstrap may not be extracted yet).
+            File home = new File(termuxHome());
+            home.mkdirs();
+            builder.directory(home);
             // Credentials, base URL and models live in CLAUDE_CONFIG_DIR/settings.json
             // (written by ClaudeSettingsWriter, same shape as desktop cc-switch). Nothing
             // credential-like is passed on the command line.
