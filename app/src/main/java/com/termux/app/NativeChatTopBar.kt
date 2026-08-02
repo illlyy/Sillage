@@ -316,12 +316,12 @@ internal fun RikkaTopBar(
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
-    // Material deliberately remains opaque; developer mask controls belong to Liquid Glass.
+    // Liquid Glass samples the live backdrop for progressive glass; Material redraws the
+    // configured chat background (theme glow/aurora/mist/grid/custom image) inside the bar.
     val useProgressiveGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
         glassConfig.enabled && liquidGlassSupported && backdrop != null
     val isLight = rememberIsLightTheme()
     val tint = if (isLight) Color.White else Color.Black
-    val surfaceColor = MaterialTheme.colorScheme.surface
     var menuExpanded by remember { mutableStateOf(false) }
     val glassMaterialModifier = if (useProgressiveGlass) {
         Modifier.drawPlainBackdrop(
@@ -330,16 +330,21 @@ internal fun RikkaTopBar(
             effects = { applyTopBarProgressiveGlass(glassConfig, tint) },
         )
     } else Modifier
-    val topBarModifier = if (useProgressiveGlass) Modifier else Modifier.background(surfaceColor)
     Layout(
         modifier = modifier.fillMaxWidth(),
         content = {
             // The material owns a real 128dp-style sampling surface. This composable is placed
             // as a full-screen overlay, while conversation content keeps the bar-sized safe inset.
-            Box(Modifier.then(glassMaterialModifier))
+            // In Material mode the layer redraws the chat background so the bar matches the
+            // conversation surface instead of a flat color.
+            Box(Modifier.then(glassMaterialModifier)) {
+                if (!useProgressiveGlass) {
+                    FcodeChatBackdrop(Modifier.fillMaxSize(), customImageMaxDimension = 1024)
+                }
+            }
             TopAppBar(
-                modifier = Modifier.then(topBarModifier).statusBarsPadding(),
-                // The separate material layer owns the progressive glass. Keeping this
+                modifier = Modifier.statusBarsPadding(),
+                // The separate material layer owns the background. Keeping this
                 // container transparent prevents it from flattening the alpha fade.
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Transparent,
@@ -409,7 +414,11 @@ internal fun RikkaTopBar(
         val topBarPlaceable = measurables[1].measure(constraints)
         val materialHeightPx = if (useProgressiveGlass) {
             glassConfig.maskHeightDp.dp.roundToPx().coerceAtLeast(topBarPlaceable.height)
-        } else 0
+        } else {
+            // topBarPlaceable already includes the status bar inset via statusBarsPadding,
+            // so the background layer covers the status bar area too.
+            topBarPlaceable.height
+        }
         val materialPlaceable = measurables[0].measure(
             Constraints.fixed(topBarPlaceable.width, materialHeightPx),
         )

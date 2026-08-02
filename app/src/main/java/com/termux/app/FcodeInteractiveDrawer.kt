@@ -6,6 +6,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
@@ -139,8 +141,10 @@ internal fun rememberFcodeInteractiveDrawerState(
 ): FcodeInteractiveDrawerState = remember { FcodeInteractiveDrawerState(initiallyOpen) }
 
 /**
- * Kelivo-style left drawer: drawer and main content meet at one moving seam. Both surfaces are
- * retained as graphics layers; the chat list is never remeasured during drawer motion.
+ * Operit-style left drawer: while the drawer slides in from the left, the main surface recedes —
+ * translated right by ~82% of the drawer width, shifted down, scaled to 92%, and tilted -7 degrees
+ * around its left edge, with rounded corners and a growing shadow. Both surfaces are retained as
+ * graphics layers; the chat list is never remeasured or recomposed during drawer motion.
  */
 @Composable
 internal fun FcodeInteractiveDrawer(
@@ -216,34 +220,49 @@ internal fun FcodeInteractiveDrawer(
             )
         }
 
+        // Main surface. All motion is read from the progress state inside the graphicsLayer
+        // lambda, so animation frames only update RenderNode transforms. rotationY stays zero
+        // while the drawer is closed, so no offscreen buffer is created at rest.
         Box(
             Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    translationX = drawerWidthPx * state.progress
+                    translationX = drawerWidthPx * 0.82f * state.progress
+                    translationY = 12.dp.toPx() * state.progress
+                    val scale = 1f - 0.08f * state.progress
+                    scaleX = scale
+                    scaleY = scale
+                    rotationY = -7f * state.progress
+                    transformOrigin = TransformOrigin(0f, 0.5f)
+                    shape = RoundedCornerShape(24.dp * state.progress)
+                    clip = true
+                    shadowElevation = 18.dp.toPx() * state.progress
                 }
                 .then(dragModifier),
         ) {
             content()
-            // Keep the scrim node composed, but draw alpha directly. graphicsLayer(alpha) forced a
-            // full-screen offscreen buffer on every drawer frame at 1440p.
-            val scrimTapModifier = if (state.motionActive) {
-                Modifier.pointerInput(state) {
-                    detectTapGestures(onTap = { scope.launch { state.close() } })
-                }
-            } else Modifier
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .drawBehind {
-                        drawRect(
-                            color = scrimColor,
-                            alpha = maxScrimAlpha.coerceIn(0f, 1f) * state.progress,
-                        )
-                    }
-                    .then(scrimTapModifier),
-            )
         }
+
+        // Full-screen scrim outside the transformed surface: the surface recedes during drawer
+        // motion, so the dim and tap-to-close area must keep covering the whole viewport. Keep
+        // the scrim node composed, but draw alpha directly. graphicsLayer(alpha) forced a
+        // full-screen offscreen buffer on every drawer frame at 1440p.
+        val scrimTapModifier = if (state.motionActive) {
+            Modifier.pointerInput(state) {
+                detectTapGestures(onTap = { scope.launch { state.close() } })
+            }
+        } else Modifier
+        Box(
+            Modifier
+                .fillMaxSize()
+                .drawBehind {
+                    drawRect(
+                        color = scrimColor,
+                        alpha = maxScrimAlpha.coerceIn(0f, 1f) * state.progress,
+                    )
+                }
+                .then(scrimTapModifier),
+        )
 
         Box(
             Modifier
@@ -253,6 +272,13 @@ internal fun FcodeInteractiveDrawer(
                 .zIndex(1f)
                 .graphicsLayer {
                     translationX = -drawerWidthPx * (1f - state.progress)
+                    scaleX = 0.92f + 0.08f * state.progress
+                    scaleY = 0.92f + 0.08f * state.progress
+                    alpha = 0.72f + 0.28f * state.progress
+                    transformOrigin = TransformOrigin(0f, 0.5f)
+                    shape = RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp)
+                    clip = true
+                    shadowElevation = 16.dp.toPx() * state.progress
                 }
                 .then(dragModifier),
         ) {
