@@ -293,6 +293,57 @@ private fun ClaudePresetChip(label: String, onClick: () -> Unit) {
 }
 
 @Composable
+private fun ClaudeModelChip(label: String, selected: String, onSelect: (String) -> Unit) {
+    val active = label == selected
+    Surface(
+        onClick = { onSelect(label) },
+        shape = RoundedCornerShape(14.dp),
+        color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = if (active) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+    ) {
+        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun ClaudeModelPickerDialog(
+    lang: String,
+    models: List<String>,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr(lang, "选择模型", "Select a model")) },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items(models, key = { it }) { modelId ->
+                    Surface(
+                        onClick = { onSelect(modelId); onDismiss() },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        Text(
+                            modelId,
+                            Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
 private fun ClaudeAuthChip(
     label: String,
     subtitle: String,
@@ -340,7 +391,29 @@ internal fun ClaudeConfigurationEditor(
     var newEnvKey by remember { mutableStateOf("") }
     var newEnvValue by remember { mutableStateOf("") }
     var showAdvanced by remember { mutableStateOf(false) }
+    var fetchingModels by remember { mutableStateOf(false) }
+    var fetchedModels by remember { mutableStateOf<List<String>?>(null) }
+    var showModelPicker by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     val canSave = apiKey.isNotBlank()
+
+    fun fetchModels() {
+        if (apiKey.isBlank() || fetchingModels) return
+        fetchingModels = true
+        scope.launch {
+            val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ClaudeModelFetcher.fetch(context, baseUrl, apiKey, apiKeyField)
+            }
+            fetchingModels = false
+            if (result.ok) {
+                fetchedModels = result.models
+                showModelPicker = true
+            } else {
+                Toast.makeText(context, result.error, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     fun applyPreset(profile: ClaudeProfile) {
         name = profile.name
@@ -440,6 +513,34 @@ internal fun ClaudeConfigurationEditor(
                 )
             }
             item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(tr(lang, "官方模型", "Official models"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(6.dp))
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ClaudeModelChip("claude-sonnet-4-5", model) { model = it }
+                        ClaudeModelChip("claude-opus-4-1", model) { model = it }
+                        ClaudeModelChip("claude-haiku-4-5", model) { model = it }
+                    }
+                }
+            }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        enabled = canSave && !fetchingModels,
+                        onClick = { fetchModels() },
+                    ) {
+                        if (fetchingModels) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        } else {
+                            Icon(HugeIcons.Refresh03, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(tr(lang, "从服务获取模型列表", "Fetch models from API"))
+                    }
+                }
+            }
+            item {
                 TextButton(
                     onClick = { showAdvanced = !showAdvanced },
                     Modifier.padding(horizontal = 12.dp),
@@ -522,6 +623,16 @@ internal fun ClaudeConfigurationEditor(
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+    if (showModelPicker) {
+        fetchedModels?.let { models ->
+            ClaudeModelPickerDialog(
+                lang = lang,
+                models = models,
+                onDismiss = { showModelPicker = false },
+                onSelect = { model = it },
+            )
         }
     }
 }
