@@ -293,25 +293,81 @@ internal fun ClaudeProfileEditorDialog(
 ) {
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var apiKey by remember { mutableStateOf(initial?.apiKey ?: "") }
+    var apiKeyField by remember { mutableStateOf(initial?.apiKeyField ?: ClaudeSettingsWriter.FIELD_AUTH_TOKEN) }
     var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "") }
     var model by remember { mutableStateOf(initial?.model ?: ClaudeProfile.DEFAULT_MODEL) }
+    var haikuModel by remember { mutableStateOf(initial?.haikuModel ?: "") }
+    var sonnetModel by remember { mutableStateOf(initial?.sonnetModel ?: "") }
+    var opusModel by remember { mutableStateOf(initial?.opusModel ?: "") }
+    var subagentModel by remember { mutableStateOf(initial?.subagentModel ?: "") }
+    var extraEnv by remember { mutableStateOf(initial?.extraEnv?.toMutableMap() ?: mutableMapOf()) }
+    var newEnvKey by remember { mutableStateOf("") }
+    var newEnvValue by remember { mutableStateOf("") }
+    var showAdvanced by remember { mutableStateOf(false) }
     val canSave = apiKey.isNotBlank()
+
+    fun applyPreset(profile: ClaudeProfile) {
+        name = profile.name
+        apiKey = profile.apiKey
+        apiKeyField = profile.apiKeyField
+        baseUrl = profile.baseUrl
+        model = profile.model
+        haikuModel = profile.haikuModel
+        sonnetModel = profile.sonnetModel
+        opusModel = profile.opusModel
+        subagentModel = profile.subagentModel
+        extraEnv = profile.extraEnv.toMutableMap()
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) tr(lang, "新建 Claude 配置", "New Claude configuration") else tr(lang, "编辑 Claude 配置", "Edit Claude configuration")) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()).heightIn(max = 560.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (initial == null) {
+                    Text(tr(lang, "模板", "Template"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ClaudePresetChip(tr(lang, "官方 API", "Official API")) {
+                            applyPreset(ClaudePresets.OFFICIAL)
+                        }
+                        ClaudePresetChip(tr(lang, "通用中转", "Generic relay")) {
+                            applyPreset(ClaudePresets.GENERIC_RELAY)
+                        }
+                        ClaudePresetChip("DeepSeek") { applyPreset(ClaudePresets.DEEPSEEK) }
+                        ClaudePresetChip("Kimi") { applyPreset(ClaudePresets.KIMI) }
+                    }
+                }
                 SettingsTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = tr(lang, "名称", "Name"),
                     placeholder = tr(lang, "例如：我的 Claude", "e.g. My Claude"),
                 )
+                Text(tr(lang, "认证方式", "Authentication"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ClaudeAuthChip(
+                        label = tr(lang, "Bearer Token", "Bearer Token"),
+                        subtitle = tr(lang, "中转网关常用", "Relay gateways"),
+                        selected = apiKeyField == ClaudeSettingsWriter.FIELD_AUTH_TOKEN,
+                        onClick = { apiKeyField = ClaudeSettingsWriter.FIELD_AUTH_TOKEN },
+                        modifier = Modifier.weight(1f),
+                    )
+                    ClaudeAuthChip(
+                        label = tr(lang, "API Key", "API Key"),
+                        subtitle = tr(lang, "官方 API 用", "Official API"),
+                        selected = apiKeyField == ClaudeSettingsWriter.FIELD_API_KEY,
+                        onClick = { apiKeyField = ClaudeSettingsWriter.FIELD_API_KEY },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
                 SettingsTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
-                    label = tr(lang, "API Key", "API Key"),
-                    placeholder = tr(lang, "sk-ant-…", "sk-ant-…"),
+                    label = if (apiKeyField == ClaudeSettingsWriter.FIELD_AUTH_TOKEN) tr(lang, "Token / Key", "Token / Key") else tr(lang, "API Key", "API Key"),
+                    placeholder = tr(lang, "sk-…", "sk-…"),
                     visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                 )
                 SettingsTextField(
@@ -323,9 +379,38 @@ internal fun ClaudeProfileEditorDialog(
                 SettingsTextField(
                     value = model,
                     onValueChange = { model = it },
-                    label = tr(lang, "模型", "Model"),
+                    label = tr(lang, "主模型", "Primary model"),
                     placeholder = tr(lang, "sonnet / opus / haiku", "sonnet / opus / haiku"),
                 )
+                TextButton(onClick = { showAdvanced = !showAdvanced }, modifier = Modifier.align(Alignment.Start)) {
+                    Text(if (showAdvanced) tr(lang, "收起高级选项", "Hide advanced") else tr(lang, "高级模型与附加设置", "Advanced models & env"))
+                }
+                if (showAdvanced) {
+                    SettingsTextField(value = haikuModel, onValueChange = { haikuModel = it }, label = tr(lang, "Haiku 档模型（空=主模型）", "Haiku tier (blank = primary)"), placeholder = "")
+                    SettingsTextField(value = sonnetModel, onValueChange = { sonnetModel = it }, label = tr(lang, "Sonnet 档模型（空=主模型）", "Sonnet tier (blank = primary)"), placeholder = "")
+                    SettingsTextField(value = opusModel, onValueChange = { opusModel = it }, label = tr(lang, "Opus 档模型（空=主模型）", "Opus tier (blank = primary)"), placeholder = "")
+                    SettingsTextField(value = subagentModel, onValueChange = { subagentModel = it }, label = tr(lang, "子代理模型（可选）", "Subagent model (optional)"), placeholder = "")
+                    Text(tr(lang, "附加环境变量", "Extra env vars"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    extraEnv.forEach { (key, value) ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("$key = $value", Modifier.weight(1f).padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            TextButton(onClick = { extraEnv = extraEnv.toMutableMap().apply { remove(key) } }) { Text(tr(lang, "删除", "Remove")) }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                        SettingsTextField(value = newEnvKey, onValueChange = { newEnvKey = it }, label = tr(lang, "键", "Key"), placeholder = "ENABLE_TOOL_SEARCH", modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(6.dp))
+                        SettingsTextField(value = newEnvValue, onValueChange = { newEnvValue = it }, label = tr(lang, "值", "Value"), placeholder = "true", modifier = Modifier.weight(1f))
+                    }
+                    TextButton(
+                        enabled = newEnvKey.isNotBlank(),
+                        onClick = {
+                            extraEnv = extraEnv.toMutableMap().apply { put(newEnvKey.trim(), newEnvValue.trim()) }
+                            newEnvKey = ""
+                            newEnvValue = ""
+                        },
+                    ) { Text(tr(lang, "添加", "Add")) }
+                }
                 if (baseUrl.isNotBlank() && !isValidHttpUrl(baseUrl)) {
                     Text(tr(lang, "Base URL 不是有效地址", "Base URL is not a valid address"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
                 }
@@ -338,13 +423,80 @@ internal fun ClaudeProfileEditorDialog(
                 onClick = {
                     onSave(
                         (initial ?: ClaudeProfile(id = java.util.UUID.randomUUID().toString(), name = "", apiKey = ""))
-                            .copy(name = name, apiKey = apiKey, baseUrl = baseUrl, model = model),
+                            .copy(
+                                name = name, apiKey = apiKey, apiKeyField = apiKeyField,
+                                baseUrl = baseUrl, model = model,
+                                haikuModel = haikuModel, sonnetModel = sonnetModel,
+                                opusModel = opusModel, subagentModel = subagentModel,
+                                extraEnv = extraEnv.toMap(),
+                            ),
                     )
                     onDismiss()
                 },
             ) { Text(tr(lang, "保存", "Save")) }
         },
         shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
+private fun ClaudePresetChip(label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+    ) {
+        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun ClaudeAuthChip(
+    label: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** cc-switch style presets; user fills in the credential after picking one. */
+private object ClaudePresets {
+    val OFFICIAL = ClaudeProfile(
+        id = "", name = "官方 API", apiKey = "",
+        apiKeyField = ClaudeSettingsWriter.FIELD_API_KEY,
+        baseUrl = "", model = "claude-sonnet-4-20250514",
+        sonnetModel = "claude-sonnet-4-20250514", opusModel = "claude-opus-4-1",
+        haikuModel = "claude-haiku-4-5",
+    )
+    val GENERIC_RELAY = ClaudeProfile(
+        id = "", name = "通用中转", apiKey = "",
+        apiKeyField = ClaudeSettingsWriter.FIELD_AUTH_TOKEN,
+        baseUrl = "https://api.example.com", model = "claude-sonnet-4-5",
+    )
+    val DEEPSEEK = ClaudeProfile(
+        id = "", name = "DeepSeek", apiKey = "",
+        apiKeyField = ClaudeSettingsWriter.FIELD_AUTH_TOKEN,
+        baseUrl = "https://api.deepseek.com/anthropic", model = "deepseek-chat",
+        sonnetModel = "deepseek-chat", opusModel = "deepseek-reasoner", haikuModel = "deepseek-chat",
+    )
+    val KIMI = ClaudeProfile(
+        id = "", name = "Kimi", apiKey = "",
+        apiKeyField = ClaudeSettingsWriter.FIELD_AUTH_TOKEN,
+        baseUrl = "https://api.moonshot.cn/anthropic", model = "kimi-k2",
+        sonnetModel = "kimi-k2", opusModel = "kimi-k2", haikuModel = "kimi-k2",
     )
 }
 

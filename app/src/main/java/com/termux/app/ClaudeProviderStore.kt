@@ -5,21 +5,38 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Persistent Claude backend configuration (API key, optional base URL, model).
- * Stored in the same private prefs file as Codex profiles; secrets never leave the app.
+ * Persistent Claude backend configuration, modeled after cc-switch's provider shape:
+ * an authentication mode (Bearer token vs API key), an optional base URL, a primary model
+ * plus tier overrides (haiku/sonnet/opus), a subagent model, and arbitrary extra env vars.
+ *
+ * The active profile is rendered into `CLAUDE_CONFIG_DIR/settings.json` by
+ * [ClaudeSettingsWriter] so the CLI consumes exactly what a desktop cc-switch would write.
  */
 internal data class ClaudeProfile(
     val id: String,
     val name: String,
-    val apiKey: String,
+    val apiKey: String = "",
+    val apiKeyField: String = ClaudeSettingsWriter.FIELD_AUTH_TOKEN,
     val baseUrl: String = "",
-    val model: String = DEFAULT_MODEL,
+    val model: String = "",
+    val haikuModel: String = "",
+    val sonnetModel: String = "",
+    val opusModel: String = "",
+    val subagentModel: String = "",
+    val extraEnv: Map<String, String> = emptyMap(),
 ) {
     fun sanitized(): ClaudeProfile = copy(
         name = name.trim(),
         apiKey = apiKey.trim(),
+        apiKeyField = ClaudeSettingsWriter.normalizeAuthField(apiKeyField),
         baseUrl = baseUrl.trim(),
-        model = model.trim().ifBlank { DEFAULT_MODEL },
+        model = model.trim(),
+        haikuModel = haikuModel.trim(),
+        sonnetModel = sonnetModel.trim(),
+        opusModel = opusModel.trim(),
+        subagentModel = subagentModel.trim(),
+        extraEnv = extraEnv.mapValues { (_, value) -> value.trim() }
+            .filterValues { it.isNotBlank() },
     )
 
     companion object {
@@ -29,9 +46,27 @@ internal data class ClaudeProfile(
             id = id,
             name = json.optString("name", "Claude"),
             apiKey = json.optString("apiKey"),
+            // Legacy profiles stored only apiKey/baseUrl/model; auth field defaults to
+            // Bearer token (cc-switch default) which covers most third-party gateways.
+            apiKeyField = ClaudeSettingsWriter.normalizeAuthField(json.optString("apiKeyField")),
             baseUrl = json.optString("baseUrl"),
             model = json.optString("model", DEFAULT_MODEL).ifBlank { DEFAULT_MODEL },
+            haikuModel = json.optString("haikuModel"),
+            sonnetModel = json.optString("sonnetModel"),
+            opusModel = json.optString("opusModel"),
+            subagentModel = json.optString("subagentModel"),
+            extraEnv = parseExtraEnv(json.optJSONObject("extraEnv")),
         )
+
+        private fun parseExtraEnv(raw: JSONObject?): Map<String, String> {
+            if (raw == null) return emptyMap()
+            return buildMap {
+                raw.keys().forEach { key ->
+                    val value = raw.optString(key)
+                    if (value.isNotBlank()) put(key, value)
+                }
+            }
+        }
     }
 }
 
@@ -40,8 +75,6 @@ internal class ClaudeProviderStore(private val prefs: SharedPreferences) {
     companion object {
         private const val KEY_PROFILES = "claude_profiles_v1"
         private const val KEY_ACTIVE = "active_claude_profile_id"
-        const val PREF_GOAL = "native_thread_goal_v1_"
-        const val PREF_GOAL_STATUS = "native_thread_goal_status_v1_"
     }
 
     fun profiles(): List<ClaudeProfile> {
@@ -90,12 +123,20 @@ internal class ClaudeProviderStore(private val prefs: SharedPreferences) {
     private fun toJson(profiles: List<ClaudeProfile>): String {
         val array = JSONArray()
         profiles.forEach { profile ->
+            val extra = JSONObject()
+            profile.extraEnv.forEach { (key, value) -> extra.put(key, value) }
             array.put(JSONObject()
                 .put("id", profile.id)
                 .put("name", profile.name)
                 .put("apiKey", profile.apiKey)
+                .put("apiKeyField", profile.apiKeyField)
                 .put("baseUrl", profile.baseUrl)
-                .put("model", profile.model))
+                .put("model", profile.model)
+                .put("haikuModel", profile.haikuModel)
+                .put("sonnetModel", profile.sonnetModel)
+                .put("opusModel", profile.opusModel)
+                .put("subagentModel", profile.subagentModel)
+                .put("extraEnv", extra))
         }
         return array.toString()
     }

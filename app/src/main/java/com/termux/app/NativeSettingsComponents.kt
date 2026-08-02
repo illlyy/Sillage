@@ -318,6 +318,7 @@ internal fun SettingsTextField(
     onValueChange: (String) -> Unit,
     label: String,
     placeholder: String,
+    modifier: Modifier = Modifier.fillMaxWidth(),
     keyboardType: KeyboardType = KeyboardType.Text,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     trailing: (@Composable () -> Unit)? = null,
@@ -325,7 +326,7 @@ internal fun SettingsTextField(
 ) {
     OutlinedTextField(
         value, onValueChange,
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        modifier.padding(horizontal = 16.dp, vertical = 6.dp),
         label = { Text(label) }, placeholder = { Text(placeholder) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = ImeAction.Next),
         visualTransformation = visualTransformation, trailingIcon = trailing, enabled = enabled, shape = RoundedCornerShape(14.dp),

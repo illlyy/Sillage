@@ -6,7 +6,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,6 +40,9 @@ import kotlinx.coroutines.withContext
 
 internal object FcodeDrawerPhysics {
     const val MIN_FLING_VELOCITY_PX_PER_SECOND = 365f
+
+    /** The tilt only activates after this progress, keeping the drawer start a cheap 2D move. */
+    const val TILT_START_PROGRESS = 0.15f
 
     fun settleTarget(progress: Float, velocityPxPerSecond: Float): Float = when {
         velocityPxPerSecond >= MIN_FLING_VELOCITY_PX_PER_SECOND -> 1f
@@ -221,8 +223,10 @@ internal fun FcodeInteractiveDrawer(
         }
 
         // Main surface. All motion is read from the progress state inside the graphicsLayer
-        // lambda, so animation frames only update RenderNode transforms. rotationY stays zero
-        // while the drawer is closed, so no offscreen buffer is created at rest.
+        // lambda, so animation frames only update RenderNode transforms (no content redraw).
+        // rotationY only activates past a small dead zone: the 3D transform forces a full-screen
+        // offscreen buffer, so the drawer starts as a cheap 2D translation and the layer is
+        // created/released only while the tilt is actually visible.
         Box(
             Modifier
                 .fillMaxSize()
@@ -232,11 +236,9 @@ internal fun FcodeInteractiveDrawer(
                     val scale = 1f - 0.08f * state.progress
                     scaleX = scale
                     scaleY = scale
-                    rotationY = -7f * state.progress
+                    val tilt = ((state.progress - FcodeDrawerPhysics.TILT_START_PROGRESS) / (1f - FcodeDrawerPhysics.TILT_START_PROGRESS)).coerceIn(0f, 1f)
+                    rotationY = -7f * tilt
                     transformOrigin = TransformOrigin(0f, 0.5f)
-                    shape = RoundedCornerShape(24.dp * state.progress)
-                    clip = true
-                    shadowElevation = 18.dp.toPx() * state.progress
                 }
                 .then(dragModifier),
         ) {
@@ -276,9 +278,6 @@ internal fun FcodeInteractiveDrawer(
                     scaleY = 0.92f + 0.08f * state.progress
                     alpha = 0.72f + 0.28f * state.progress
                     transformOrigin = TransformOrigin(0f, 0.5f)
-                    shape = RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp)
-                    clip = true
-                    shadowElevation = 16.dp.toPx() * state.progress
                 }
                 .then(dragModifier),
         ) {

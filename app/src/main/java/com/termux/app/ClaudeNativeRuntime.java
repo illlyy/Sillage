@@ -18,16 +18,14 @@ final class ClaudeNativeRuntime {
             String configurationFingerprint,
             String claudeBinPath,
             String configDir,
-            String apiKey,
-            String baseUrl,
-            String model,
+            ClaudeProfile profile,
             String permissionMode,
             String allowedTools,
             String resumeThreadId,
             boolean routeThroughMihomo) {
         String requestedFingerprint = String.join("\n",
-            value(configurationFingerprint), value(claudeBinPath), value(apiKey), value(baseUrl),
-            value(model), value(permissionMode), value(allowedTools), value(resumeThreadId),
+            value(configurationFingerprint), value(claudeBinPath),
+            value(permissionMode), value(allowedTools), value(resumeThreadId),
             String.valueOf(routeThroughMihomo));
         if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
         appContext = activity.getApplicationContext();
@@ -36,7 +34,7 @@ final class ClaudeNativeRuntime {
             CodexTaskStore.markInterruptedTasks(activity.getApplicationContext());
             bridge = new ClaudeAgentBridge(activity, listener);
             fingerprint = requestedFingerprint;
-            bridge.start(claudeBinPath, configDir, apiKey, baseUrl, model, permissionMode,
+            bridge.start(claudeBinPath, configDir, profile, permissionMode,
                 allowedTools, resumeThreadId, routeThroughMihomo);
         } else {
             bridge.rebind(activity, listener);

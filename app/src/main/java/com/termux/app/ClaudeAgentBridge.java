@@ -56,9 +56,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     // launch configuration
     private String claudeBinPath;
     private String configDir;
-    private String apiKey = "";
-    private String baseUrl = "";
-    private String model = "";
+    private ClaudeProfile profile;
     private String permissionMode = "default";
     private String allowedTools = "";
     private boolean routeThroughMihomo;
@@ -101,18 +99,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     synchronized void start(
             String claudeBinPath,
             String configDir,
-            String apiKey,
-            String baseUrl,
-            String model,
+            ClaudeProfile profile,
             String permissionMode,
             String allowedTools,
             String resumeThreadId,
             boolean routeThroughMihomo) {
         this.claudeBinPath = claudeBinPath;
         this.configDir = configDir;
-        this.apiKey = apiKey == null ? "" : apiKey;
-        this.baseUrl = baseUrl == null ? "" : baseUrl;
-        this.model = model == null ? "" : model;
+        this.profile = profile;
         this.permissionMode = permissionMode == null ? "default" : permissionMode;
         this.allowedTools = allowedTools == null ? "" : allowedTools;
         this.resumeThreadId = resumeThreadId == null ? "" : resumeThreadId;
@@ -142,10 +136,6 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                 command.add("--allowedTools");
                 command.add(allowedTools);
             }
-            if (!model.isEmpty()) {
-                command.add("--model");
-                command.add(model);
-            }
             if (!resumeThreadId.isEmpty()) {
                 command.add("--resume=" + resumeThreadId);
             } else {
@@ -154,11 +144,15 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             }
             ProcessBuilder builder = new ProcessBuilder(command);
             builder.directory(new File(termuxHome()));
+            // Credentials, base URL and models live in CLAUDE_CONFIG_DIR/settings.json
+            // (written by ClaudeSettingsWriter, same shape as desktop cc-switch). Nothing
+            // credential-like is passed on the command line.
+            if (configDir != null && !configDir.isEmpty()) {
+                ClaudeSettingsWriter.INSTANCE.write(new File(configDir), profile);
+            }
             java.util.Map<String, String> env = builder.environment();
-            env.put("ANTHROPIC_API_KEY", apiKey);
             env.put("CLAUDE_CODE_ENTRYPOINT", "android-fcode");
             env.put("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
-            if (!baseUrl.isEmpty()) env.put("ANTHROPIC_BASE_URL", baseUrl);
             if (configDir != null && !configDir.isEmpty()) env.put("CLAUDE_CONFIG_DIR", configDir);
             if (routeThroughMihomo) {
                 int mixedPort = MihomoManager.get(appContext).mixedPort();

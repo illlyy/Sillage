@@ -256,7 +256,9 @@ internal data class NativeBackendStartRequest(
             NativePermissionMode.WORKSPACE -> "acceptEdits"
             else -> "bypassPermissions"
         }
-        val fingerprint = listOf(profile.apiKey, profile.baseUrl, model, claudePermissionMode).joinToString("\n")
+        val fingerprint = listOf(profile.apiKey, profile.apiKeyField, profile.baseUrl, model,
+            profile.haikuModel, profile.sonnetModel, profile.opusModel, profile.subagentModel,
+            profile.extraEnv, claudePermissionMode).joinToString("\n")
         val configDir = File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".claude").absolutePath
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false)
         val retainedRuntime = ClaudeNativeRuntime.exists()
@@ -269,9 +271,7 @@ internal data class NativeBackendStartRequest(
             fingerprint,
             claudeBin.absolutePath,
             configDir,
-            profile.apiKey,
-            profile.baseUrl,
-            model,
+            profile,
             claudePermissionMode,
             allowedClaudeTools(permissionMode),
             retainedThread.orEmpty(),

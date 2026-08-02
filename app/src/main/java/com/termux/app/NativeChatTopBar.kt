@@ -316,8 +316,9 @@ internal fun RikkaTopBar(
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
-    // Liquid Glass samples the live backdrop for progressive glass; Material redraws the
-    // configured chat background (theme glow/aurora/mist/grid/custom image) inside the bar.
+    // Liquid Glass samples the live backdrop for progressive glass. Material stays transparent:
+    // the full-screen chat background layer (AssistantBackdrop) already renders behind this
+    // overlay bar, so the bar shows one continuous surface instead of a redrawn strip.
     val useProgressiveGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
         glassConfig.enabled && liquidGlassSupported && backdrop != null
     val isLight = rememberIsLightTheme()
@@ -335,13 +336,8 @@ internal fun RikkaTopBar(
         content = {
             // The material owns a real 128dp-style sampling surface. This composable is placed
             // as a full-screen overlay, while conversation content keeps the bar-sized safe inset.
-            // In Material mode the layer redraws the chat background so the bar matches the
-            // conversation surface instead of a flat color.
-            Box(Modifier.then(glassMaterialModifier)) {
-                if (!useProgressiveGlass) {
-                    FcodeChatBackdrop(Modifier.fillMaxSize(), customImageMaxDimension = 1024)
-                }
-            }
+            // In Material mode the layer stays empty so the continuous backdrop shows through.
+            Box(Modifier.then(glassMaterialModifier))
             TopAppBar(
                 modifier = Modifier.statusBarsPadding(),
                 // The separate material layer owns the background. Keeping this
@@ -415,8 +411,8 @@ internal fun RikkaTopBar(
         val materialHeightPx = if (useProgressiveGlass) {
             glassConfig.maskHeightDp.dp.roundToPx().coerceAtLeast(topBarPlaceable.height)
         } else {
-            // topBarPlaceable already includes the status bar inset via statusBarsPadding,
-            // so the background layer covers the status bar area too.
+            // Material mode has no redrawn layer: the continuous full-screen backdrop behind
+            // the overlay bar covers the status bar area through the transparent container.
             topBarPlaceable.height
         }
         val materialPlaceable = measurables[0].measure(
