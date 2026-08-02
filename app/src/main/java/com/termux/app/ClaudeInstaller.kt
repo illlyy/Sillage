@@ -41,6 +41,12 @@ internal object ClaudeInstaller {
     fun isInstalled(): Boolean =
         File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME).canExecute()
 
+    /** Removes the Claude CLI binary (keeps profiles and transcripts). */
+    fun uninstall(): Boolean {
+        val binary = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
+        return !binary.exists() || binary.delete()
+    }
+
     fun installAsync(context: Context, progress: Progress) {
         Thread({
             var success = false
@@ -58,12 +64,10 @@ internal object ClaudeInstaller {
                 extractClaude(archive, destination)
                 if (!destination.setExecutable(true, false)) throw IOException("无法设置可执行权限")
                 archive.delete()
-                // The official binary is dynamically linked against musl; install the loader.
+                // The official binary is dynamically linked against musl; install the bundled loader.
                 if (ClaudeMuslRuntime.needsMuslLoader(destination) && !ClaudeMuslRuntime.isLoaderPresent()) {
                     progress.onStage("musl", "正在安装 musl 运行时…")
-                    val muslError = ClaudeMuslRuntime.installBlocking(context) { _, detail ->
-                        progress.onStage("musl", detail)
-                    }
+                    val muslError = ClaudeMuslRuntime.installFromAssets(context)
                     if (muslError != null) throw IOException(muslError)
                 }
                 success = true

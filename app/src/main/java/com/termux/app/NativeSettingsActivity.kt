@@ -473,6 +473,17 @@ class NativeSettingsActivity : ComponentActivity() {
                                 }
                             },
                             claudeInstalled = ClaudeInstaller.isInstalled(),
+                            onUninstallClaude = {
+                                if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
+                                ClaudeInstaller.uninstall()
+                                backendRevision++
+                            },
+                            codexInstalled = isCodexCliInstalled(),
+                            onUninstallCodex = {
+                                if (CodexNativeRuntime.exists()) CodexNativeRuntime.shutdown()
+                                File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex").delete()
+                                backendRevision++
+                            },
                         )
                         SettingsPage.MODEL_EDITOR -> key(editingProfileId, providerRevision) {
                             ModelConfigurationEditor(

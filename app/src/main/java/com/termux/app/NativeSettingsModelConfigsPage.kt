@@ -123,8 +123,12 @@ internal fun ModelConfigurationsPage(
     onClaudeEdit: (String) -> Unit = {},
     onClaudeActivate: (String) -> Unit = {},
     claudeInstalled: Boolean = false,
+    onUninstallClaude: () -> Unit = {},
+    codexInstalled: Boolean = false,
+    onUninstallCodex: () -> Unit = {},
 ) {
     var showInstall by remember { mutableStateOf(false) }
+    var confirmUninstall by remember { mutableStateOf<String?>(null) }
     SettingsScaffold(tr(lang, "模型与 API", "Models & API"), tr(lang, "选择后端并管理 API 配置", "Choose a backend and manage API configurations"), onBack) { pad ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
             item {
@@ -187,6 +191,17 @@ internal fun ModelConfigurationsPage(
                             }
                         }
                     }
+                } else {
+                    item {
+                        TextButton(
+                            onClick = { confirmUninstall = "claude" },
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                        ) {
+                            Icon(HugeIcons.Delete01, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
+                            Spacer(Modifier.width(6.dp))
+                            Text(tr(lang, "卸载 Claude CLI", "Uninstall Claude CLI"), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                 }
                 if (claudeProfiles.isEmpty()) {
                     item { EmptySettingsState(HugeIcons.Sparkles, tr(lang, "还没有 Claude 配置", "No Claude configuration"), tr(lang, "创建后填写 API Key（可选 Base URL）即可使用。", "Create one and fill in your API key (base URL optional).")) }
@@ -222,6 +237,18 @@ internal fun ModelConfigurationsPage(
                         Icon(HugeIcons.Add01, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text(tr(lang, "新建配置", "New configuration"))
                     }
                 }
+                if (codexInstalled) {
+                    item {
+                        TextButton(
+                            onClick = { confirmUninstall = "codex" },
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                        ) {
+                            Icon(HugeIcons.Delete01, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
+                            Spacer(Modifier.width(6.dp))
+                            Text(tr(lang, "卸载 Codex CLI", "Uninstall Codex CLI"), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
@@ -231,6 +258,37 @@ internal fun ModelConfigurationsPage(
             lang = lang,
             onDismiss = { showInstall = false },
         )
+    }
+    when (confirmUninstall) {
+        "claude" -> AlertDialog(
+            onDismissRequest = { confirmUninstall = null },
+            icon = { Icon(HugeIcons.Delete01, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text(tr(lang, "卸载 Claude CLI？", "Uninstall Claude CLI?")) },
+            text = { Text(tr(lang, "将删除 Claude 命令行工具（保留 API 配置与对话记录）。", "The Claude CLI binary will be removed; API profiles and transcripts are kept.")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmUninstall = null
+                    onUninstallClaude()
+                }) { Text(tr(lang, "卸载", "Uninstall"), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmUninstall = null }) { Text(tr(lang, "取消", "Cancel")) } },
+            shape = RoundedCornerShape(28.dp),
+        )
+        "codex" -> AlertDialog(
+            onDismissRequest = { confirmUninstall = null },
+            icon = { Icon(HugeIcons.Delete01, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text(tr(lang, "卸载 Codex CLI？", "Uninstall Codex CLI?")) },
+            text = { Text(tr(lang, "将删除 Codex 命令行工具。WebUI 与终端中的 Codex 命令也会随之不可用。", "The Codex CLI binary will be removed. WebUI and Codex commands in the terminal will stop working.")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmUninstall = null
+                    onUninstallCodex()
+                }) { Text(tr(lang, "卸载", "Uninstall"), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmUninstall = null }) { Text(tr(lang, "取消", "Cancel")) } },
+            shape = RoundedCornerShape(28.dp),
+        )
+        else -> Unit
     }
 }
 

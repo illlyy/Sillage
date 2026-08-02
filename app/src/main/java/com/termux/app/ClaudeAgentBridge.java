@@ -126,10 +126,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             File binary = new File(claudeBinPath);
             java.util.ArrayList<String> command = new java.util.ArrayList<>();
             if (ClaudeMuslRuntime.INSTANCE.needsMuslLoader(binary)) {
+                if (!ClaudeMuslRuntime.INSTANCE.isLoaderPresent()) {
+                    // Bundle the loader from assets automatically; no re-download needed.
+                    ClaudeMuslRuntime.INSTANCE.installFromAssets(appContext);
+                }
                 File loader = ClaudeMuslRuntime.INSTANCE.loaderFile();
                 if (!loader.isFile()) {
                     throw new IllegalStateException(
-                        "Claude CLI 需要 musl 运行时，请在设置中重新下载（会自动安装 musl）");
+                        "Claude CLI 需要 musl 运行时，请在设置中重新下载 Claude CLI");
                 }
                 command.add(loader.getAbsolutePath());
             }

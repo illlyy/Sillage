@@ -9,12 +9,12 @@ import java.io.RandomAccessFile
  * The official `claude-linux-arm64-musl` binary is dynamically linked against musl libc:
  * its ELF header carries `PT_INTERP: /lib/ld-musl-aarch64.so.1`. Android's bionic libc has
  * no musl loader, so a direct exec fails with ENOENT ("error=2"). This runtime detects the
- * dynamic binary, locates (or installs) the musl loader, and the bridge spawns the CLI
- * through it as an explicit interpreter.
+ * dynamic binary and installs the loader (bundled in app assets, extracted from Alpine's
+ * musl package) so the bridge can spawn the CLI through it as an explicit interpreter.
  */
 internal object ClaudeMuslRuntime {
     const val LOADER_FILE = "ld-musl-aarch64.so.1"
-    private const val PT_LOAD = 1
+    const val ASSET_PATH = "claude/$LOADER_FILE"
     private const val PT_INTERP = 3
 
     fun loaderFile(): File = File(TermuxConstants.TERMUX_LIB_PREFIX_DIR_PATH, LOADER_FILE)
@@ -61,50 +61,21 @@ internal object ClaudeMuslRuntime {
         }
     }
 
-    /** Installs the musl runtime via the Termux package manager (blocking). Returns null on success. */
-    fun installBlocking(context: Context, progress: (stage: String, detail: String) -> Unit): String? {
+    /** Copies the bundled musl loader into the Termux lib dir. Returns null on success. */
+    fun installFromAssets(context: Context): String? {
         return try {
-            val bin = TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH
-            val aptGet = File(bin, "apt-get")
-            if (!aptGet.canExecute()) return "Termux 包管理器不可用，请先在开发工具页安装基础环境"
-            val env = HashMap<String, String>()
-            env["HOME"] = TermuxConstants.TERMUX_HOME_DIR_PATH
-            env["PREFIX"] = TermuxConstants.TERMUX_PREFIX_DIR_PATH
-            env["TMPDIR"] = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH
-            env["PATH"] = "$bin:/system/bin"
-            env["DEBIAN_FRONTEND"] = "noninteractive"
-            env["APT_LISTCHANGES_FRONTEND"] = "none"
-            progress("musl", "正在更新软件源…")
-            runApt(listOf(aptGet.absolutePath, "update"), env)
-            progress("musl", "正在安装 musl 运行时…")
-            runApt(listOf(aptGet.absolutePath, "install", "-y", "musl"), env)
-            if (!isLoaderPresent()) return "musl 已安装但未找到加载器"
+            val target = loaderFile()
+            if (target.isFile) return null
+            val parent = target.parentFile
+            if (parent != null && !parent.isDirectory && !parent.mkdirs()) return "无法创建 lib 目录"
+            context.assets.open(ASSET_PATH).use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (!target.setExecutable(true, false)) return "无法设置加载器权限"
             null
         } catch (t: Throwable) {
             t.message ?: t.javaClass.simpleName
         }
-    }
-
-    /** Installs the musl runtime via the Termux package manager (async). */
-    fun installAsync(context: Context, progress: (stage: String, detail: String) -> Unit, done: (Boolean, String?) -> Unit) {
-        Thread({
-            val error = installBlocking(context, progress)
-            done(error == null, error)
-        }, "ClaudeMuslInstall").start()
-    }
-
-    private fun runApt(command: List<String>, env: Map<String, String>) {
-        val builder = ProcessBuilder(command)
-        builder.environment().putAll(env)
-        builder.redirectErrorStream(true)
-        val started = builder.start()
-        started.inputStream.bufferedReader().useLines { lines ->
-            lines.forEach { line ->
-                android.util.Log.d("ClaudeMuslRuntime", line.takeLast(300))
-            }
-        }
-        val exit = started.waitFor()
-        if (exit != 0) throw IllegalStateException("apt 执行失败（code $exit）")
     }
 
     private fun le16(data: ByteArray, offset: Int): Int =
