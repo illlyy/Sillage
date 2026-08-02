@@ -38,6 +38,9 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     static final String PREF_GOAL = "native_thread_goal_v1_";
     static final String PREF_GOAL_STATUS = "native_thread_goal_status_v1_";
 
+    private static final long INIT_TIMEOUT_MS = 30_000L;
+    private static final long MAX_IMAGE_BYTES = 8L * 1024 * 1024;
+
     private final Context appContext;
     private final SharedPreferences prefs;
     private volatile WeakReference<Activity> activityRef;
@@ -71,6 +74,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     // control channel correlation
     private final ConcurrentHashMap<String, String> pendingApprovalToolUseIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> pendingUserInputToolUseIds = new ConcurrentHashMap<>();
+
+    private final Runnable initTimeoutRunnable = () -> {
+        if (sessionId == null && running) {
+            Log.w(TAG, "Claude CLI initialization timed out");
+            emit("onNativeError", "Claude CLI 初始化超时：请检查 API Key、Base URL 与网络连接。");
+            stopInternal();
+        }
+    };
 
     ClaudeAgentBridge(Activity activity, NativeBackendBridge.EventListener listener) {
         this.appContext = activity.getApplicationContext();
@@ -165,8 +176,24 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             readerThread = new Thread(() -> readLoop(stdout), "ClaudeAgentReader");
             readerThread.setDaemon(true);
             readerThread.start();
+            // stderr must be drained too: an unread pipe fills up and blocks the CLI.
+            BufferedReader stderr = new BufferedReader(
+                new InputStreamReader(process.getErrorStream(), java.nio.charset.StandardCharsets.UTF_8));
+            Thread stderrThread = new Thread(() -> {
+                try {
+                    String line;
+                    while ((line = stderr.readLine()) != null) {
+                        Log.d(TAG, "cli: " + line);
+                    }
+                } catch (Exception ignored) {}
+            }, "ClaudeAgentStderr");
+            stderrThread.setDaemon(true);
+            stderrThread.start();
             running = true;
             sendControl("req_init", new JSONObject().put("subtype", "initialize").put("hooks", new JSONObject()));
+            // A stuck CLI (bad key, network, config) must surface instead of "connecting" forever.
+            mainHandler.removeCallbacks(initTimeoutRunnable);
+            mainHandler.postDelayed(initTimeoutRunnable, INIT_TIMEOUT_MS);
         } catch (Exception e) {
             Log.w(TAG, "Failed to spawn claude", e);
             emit("onNativeError", "无法启动 Claude CLI: " + e.getMessage());
@@ -238,6 +265,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         if (observed != null && !observed.isEmpty() && sessionId == null) {
             sessionId = observed;
             ready = true;
+            mainHandler.removeCallbacks(initTimeoutRunnable);
             emit("onReady", observed);
             restoreClientGoal(observed);
             decoder.reset(observed);
@@ -359,11 +387,76 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         try {
             JSONObject user = new JSONObject()
                 .put("type", "user")
-                .put("message", new JSONObject().put("role", "user").put("content", finalText));
+                .put("message", new JSONObject().put("role", "user").put("content", buildContent(finalText, attachmentsJson)));
             writeLine(user.toString());
         } catch (Exception e) {
             emit("onNativeError", "发送消息失败: " + e.getMessage());
         }
+    }
+
+    /** Builds the user content array: text block plus base64 image blocks for attachments. */
+    private JSONArray buildContent(String text, String attachmentsJson) {
+        JSONArray blocks = new JSONArray();
+        try {
+            blocks.put(new JSONObject().put("type", "text").put("text", text));
+        } catch (Exception e) {
+            return new JSONArray().put(text);
+        }
+        if (attachmentsJson == null || attachmentsJson.isEmpty()) return blocks;
+        try {
+            JSONArray attachments = new JSONArray(attachmentsJson);
+            for (int i = 0; i < attachments.length(); i++) {
+                JSONObject attachment = attachments.optJSONObject(i);
+                if (attachment == null) continue;
+                String path = attachment.optString("path");
+                if (path.isBlank()) continue;
+                if (attachment.optBoolean("image")) {
+                    JSONObject image = imageBlock(path);
+                    if (image != null) blocks.put(image);
+                } else {
+                    blocks.put(new JSONObject().put("type", "text")
+                        .put("text", "[附件: " + attachment.optString("name") + " 位于 " + path + "]"));
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "attachment build failed", e);
+        }
+        return blocks;
+    }
+
+    private JSONObject imageBlock(String path) {
+        try {
+            File file = new File(path);
+            if (!file.isFile() || file.length() <= 0L || file.length() > MAX_IMAGE_BYTES) return null;
+            byte[] data = new byte[(int) file.length()];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
+                int offset = 0;
+                while (offset < data.length) {
+                    int count = in.read(data, offset, data.length - offset);
+                    if (count < 0) break;
+                    offset += count;
+                }
+            }
+            String base64 = android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP);
+            return new JSONObject()
+                .put("type", "image")
+                .put("source", new JSONObject()
+                    .put("type", "base64")
+                    .put("media_type", mediaTypeFor(path))
+                    .put("data", base64));
+        } catch (Exception e) {
+            Log.w(TAG, "image block failed for " + path, e);
+            return null;
+        }
+    }
+
+    private static String mediaTypeFor(String path) {
+        String lower = path.toLowerCase(java.util.Locale.US);
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".bmp")) return "image/bmp";
+        return "image/jpeg";
     }
 
     @Override
