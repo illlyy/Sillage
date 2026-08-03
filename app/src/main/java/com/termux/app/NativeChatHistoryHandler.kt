@@ -93,7 +93,7 @@ import org.json.JSONObject
         if (chatState.busy) stopCurrentTurn()
         NativeBackendType.set(prefs, to)
         chatState.backend = to
-        notificationTargetThreadId = null
+        notificationTargetThreadId = ""
         if (to == NativeBackendType.CLAUDE) {
             if (CodexNativeRuntime.exists()) CodexNativeRuntime.shutdown()
         } else {

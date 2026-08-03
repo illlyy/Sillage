@@ -548,6 +548,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                     onToggleFavorite = ::toggleFavorite,
                     onBackHome = ::openHomeSettings,
                     onOpenLegacyWebUi = ::openLegacyWebUi,
+                    onSwitchBackend = ::switchBackend,
                     onToggleTheme = {
                         nativeThemeMode = when (nativeThemeMode) {
                             "system" -> "light"

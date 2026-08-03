@@ -436,6 +436,7 @@ internal fun NativeChatScreen(
     onToggleFavorite: (NativeConversation) -> Unit,
     onBackHome: () -> Unit,
     onOpenLegacyWebUi: () -> Unit,
+    onSwitchBackend: (NativeBackendType) -> Unit,
     onToggleTheme: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -727,6 +728,16 @@ internal fun NativeChatScreen(
             RikkaDrawerV2(
                     currentThreadId = pendingConversationThreadId ?: state.currentThreadId,
                     modelLabel = state.modelLabel,
+                    backend = state.backend,
+                    onSwitchBackend = { to ->
+                        if (pendingConversationThreadId == null) {
+                            scope.launch {
+                                drawerState.close()
+                                withFrameNanos { }
+                                onSwitchBackend(to)
+                            }
+                        }
+                    },
                     conversations = state.conversations,
                     onSearch = { showConversationSearch = true },
                     onRenameConversation = { renameConversation = it },

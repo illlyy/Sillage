@@ -461,6 +461,31 @@ internal fun RikkaDrawerV2(
                 }
             }
 
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(
+                    NativeBackendType.CODEX to "Codex",
+                    NativeBackendType.CLAUDE to "Claude",
+                ).forEach { (value, label) ->
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fcodePressClickable(
+                                onClickLabel = nativeText(language, "切换到$label", "Switch to $label"),
+                            ) { onSwitchBackend(value) },
+                        shape = RoundedCornerShape(13.dp),
+                        color = if (backend == value) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                    ) {
+                        Text(
+                            label,
+                            modifier = Modifier.padding(vertical = 8.dp),
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (backend == value) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
