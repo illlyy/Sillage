@@ -156,6 +156,7 @@ class NativeSettingsActivity : ComponentActivity() {
             var showResponseStats by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_RESPONSE_STATS, true)) }
             var showModelSubtitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_MODEL_SUBTITLE, true)) }
             var showReasoningTitles by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_REASONING_TITLES, true)) }
+            var streamingMarkdownRender by remember { mutableStateOf(prefs.getBoolean(KEY_STREAMING_MARKDOWN_RENDER, false)) }
             var hideStatusBar by remember { mutableStateOf(prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)) }
             var compactComposerOnScroll by remember { mutableStateOf(prefs.getBoolean(FcodeAppearancePreferences.COMPACT_COMPOSER_ON_SCROLL, true)) }
             var chatFontScale by remember { mutableFloatStateOf(readFcodeChatFontScale(this@NativeSettingsActivity)) }
@@ -198,6 +199,7 @@ class NativeSettingsActivity : ComponentActivity() {
                 showResponseStats = showResponseStats,
                 showModelSubtitle = showModelSubtitle,
                 showReasoningTitles = showReasoningTitles,
+                streamingMarkdownRender = streamingMarkdownRender,
                 chatFontScale = chatFontScale,
                 materialTransparency = materialTransparency,
             ) {
@@ -371,6 +373,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             showResponseStats = showResponseStats,
                             showModelSubtitle = showModelSubtitle,
                             showReasoningTitles = showReasoningTitles,
+                            streamingMarkdownRender = streamingMarkdownRender,
                             hideStatusBar = hideStatusBar,
                             compactComposerOnScroll = compactComposerOnScroll,
                             onBack = navigateBack,
@@ -381,6 +384,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onShowResponseStats = { showResponseStats = it; prefs.edit().putBoolean(KEY_SHOW_RESPONSE_STATS, it).apply() },
                             onShowModelSubtitle = { showModelSubtitle = it; prefs.edit().putBoolean(KEY_SHOW_MODEL_SUBTITLE, it).apply() },
                             onShowReasoningTitles = { showReasoningTitles = it; prefs.edit().putBoolean(KEY_SHOW_REASONING_TITLES, it).apply() },
+                            onStreamingMarkdownRender = { streamingMarkdownRender = it; prefs.edit().putBoolean(KEY_STREAMING_MARKDOWN_RENDER, it).apply() },
                             onHideStatusBar = {
                                 hideStatusBar = it
                                 prefs.edit().putBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, it).apply()
@@ -783,5 +787,6 @@ class NativeSettingsActivity : ComponentActivity() {
         const val KEY_SHOW_RESPONSE_STATS = "native_show_response_stats_v1"
         const val KEY_SHOW_MODEL_SUBTITLE = "native_show_model_subtitle_v1"
         const val KEY_SHOW_REASONING_TITLES = "native_show_reasoning_titles_v1"
+        const val KEY_STREAMING_MARKDOWN_RENDER = "native_streaming_markdown_render_v1"
     }
 }

@@ -168,8 +168,6 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
@@ -475,7 +473,7 @@ internal fun RikkaChatInput(
     onRemoveAttachment: (NativeAttachment) -> Unit,
     onPreviewAttachment: (NativeAttachment) -> Unit,
     onValueChange: (String) -> Unit,
-    onSend: (String, Rect?) -> NativeSubmitResult?,
+    onSend: (String) -> NativeSubmitResult?,
     onHeightChanged: (Int) -> Unit,
     backdrop: Backdrop? = null,
     projectPath: String = "",
@@ -499,7 +497,6 @@ internal fun RikkaChatInput(
     val latestExternalValue by rememberUpdatedState(value)
     val latestOnValueChange by rememberUpdatedState(onValueChange)
     var toolsExpanded by remember { mutableStateOf(false) }
-    var composerTextBounds by remember { mutableStateOf<Rect?>(null) }
     var permissionExpanded by remember { mutableStateOf(false) }
 
     // System speech recognition. The recognized phrase is appended to the current draft so
@@ -734,7 +731,7 @@ internal fun RikkaChatInput(
     )
     val submitCurrentText: (String) -> Unit = submit@ { currentText ->
         if (!submitEnabled) return@submit
-        val result = onSend(currentText, composerTextBounds)
+        val result = onSend(currentText)
         if (result?.accepted == true && enabled && (currentText.isNotBlank() || attachments.isNotEmpty())) {
             textState.setTextAndPlaceCursorAtEnd("")
             onValueChange("")
@@ -941,11 +938,10 @@ internal fun RikkaChatInput(
                                 .heightIn(min = fieldMinHeight)
                                 .padding(start = 12.dp, end = fieldEndPadding, top = fieldVerticalPadding, bottom = fieldVerticalPadding)
                                 .focusRequester(composerFocusRequester)
-                                .onGloballyPositioned { composerTextBounds = it.boundsInWindow() }
                                 .onPreviewKeyEvent { event ->
                                     val currentText = textState.text.toString()
                                     if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter && enabled && submitEnabled && currentText.isNotBlank()) {
-                                        val result = onSend(currentText, composerTextBounds)
+                                        val result = onSend(currentText)
                                         if (result?.accepted == true) {
                                             textState.setTextAndPlaceCursorAtEnd("")
                                             onValueChange("")

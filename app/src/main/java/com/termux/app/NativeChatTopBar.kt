@@ -254,7 +254,6 @@ import me.rerere.hugeicons.stroke.Idea01
 import me.rerere.hugeicons.stroke.LanguageCircle
 import me.rerere.hugeicons.stroke.Menu03
 import me.rerere.hugeicons.stroke.MessageAdd01
-import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Copy01
 import me.rerere.hugeicons.stroke.Refresh03
@@ -303,7 +302,6 @@ internal fun RikkaTopBar(
     backdrop: Backdrop? = null,
     glassConfig: TopBarLiquidGlassConfig,
     modifier: Modifier = Modifier,
-    onOpenCommandPalette: (() -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
     // Liquid Glass samples the live backdrop for progressive glass. Material stays transparent:
@@ -366,11 +364,6 @@ internal fun RikkaTopBar(
                     }
                 },
                 actions = {
-                    if (onOpenCommandPalette != null) {
-                        IconButton(onClick = onOpenCommandPalette) {
-                            Icon(HugeIcons.Search01, contentDescription = nativeText(language, "命令面板", "Command palette"))
-                        }
-                    }
                     IconButton(onClick = onNewConversation) {
                         Icon(HugeIcons.MessageAdd01, contentDescription = nativeText(language, "新对话", "New conversation"))
                     }
@@ -488,108 +481,4 @@ internal fun RikkaEmptyState(
     }
 }
 
-@Composable
-internal fun SendMessageFlightOverlay(
-    motion: PendingSendMotion,
-    rootBounds: Rect?,
-    wallpaperBackdrop: Backdrop?,
-    onFinished: () -> Unit,
-) {
-    val root = rootBounds ?: return
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val source = motion.sourceBounds.translate(Offset(-root.left, -root.top))
-    val targetWindow = motion.targetBounds
-    val textStyle = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp, letterSpacing = 0.1.sp)
-
-    if (targetWindow == null) {
-        Text(
-            motion.text,
-            modifier = Modifier
-                .offset { IntOffset(source.left.roundToInt(), source.top.roundToInt()) }
-                .width(with(density) { source.width.toDp() })
-                .zIndex(20f)
-                .clearAndSetSemantics { },
-            color = MaterialTheme.colorScheme.onSurface,
-            style = textStyle,
-            maxLines = 5,
-            overflow = TextOverflow.Clip,
-        )
-        return
-    }
-
-    val target = targetWindow.translate(Offset(-root.left, -root.top))
-    val progress = remember(motion.token) { Animatable(0f) }
-    LaunchedEffect(motion.token, targetWindow) {
-        progress.snapTo(0f)
-        withFrameNanos { }
-        progress.animateTo(
-            targetValue = 1f,
-            animationSpec = spring(
-                dampingRatio = 0.72f,
-                stiffness = 430f,
-                visibilityThreshold = 0.001f,
-            ),
-        )
-        onFinished()
-    }
-
-    val p = progress.value
-    val horizontalPaddingPx = with(density) { 16.dp.toPx() }
-    val verticalPaddingPx = with(density) { 12.dp.toPx() }
-    val startX = source.left - horizontalPaddingPx
-    val startY = source.top - verticalPaddingPx
-    val x = startX + (target.left - startX) * p
-    val y = startY + (target.top - startY) * p
-    val backgroundAlpha = ((p - 0.10f) / 0.42f).coerceIn(0f, 1f)
-    val landingPhase = ((p.coerceIn(0f, 1f) - 0.70f) / 0.30f).coerceIn(0f, 1f)
-    val landingScale = 1f + 0.038f * sin(landingPhase * Math.PI.toFloat())
-    val appearanceRevision = LocalFcodeAppearanceRevision.current
-    val bubbleContext = LocalContext.current
-    val bubbleConfig = remember(appearanceRevision, bubbleContext) { readUserBubbleLiquidGlassConfig(bubbleContext) }
-    val isLightTheme = rememberIsLightTheme()
-    val useLiquidGlass = LocalFcodeInterfaceStyle.current == FcodeInterfaceStyle.LIQUID_GLASS &&
-        bubbleConfig.enabled && liquidGlassSupported && wallpaperBackdrop != null
-    val cornerRadius = if (useLiquidGlass) bubbleConfig.spec.cornerRadiusDp.dp else 22.dp
-    val shape = RoundedCornerShape(cornerRadius, cornerRadius, 6.dp, cornerRadius)
-    val tint = (if (isLightTheme) Color.White else Color.Black).copy(alpha = bubbleConfig.tintAlpha)
-
-    Box(
-        Modifier
-            .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
-            .size(
-                width = with(density) { target.width.toDp() },
-                height = with(density) { target.height.toDp() },
-            )
-            .graphicsLayer {
-                scaleX = landingScale
-                scaleY = landingScale
-                transformOrigin = TransformOrigin(1f, 1f)
-            }
-            .zIndex(20f)
-            .clearAndSetSemantics { },
-    ) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = backgroundAlpha }
-                .then(
-                    if (useLiquidGlass && wallpaperBackdrop != null) Modifier.drawBackdrop(
-                        backdrop = wallpaperBackdrop,
-                        shape = { shape },
-                        effects = { applyLiquidGlassEffects(bubbleConfig.spec, isLightTheme) },
-                        highlight = { Highlight.Plain },
-                        onDrawSurface = { drawRect(tint) },
-                    ) else Modifier.background(MaterialTheme.colorScheme.primaryContainer, shape)
-                ),
-        )
-        Text(
-            motion.text,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            color = if (useLiquidGlass) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimaryContainer,
-            style = textStyle,
-            maxLines = 5,
-            overflow = TextOverflow.Clip,
-        )
-    }
-}
 

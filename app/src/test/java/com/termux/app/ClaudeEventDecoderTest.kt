@@ -311,4 +311,42 @@ class ClaudeEventDecoderTest {
         // With no armed turn, the completion falls back to the session id.
         assertEquals("session-1", JSONObject(complete.second).optString("turnId"))
     }
+
+    @Test
+    fun `system thinking suppresses later stream thinking same turn`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.beginTurn("turn-1")
+        // Legacy system path surfaces thinking first.
+        decoder.decode(
+            line("""{"type":"system","subtype":"thinking","session_id":"s1","thinking":"system thought"}"""),
+            "s1",
+        )
+        events.clear()
+        // stream_event thinking must not double the reasoning panel.
+        decoder.decode(
+            line("""{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x"}}}"""),
+            "s1",
+        )
+        decoder.decode(deltaEvent(0, "thinking_delta", "stream thought"), "s1")
+        assertTrue(events.none { it.first == "onReasoningDelta" && it.second == "stream thought" })
+    }
+
+    @Test
+    fun `stream thinking suppresses later system thinking same turn`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.beginTurn("turn-1")
+        decoder.decode(
+            line("""{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x"}}}"""),
+            "s1",
+        )
+        decoder.decode(deltaEvent(0, "thinking_delta", "stream thought"), "s1")
+        events.clear()
+        decoder.decode(
+            line("""{"type":"system","subtype":"thinking","session_id":"s1","thinking":"system thought"}"""),
+            "s1",
+        )
+        assertTrue(events.none { it.first == "onReasoningDelta" && it.second == "system thought" })
+    }
 }

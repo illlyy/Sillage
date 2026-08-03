@@ -109,6 +109,14 @@ internal object NativeToolConfigs {
             labelEn = "Reasoning",
             category = NativeToolCategory.UNKNOWN,
         )
+        NativeActivityItemType.MCP -> NativeToolDisplayConfig(
+            displayType = NativeToolDisplayType.COLLAPSIBLE,
+            contentType = NativeToolContentType.JSON,
+            labelZh = "MCP 工具",
+            labelEn = "MCP tool",
+            category = NativeToolCategory.MCP,
+            hideResultOnSuccess = true,
+        )
         NativeActivityItemType.TOOL -> DEFAULT
     }
 

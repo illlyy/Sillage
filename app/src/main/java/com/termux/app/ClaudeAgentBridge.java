@@ -248,6 +248,10 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             command.add("stream-json");
             command.add("--input-format");
             command.add("stream-json");
+            // Emit per-token stream_event/content_block_delta lines during generation. Without it
+            // the CLI only writes complete system/assistant messages, so the decoder's whole-block
+            // fallback surfaces the entire thinking/body at once (no streaming).
+            command.add("--include-partial-messages");
             command.add("--verbose");
             command.add("--permission-prompt-tool");
             command.add("stdio");
@@ -710,6 +714,8 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         if (!running) return;
         beginOutboundTurn(UUID.randomUUID().toString());
         String finalText = goalPrefix() + text;
+        String skillHint = skillHintText(skillsJson);
+        if (!skillHint.isEmpty()) finalText += "\n\n" + skillHint;
         try {
             JSONObject user = new JSONObject()
                 .put("type", "user")
@@ -717,6 +723,32 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             writeLine(user.toString());
         } catch (Exception e) {
             emit("onNativeError", "发送消息失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Conveys the composer's selected skills to the Claude CLI as a text reference. Claude Code
+     * discovers skills from its skills directories and loads SKILL.md on mention, so a plain
+     * reference is the version-robust path (skill content blocks depend on the installed CLI).
+     */
+    private static String skillHintText(String skillsJson) {
+        if (skillsJson == null || skillsJson.isBlank()) return "";
+        try {
+            JSONArray skills = new JSONArray(skillsJson);
+            if (skills.length() == 0) return "";
+            StringBuilder names = new StringBuilder();
+            for (int i = 0; i < skills.length(); i++) {
+                JSONObject skill = skills.optJSONObject(i);
+                if (skill == null) continue;
+                String name = skill.optString("name");
+                if (name.isBlank()) continue;
+                if (names.length() > 0) names.append("、");
+                names.append(name);
+            }
+            if (names.length() == 0) return "";
+            return "请使用以下技能：" + names;
+        } catch (Exception e) {
+            return "";
         }
     }
 

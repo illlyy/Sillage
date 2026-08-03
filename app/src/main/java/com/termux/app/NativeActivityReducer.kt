@@ -9,6 +9,7 @@ internal enum class NativeActivityItemType {
     FILE_CHANGE,
     WEB_SEARCH,
     TOOL,
+    MCP,
     SUBAGENT,
 }
 
@@ -462,11 +463,18 @@ internal class NativeActivityReducer(
         }
     }
 
+    /** True when the tool name carries an MCP namespace (Anthropic/OpenAI name MCP tools as
+     *  `mcp__<server>__<tool>`), so live MCP calls render like the historical `mcpToolCall` card
+     *  instead of a generic "tool" row. */
+    private fun isMcpToolName(title: String): Boolean =
+        title.isNotBlank() && title.lowercase().contains("mcp__")
+
     private fun completeTool(event: NativeProtocolEvent.ToolCompleted) {
-        val type = when (event.type.lowercase()) {
-            "filechange", "file_change", "patch", "apply_patch" -> NativeActivityItemType.FILE_CHANGE
-            "websearch", "web_search", "search" -> NativeActivityItemType.WEB_SEARCH
-            "subagent", "subagentactivity", "collabagenttoolcall" -> NativeActivityItemType.SUBAGENT
+        val type = when {
+            event.type.lowercase() in setOf("filechange", "file_change", "patch", "apply_patch") -> NativeActivityItemType.FILE_CHANGE
+            event.type.lowercase() in setOf("websearch", "web_search", "search") -> NativeActivityItemType.WEB_SEARCH
+            event.type.lowercase() in setOf("subagent", "subagentactivity", "collabagenttoolcall") -> NativeActivityItemType.SUBAGENT
+            isMcpToolName(event.title) -> NativeActivityItemType.MCP
             else -> NativeActivityItemType.TOOL
         }
         val id = itemKey(event, "tool:${event.sequence}:${event.type}")

@@ -36,6 +36,12 @@ vendor/             codex-web（资产快照源）、rikkahub-native（只读参
 .\gradlew.bat assembleDebug       # debug APK
 ```
 
+## 构建与发布（先读这两份根目录文档）
+
+- **`BUILDING.md`** — 前置条件 / 版本常量 / 构建命令 / 签名 / 产物路径 / 手机调试。任何机器上构建 APK 照它做。
+- **`RELEASING.md`** — 完整发布 & 推送更新流程：改版本号 → 更新 CHANGELOG/RELEASE_NOTES → 提交 → 打 `vX.Y.Z` tag 推送 → CI 自动签 APK + `update.json` + GitHub Release → 应用内更新自测。
+- 发布铁律：tag 必须 `v` + `versionName` 且 versionCode 递增；签名凭据只在 GitHub Secrets。
+
 ## 关键约定速查
 
 - 新增协议事件必须带 `sequence`，并补 Decoder + Reducer + 单测。

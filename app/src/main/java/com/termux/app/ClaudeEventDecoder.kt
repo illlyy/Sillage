@@ -43,6 +43,14 @@ internal class ClaudeEventDecoder(
     /** content block index of the active thinking block, -1 when none */
     private var activeThinkingIndex = -1
 
+    /**
+     * Which live path delivered thinking this turn: 0 = none yet, 1 = `system` subtype
+     * "thinking", 2 = `stream_event` content blocks. With `--include-partial-messages` the CLI can
+     * emit thinking through BOTH paths; the first one to surface wins and the other is suppressed,
+     * otherwise the reasoning panel would show every chunk twice.
+     */
+    private var thinkingSource = 0
+
     /** Task tool_use id -> subagent capsule key (agentThreadId) */
     private val subagentCapsules = HashMap<String, String>()
 
@@ -73,6 +81,7 @@ internal class ClaudeEventDecoder(
         thinkingSurfacedThisTurn = false
         textStreamedThisTurn = false
         activeThinkingIndex = -1
+        thinkingSource = 0
         textBuffer = null
         subagentCapsules.clear()
         subagentNames.clear()
@@ -144,6 +153,9 @@ internal class ClaudeEventDecoder(
                     else -> ""
                 }
                 if (text.isNotEmpty()) {
+                    // Stream_event thinking already won this turn's source; don't double surface.
+                    if (thinkingSource == 2) return
+                    thinkingSource = 1
                     surfacedSystemThinking = true
                     thinkingSurfacedThisTurn = true
                     val buffer = systemThinkingBuffer ?: StringBuilder().also { systemThinkingBuffer = it }
@@ -162,9 +174,14 @@ internal class ClaudeEventDecoder(
                 val block = event.optJSONObject("content_block") ?: return
                 when (block.optString("type")) {
                     "thinking" -> {
-                        thinkingSurfacedThisTurn = true
-                        thinkingBuffer = StringBuilder()
-                        activeThinkingIndex = event.optInt("index", -1)
+                        // Legacy system/thinking already won this turn's source; don't arm the
+                        // content-block path (it would double the reasoning panel).
+                        if (thinkingSource != 1) {
+                            thinkingSource = 2
+                            thinkingSurfacedThisTurn = true
+                            thinkingBuffer = StringBuilder()
+                            activeThinkingIndex = event.optInt("index", -1)
+                        }
                     }
                     "text" -> textBuffer = StringBuilder()
                     "tool_use" -> observeToolBlock(event.optInt("index", -1), block)
@@ -185,7 +202,13 @@ internal class ClaudeEventDecoder(
                     "thinking_delta" -> {
                         thinkingBuffer?.append(delta.optString("thinking"))
                         val text = delta.optString("thinking")
-                        if (text.isNotEmpty()) emit("onReasoningDelta", text)
+                        if (text.isNotEmpty() && thinkingSource != 1) {
+                            // A thinking_delta can arrive without a preceding content_block_start
+                            // (or the legacy system path already surfaced thinking). Never mix
+                            // sources for one turn's reasoning panel.
+                            thinkingSource = 2
+                            emit("onReasoningDelta", text)
+                        }
                     }
                     "input_json_delta" -> {
                         val index = event.optInt("index", -1)
@@ -455,6 +478,7 @@ internal class ClaudeEventDecoder(
         thinkingSurfacedThisTurn = false
         textStreamedThisTurn = false
         activeThinkingIndex = -1
+        thinkingSource = 0
         textBuffer = null
         subagentCapsules.clear()
         subagentNames.clear()

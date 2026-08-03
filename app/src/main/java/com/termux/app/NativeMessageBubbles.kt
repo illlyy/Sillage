@@ -288,15 +288,13 @@ internal fun RikkaMessageItem(
     onReasoningAutoCollapse: () -> Unit = {},
     onPreviewAttachment: (NativeAttachment) -> Unit = {},
     wallpaperBackdrop: Backdrop? = null,
-    sendingMotionActive: Boolean = false,
-    onUserBubbleBounds: ((Rect) -> Unit)? = null,
 ) {
     FcodeChatTypography {
         when (message.role) {
             NativeChatRole.USER -> {
                 val implementsPlan = message.content.startsWith(NATIVE_IMPLEMENT_PLAN_DISPLAY_PREFIX)
                 val displayText = if (implementsPlan) nativeText(LocalNativeLanguage.current, "\u662f\uff0c\u6267\u884c\u6b64\u8ba1\u5212", "Yes, implement this plan") else message.content
-                RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan, backdrop = wallpaperBackdrop, sendingMotionActive = sendingMotionActive, onBubbleBounds = onUserBubbleBounds)
+                RikkaUserMessage(displayText, message.skills, message.attachments, onEdit, onPreviewAttachment, editable = !implementsPlan, backdrop = wallpaperBackdrop)
             }
             NativeChatRole.ASSISTANT -> {
                 val liveSnapshot = if (message.streaming && chatState.liveAssistantMessageId == message.id) {
@@ -344,8 +342,6 @@ internal fun RikkaUserMessage(
     onPreviewAttachment: (NativeAttachment) -> Unit,
     editable: Boolean = true,
     backdrop: Backdrop? = null,
-    sendingMotionActive: Boolean = false,
-    onBubbleBounds: ((Rect) -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
     val clipboard = LocalClipboardManager.current
@@ -428,7 +424,6 @@ internal fun RikkaUserMessage(
                 modifier = Modifier
                     .widthIn(max = 360.dp)
                     .fcodePressCombinedClickable(onClick = {}, onLongClick = { menuExpanded = true })
-                    .onGloballyPositioned { onBubbleBounds?.invoke(it.boundsInWindow()) }
                     .then(
                         if (useLiquidGlass && backdrop != null) Modifier.drawBackdrop(
                             backdrop = backdrop,
@@ -437,8 +432,7 @@ internal fun RikkaUserMessage(
                             highlight = { Highlight.Plain },
                             onDrawSurface = { drawRect(bubbleTint) },
                         ) else Modifier
-                    )
-                    .graphicsLayer { alpha = if (sendingMotionActive) 0f else 1f },
+                    ),
                 shape = bubbleShape,
                 color = if (useLiquidGlass) Color.Transparent else MaterialTheme.colorScheme.primaryContainer.copy(alpha = materialBubbleAlpha),
                 contentColor = if (useLiquidGlass) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimaryContainer,
@@ -630,8 +624,9 @@ internal fun StreamingMarkdownSnapshotContent(
         }
         snapshot.blocks.subList(firstVisibleBlock, snapshot.blocks.size).forEach { block ->
             androidx.compose.runtime.key(block.start, block.end) {
-                if (streaming) {
-                    // Do not create Markwon AndroidViews while tokens are arriving. Even with
+                if (streaming && !LocalStreamingMarkdownRenderEnabled.current) {
+                    // Do not create Markwon AndroidViews while tokens are arriving unless the
+                    // user opts into live Markdown via the streaming-render toggle. Even with
                     // background parsing, applying spans and measuring each new TextView runs on
                     // the UI thread. Plain stable Compose chunks keep generation frame-friendly;
                     // completed output is upgraded to rich Markdown in bounded batches above.

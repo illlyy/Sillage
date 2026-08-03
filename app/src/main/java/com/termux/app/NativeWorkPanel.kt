@@ -377,6 +377,7 @@ internal fun WorkPanelDialog(
                             gitCount = runCatching { JSONObject(state.gitSnapshot).optJSONArray("entries")?.length() ?: 0 }.getOrDefault(0),
                             onTab = { tab = it },
                         )
+                        McpStatusStrip()
                         AnimatedContent(
                             targetState = tab,
                             transitionSpec = {
@@ -417,6 +418,60 @@ internal fun WorkPanelDialog(
 }
 
 internal fun workPanelTabIndex(tab: String): Int = listOf("plan", "checkpoints", "snapshots", "worktrees", "agents", "changes", "git").indexOf(tab).coerceAtLeast(0)
+
+/** Compact MCP server connectivity line shown at the top of the work panel when servers are
+ *  configured. Basic UI presentation: per-server state comes from the shared probe store; no
+ *  backend wiring is added here. */
+@Composable
+private fun McpStatusStrip() {
+    val language = LocalNativeLanguage.current
+    val context = LocalContext.current
+    val snapshot by produceState<Pair<List<NativeMcpServerConfig>, Map<String, NativeMcpRuntimeStatus>>?>(null) {
+        value = withContext(Dispatchers.IO) {
+            val servers = runCatching { NativeMcpConfigStore.load() }.getOrDefault(emptyList())
+            if (servers.isEmpty()) null
+            else servers to NativeMcpRuntimeStatusStore.load(context, servers)
+        }
+    }
+    val loaded = snapshot ?: return
+    val (servers, statuses) = loaded
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(HugeIcons.Code, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(5.dp))
+            Text(nativeText(language, "MCP 服务器", "MCP servers"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.weight(1f))
+            val connected = servers.count { statuses[it.key]?.state == "connected" }
+            Text(
+                nativeText(language, "$connected/${servers.size} 在线", "$connected/${servers.size} online"),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            servers.forEach { server ->
+                val status = statuses[server.key] ?: NativeMcpRuntimeStatus()
+                val (dotColor, label) = when (status.state) {
+                    "connected" -> MaterialTheme.colorScheme.tertiary to nativeText(language, "在线", "Online")
+                    "unavailable" -> MaterialTheme.colorScheme.error to nativeText(language, "离线", "Offline")
+                    "disabled" -> MaterialTheme.colorScheme.outline to nativeText(language, "已停用", "Disabled")
+                    else -> MaterialTheme.colorScheme.primary to nativeText(language, "检测中", "Checking")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(7.dp).background(dotColor, CircleShape))
+                    Spacer(Modifier.width(5.dp))
+                    Text(server.key, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface)
+                    Spacer(Modifier.width(5.dp))
+                    Text(label, style = MaterialTheme.typography.labelSmall, color = dotColor)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
 
 @Composable
 internal fun WorkPanelTabs(tab: String, planCount: Int, checkpointCount: Int, snapshotCount: Int, worktreeCount: Int, agentCount: Int, changeCount: Int, gitCount: Int, onTab: (String) -> Unit) {

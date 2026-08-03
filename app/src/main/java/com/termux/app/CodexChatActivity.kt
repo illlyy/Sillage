@@ -150,6 +150,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         // released in 1_200-char pages. Real per-token streaming stays unaffected (backlog small).
         internal const val STREAM_REVEAL_CHARS_PER_SEC = 2_400
         internal const val MIN_STREAM_REVEAL_PER_FLUSH = 12
+        // Above this buffered tail the turn completion defers its seal until the reveal drains it,
+        // instead of force-draining the whole answer in one frame. Real streaming never exceeds it.
+        internal const val GRACEFUL_TURN_DRAIN_THRESHOLD = 1_200
     }
 
 
@@ -306,6 +309,10 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
     internal var answerPendingSince = 0L
 
     internal var answerLastFlushAtMs = 0L
+
+    /** Completion payload held while a whole-answer tail reveals at the capped rate (Claude relay). */
+    private var deferredTurnCompletionValue: String? = null
+
     /**
      * Direct-manipulation and navigation motion owns the UI thread. Stream deltas keep buffering
      * while those animations run, but no growing text snapshot is published into Compose until
@@ -418,6 +425,8 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
 
     internal var showReasoningTitles by mutableStateOf(true)
 
+    internal var streamingMarkdownRenderEnabled by mutableStateOf(false)
+
     internal var hideNativeStatusBar by mutableStateOf(false)
 
     internal val imagePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
@@ -480,6 +489,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         showResponseStats = nativePrefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
         showModelSubtitle = nativePrefs.getBoolean(NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE, true)
         showReasoningTitles = nativePrefs.getBoolean(NATIVE_SHOW_REASONING_TITLES_PREFERENCE, true)
+        streamingMarkdownRenderEnabled = nativePrefs.getBoolean("native_streaming_markdown_render_v1", false)
         hideNativeStatusBar = nativePrefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
@@ -506,6 +516,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 showResponseStats = showResponseStats,
                 showModelSubtitle = showModelSubtitle,
                 showReasoningTitles = showReasoningTitles,
+                streamingMarkdownRender = streamingMarkdownRenderEnabled,
             ) {
                 NativeChatScreen(
                     state = chatState,
@@ -906,102 +917,18 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 chatState.addActivity(value)
             }
             "onTurnComplete" -> {
-                // Publish any tail still buffered by the chunked stream flush before the phase
-                // seals: a deferred flush can otherwise leave the final tokens missing from the
-                // sealed answer (visible only after re-entering).
-                flushReasoningDeltas(force = true)
-                flushAnswerDeltas(force = true)
-                flushCommandDeltas()
-                val completion = value.takeIf { it.isNotBlank() }
-                    ?.let { runCatching { JSONObject(it) }.getOrNull() }
-                val completionThreadId = completion?.let(::protocolEventThread).orEmpty()
-                val routeThreadId = currentThreadId.orEmpty()
-                val completionTurnId = completion?.let(::protocolEventTurn).orEmpty()
-                    .ifBlank { lastProtocolCompletedTurnId }
-                val completionEpoch = protocolEventLocalEpoch(completion)
-                val activeTurnId = chatState.currentTurnId
-                val ownsVisibleTurn = NativeTurnCompletionDrainGate.drainIfOwned(
-                    completionThreadId = completionThreadId,
-                    currentThreadId = currentThreadId,
-                    completionTurnId = completionTurnId,
-                    completionEpoch = completionEpoch,
-                    currentEpoch = legacyPendingStreamScope.currentEpoch,
-                    currentTurnActive = chatState.phase.active,
-                    acceptTurn = { turnId ->
-                        chatState.shouldAcceptProtocolTurnCompletion(
-                            turnId,
-                            localEpochMatches = completionEpoch == legacyPendingStreamScope.currentEpoch,
-                        )
-                    },
-                    drain = ::drainPendingNativeUiEvents,
-                )
-                if (!ownsVisibleTurn) {
-                    NativeChatDiagnostics.record(this, "stale_turn_completion_ignored", JSONObject()
-                        .put("thread", currentThreadId.orEmpty().take(8))
-                        .put("completedThread", completionThreadId.take(8))
-                        .put("completedTurn", completionTurnId.take(12))
-                        .put("activeTurn", activeTurnId.take(12)))
+                // A whole-answer relay can buffer the full reply in one onDelta; force-draining it
+                // here would pop the entire answer in a single frame. Reveal the remaining tail at
+                // the capped rate first, then seal exactly as the immediate path does. Real
+                // streaming keeps a near-empty buffer at completion, so this stays a no-op.
+                if (pendingAnswer.length > GRACEFUL_TURN_DRAIN_THRESHOLD ||
+                    pendingReasoning.length > GRACEFUL_TURN_DRAIN_THRESHOLD
+                ) {
+                    deferredTurnCompletionValue = value
+                    streamHandler.postDelayed(::drainAnswerTailThenComplete, STREAM_CATCH_UP_DELAY_MS)
                     return
                 }
-                // Only the completion that owns the visible thread/turn may publish the global
-                // compatibility StringBuilders. An old completion can otherwise flush a new turn.
-                val completionTurn = completion?.optJSONObject("turn")
-                val nestedContinuation = completionTurn?.let {
-                    it.optBoolean(
-                        "hasPendingContinuation",
-                        it.optBoolean("has_pending_continuation", false),
-                    )
-                } ?: false
-                val hasPendingContinuation = completion?.let {
-                    it.optBoolean(
-                        "hasPendingContinuation",
-                        it.optBoolean("has_pending_continuation", nestedContinuation),
-                    )
-                } ?: nestedContinuation
-                val wasFailed = chatState.phase == NativeTurnPhase.FAILED ||
-                    nativeTurnLifecycleFailed(completionTurn, completion?.optJSONObject("details"), completion)
-                val stableCompletionTurn = completionTurnId.ifBlank { activeTurnId }
-                if (!claimTurnCompletion(routeThreadId, stableCompletionTurn)) return
-                val waitingForGoalRetry = goalRetryWaitingForCompletion
-                if (!protocolTurnCompletedSeen) {
-                    chatState.acceptProtocolEvent(NativeProtocolEvent.TurnCompleted(
-                        threadId = routeThreadId,
-                        turnId = completionTurnId.takeIf { it.isNotBlank() }
-                            ?: chatState.currentTurnId.takeIf { it.isNotBlank() },
-                        failed = wasFailed,
-                    ))
-                    chatState.completeTurn()
-                }
-                currentThreadId?.let(NativeHistorySnapshotCache::remove)
-                approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
-                currentThreadId?.takeIf { chatState.pendingUserInputRequest.isNotBlank() }
-                    ?.let(::clearPendingUserInput)
-                if (wasFailed) chatState.phase = NativeTurnPhase.FAILED
-                pendingPlanItemId = ""
-                if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
-                if (!hasPendingContinuation) stopFrameDiagnostics()
-                refreshConversations()
-                if (!hasPendingContinuation) applyPendingProviderConfiguration()
-                if (!hasPendingContinuation) applyPendingClaudeModelSwitch()
-                val hasQueuedFollowUp = chatState.queuedFollowUps.isNotEmpty()
-                if (hasQueuedFollowUp) {
-                    // Keep the completion barrier observable for one frame, then start exactly one
-                    // queued turn. Remaining follow-ups advance one-per-completion like WebUI.
-                    goalRetryWaitingForCompletion = false
-                    streamHandler.postDelayed(::sendNextQueuedFollowUp, 80L)
-                }
-                if (!hasQueuedFollowUp && waitingForGoalRetry && canAutoRetryGoal()) {
-                    goalRetryWaitingForCompletion = false
-                    cancelGoalAutoRetry()
-                    scheduleGoalRetry(400L)
-                } else if (hasPendingContinuation && !hasQueuedFollowUp && !goalRetryWaitingForCompletion) {
-                    chatState.phase = NativeTurnPhase.WAITING
-                    chatState.processingLabel = nativeText(nativeLanguage, "继续处理中", "Continuing")
-                } else if (!wasFailed && !goalRetryWaitingForCompletion) {
-                    goalRetryCycleActive = false
-                    chatState.completeRetryStatus()
-                }
-                syncNativeContinuationHint()
+                processTurnCompletion(value)
             }
             "onHistoryWarning" -> {
                 chatState.historyLoading = false
@@ -1033,6 +960,130 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
             "onLog" -> Unit
         }
         publishSessionActivity()
+    }
+
+    /**
+     * The shared turn-completion body (drain gate, protocol routing, seal, follow-ups). Invoked
+     * either synchronously from onTurnComplete (real streaming) or deferred until a whole-answer
+     * tail has been revealed at the capped rate (see [drainAnswerTailThenComplete]).
+     */
+    private fun processTurnCompletion(value: String) {
+        // Publish any tail still buffered by the chunked stream flush before the phase seals: a
+        // deferred flush can otherwise leave the final tokens missing from the sealed answer
+        // (visible only after re-entering). In the graceful-drain path the buffers are already
+        // empty here, so these are no-ops.
+        flushReasoningDeltas(force = true)
+        flushAnswerDeltas(force = true)
+        flushCommandDeltas()
+        val completion = value.takeIf { it.isNotBlank() }
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val completionThreadId = completion?.let(::protocolEventThread).orEmpty()
+        val routeThreadId = currentThreadId.orEmpty()
+        val completionTurnId = completion?.let(::protocolEventTurn).orEmpty()
+            .ifBlank { lastProtocolCompletedTurnId }
+        val completionEpoch = protocolEventLocalEpoch(completion)
+        val activeTurnId = chatState.currentTurnId
+        val ownsVisibleTurn = NativeTurnCompletionDrainGate.drainIfOwned(
+            completionThreadId = completionThreadId,
+            currentThreadId = currentThreadId,
+            completionTurnId = completionTurnId,
+            completionEpoch = completionEpoch,
+            currentEpoch = legacyPendingStreamScope.currentEpoch,
+            currentTurnActive = chatState.phase.active,
+            acceptTurn = { turnId ->
+                chatState.shouldAcceptProtocolTurnCompletion(
+                    turnId,
+                    localEpochMatches = completionEpoch == legacyPendingStreamScope.currentEpoch,
+                )
+            },
+            drain = ::drainPendingNativeUiEvents,
+        )
+        if (!ownsVisibleTurn) {
+            NativeChatDiagnostics.record(this, "stale_turn_completion_ignored", JSONObject()
+                .put("thread", currentThreadId.orEmpty().take(8))
+                .put("completedThread", completionThreadId.take(8))
+                .put("completedTurn", completionTurnId.take(12))
+                .put("activeTurn", activeTurnId.take(12)))
+            return
+        }
+        // Only the completion that owns the visible thread/turn may publish the global
+        // compatibility StringBuilders. An old completion can otherwise flush a new turn.
+        val completionTurn = completion?.optJSONObject("turn")
+        val nestedContinuation = completionTurn?.let {
+            it.optBoolean(
+                "hasPendingContinuation",
+                it.optBoolean("has_pending_continuation", false),
+            )
+        } ?: false
+        val hasPendingContinuation = completion?.let {
+            it.optBoolean(
+                "hasPendingContinuation",
+                it.optBoolean("has_pending_continuation", nestedContinuation),
+            )
+        } ?: nestedContinuation
+        val wasFailed = chatState.phase == NativeTurnPhase.FAILED ||
+            nativeTurnLifecycleFailed(completionTurn, completion?.optJSONObject("details"), completion)
+        val stableCompletionTurn = completionTurnId.ifBlank { activeTurnId }
+        if (!claimTurnCompletion(routeThreadId, stableCompletionTurn)) return
+        val waitingForGoalRetry = goalRetryWaitingForCompletion
+        if (!protocolTurnCompletedSeen) {
+            chatState.acceptProtocolEvent(NativeProtocolEvent.TurnCompleted(
+                threadId = routeThreadId,
+                turnId = completionTurnId.takeIf { it.isNotBlank() }
+                    ?: chatState.currentTurnId.takeIf { it.isNotBlank() },
+                failed = wasFailed,
+            ))
+            chatState.completeTurn()
+        }
+        currentThreadId?.let(NativeHistorySnapshotCache::remove)
+        approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
+        currentThreadId?.takeIf { chatState.pendingUserInputRequest.isNotBlank() }
+            ?.let(::clearPendingUserInput)
+        if (wasFailed) chatState.phase = NativeTurnPhase.FAILED
+        pendingPlanItemId = ""
+        if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
+        if (!hasPendingContinuation) stopFrameDiagnostics()
+        refreshConversations()
+        if (!hasPendingContinuation) applyPendingProviderConfiguration()
+        if (!hasPendingContinuation) applyPendingClaudeModelSwitch()
+        val hasQueuedFollowUp = chatState.queuedFollowUps.isNotEmpty()
+        if (hasQueuedFollowUp) {
+            // Keep the completion barrier observable for one frame, then start exactly one
+            // queued turn. Remaining follow-ups advance one-per-completion like WebUI.
+            goalRetryWaitingForCompletion = false
+            streamHandler.postDelayed(::sendNextQueuedFollowUp, 80L)
+        }
+        if (!hasQueuedFollowUp && waitingForGoalRetry && canAutoRetryGoal()) {
+            goalRetryWaitingForCompletion = false
+            cancelGoalAutoRetry()
+            scheduleGoalRetry(400L)
+        } else if (hasPendingContinuation && !hasQueuedFollowUp && !goalRetryWaitingForCompletion) {
+            chatState.phase = NativeTurnPhase.WAITING
+            chatState.processingLabel = nativeText(nativeLanguage, "继续处理中", "Continuing")
+        } else if (!wasFailed && !goalRetryWaitingForCompletion) {
+            goalRetryCycleActive = false
+            chatState.completeRetryStatus()
+        }
+        syncNativeContinuationHint()
+    }
+
+    /**
+     * Reveals a whole-answer tail at the capped rate, then runs the deferred turn completion.
+     * Guarded by [deferredTurnCompletionValue]: a stale run (a new turn already started) is a
+     * no-op, and the drain gate inside [processTurnCompletion] still rejects mis-routed
+     * completions.
+     */
+    private fun drainAnswerTailThenComplete() {
+        if (deferredTurnCompletionValue == null) return
+        flushReasoningDeltas(force = false)
+        flushAnswerDeltas(force = false)
+        if (pendingAnswer.isNotEmpty() || pendingReasoning.isNotEmpty()) {
+            streamHandler.postDelayed(::drainAnswerTailThenComplete, STREAM_CATCH_UP_DELAY_MS)
+            return
+        }
+        val value = deferredTurnCompletionValue ?: return
+        deferredTurnCompletionValue = null
+        processTurnCompletion(value)
     }
 
     /**
@@ -1077,6 +1128,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         showResponseStats = prefs.getBoolean(NATIVE_SHOW_RESPONSE_STATS_PREFERENCE, true)
         showModelSubtitle = prefs.getBoolean(NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE, true)
         showReasoningTitles = prefs.getBoolean(NATIVE_SHOW_REASONING_TITLES_PREFERENCE, true)
+        streamingMarkdownRenderEnabled = prefs.getBoolean("native_streaming_markdown_render_v1", false)
         hideNativeStatusBar = prefs.getBoolean(NATIVE_HIDE_STATUS_BAR_PREFERENCE, false)
         applyNativeStatusBarVisibility(hideNativeStatusBar)
         chatState.permissionMode = NativePermissionMode.normalize(prefs.getString(NativePermissionMode.PREFERENCE_KEY, NativePermissionMode.FULL_ACCESS))

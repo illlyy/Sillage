@@ -293,20 +293,14 @@ internal val NativeTurnPhase.showsProcessingPanel: Boolean
         else -> false
     }
 
-@Immutable
-internal data class PendingSendMotion(
-    val token: Long,
-    val messageId: String,
-    val text: String,
-    val sourceBounds: Rect,
-    val targetBounds: Rect? = null,
-)
-
 val LocalShowReasoning = staticCompositionLocalOf { true }
 val LocalAutoFollowOutput = staticCompositionLocalOf { true }
 val LocalShowResponseStats = staticCompositionLocalOf { true }
 val LocalShowModelSubtitle = staticCompositionLocalOf { true }
 val LocalShowReasoningTitles = staticCompositionLocalOf { true }
+/** Render rich Markdown for the stable answer blocks while tokens are still streaming (default
+ * off: plain stable chunks keep generation frame-friendly on low-end devices). */
+val LocalStreamingMarkdownRenderEnabled = staticCompositionLocalOf { false }
 
 internal fun nativeText(language: String, zh: String, en: String): String = if (language == "en") en else zh
 
@@ -331,6 +325,7 @@ internal fun FcodeChatTheme(
     showResponseStats: Boolean = true,
     showModelSubtitle: Boolean = true,
     showReasoningTitles: Boolean = true,
+    streamingMarkdownRender: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val dark = currentFcodeDarkMode(themeMode)
@@ -371,6 +366,7 @@ internal fun FcodeChatTheme(
             LocalShowResponseStats provides showResponseStats,
             LocalShowModelSubtitle provides showModelSubtitle,
             LocalShowReasoningTitles provides showReasoningTitles,
+            LocalStreamingMarkdownRenderEnabled provides streamingMarkdownRender,
             LocalFcodeInterfaceStyle provides style,
             LocalFcodeAppearanceRevision provides appearanceRevision,
             LocalFcodeColorPalette provides palette,
@@ -447,7 +443,6 @@ internal fun NativeChatScreen(
     val progressiveTopBar = interfaceStyle == FcodeInterfaceStyle.LIQUID_GLASS &&
         topBarGlassConfig.enabled && liquidGlassSupported
     val dynamicBackground = LocalFcodeChatDynamicBackground.current
-    val sendAnimationsEnabled = LocalStreamAnimationsEnabled.current
     val autoFollowEnabled = LocalAutoFollowOutput.current
     val drawerState = rememberFcodeInteractiveDrawerState()
     val scope = rememberCoroutineScope()
@@ -512,8 +507,6 @@ internal fun NativeChatScreen(
     val wallpaperBackdrop = rememberLayerBackdrop()
     val conversationBackdrop = rememberLayerBackdrop()
     val chatBackdrop = rememberCombinedBackdrop(wallpaperBackdrop, conversationBackdrop)
-    var pendingSendMotion by remember(conversationListKey) { mutableStateOf<PendingSendMotion?>(null) }
-    var sendMotionRootBounds by remember { mutableStateOf<Rect?>(null) }
     var ultraBurst by remember(conversationListKey) { mutableStateOf<UltraBurstRequest?>(null) }
     var rootWindowBounds by remember { mutableStateOf(Rect.Zero) }
     var inputHeightPx by remember { mutableIntStateOf(0) }
@@ -702,19 +695,6 @@ internal fun NativeChatScreen(
         }
     }
 
-    LaunchedEffect(pendingSendMotion?.token) {
-        val activeMotion = pendingSendMotion ?: return@LaunchedEffect
-        onUiMotionChanged(true)
-        try {
-            // The send animation settles in ~half a second; holding stream publication for the
-            // full 1.6s makes a fast first reply appear frozen, so bound the motion hold.
-            delay(450L)
-            if (pendingSendMotion?.token == activeMotion.token) pendingSendMotion = null
-        } finally {
-            onUiMotionChanged(false)
-        }
-    }
-
     androidx.compose.runtime.CompositionLocalProvider(
         LocalOpenSubagentDrawer provides openSubagentDrawer,
         LocalTextSelectionActivityChanged provides onTextSelectionActivityChanged,
@@ -859,11 +839,7 @@ internal fun NativeChatScreen(
                 ) { _ ->
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        // Keep the capture layer full-height. A permanent layout offset here clips
-                        // the conversation below the app bar, so the glass can only ever sample the
-                        // wallpaper. Scrollable content owns the top inset instead (see below).
-                        .onGloballyPositioned { sendMotionRootBounds = it.boundsInWindow() },
+                        .fillMaxSize(),
                 ) {
                     Box(
                         modifier = Modifier
@@ -1019,11 +995,12 @@ internal fun NativeChatScreen(
                                         .then(
                                             if (bubbleReveal < 0.999f) Modifier.graphicsLayer {
                                                 val p = bubbleReveal.coerceIn(0f, 1f)
-                                                scaleX = 0.85f + 0.15f * p
-                                                scaleY = 0.85f + 0.15f * p
-                                                translationX = -(1f - p) * size.width * 0.32f
+                                                // Fade + a slight vertical settle in place; no
+                                                // horizontal slide — a per-message slide reads as
+                                                // jank in a chat.
                                                 alpha = p
-                                                transformOrigin = TransformOrigin(0f, 0.5f)
+                                                translationY = (1f - p) * 6.dp.toPx()
+                                                transformOrigin = TransformOrigin.Center
                                             } else Modifier
                                         )
                                         .then(stableMessageModifier),
@@ -1041,15 +1018,6 @@ internal fun NativeChatScreen(
                                             onReasoningAutoCollapse = pauseFollowForReasoning,
                                             onPreviewAttachment = previewMessageAttachment,
                                             wallpaperBackdrop = wallpaperBackdrop,
-                                            sendingMotionActive = pendingSendMotion?.messageId == message.id,
-                                            onUserBubbleBounds = if (pendingSendMotion?.messageId == message.id) {
-                                                { bounds ->
-                                                    val current = pendingSendMotion
-                                                    if (current != null && current.messageId == message.id && current.targetBounds != bounds) {
-                                                        pendingSendMotion = current.copy(targetBounds = bounds)
-                                                    }
-                                                }
-                                            } else null,
                                         )
                                     }
                                 }
@@ -1174,24 +1142,13 @@ internal fun NativeChatScreen(
                         onRemoveAttachment = onRemoveAttachment,
                         onPreviewAttachment = { previewAttachment = it },
                         onValueChange = onInputChange,
-                        onSend = { inputText, sourceBounds ->
+                        onSend = { inputText ->
                             followOutput = true
                             followPausedUntil = 0L
                             // TextFieldState remains focused while a turn is active. The Activity
                             // chooses same-turn steer or local queue without disabling the IME.
                             val result = onSend(inputText)
-                            val messageId = result?.messageId
-                            if (messageId != null && inputText.isNotBlank() && sourceBounds != null &&
-                                sendAnimationsEnabled && !touchExplorationEnabled
-                            ) {
-                                pendingSendMotion = PendingSendMotion(
-                                    token = android.os.SystemClock.uptimeMillis(),
-                                    messageId = messageId,
-                                    text = inputText.trim(),
-                                    sourceBounds = sourceBounds,
-                                )
-                            }
-                            if (messageId != null) {
+                            if (result?.messageId != null) {
                                 scope.launch {
                                     withFrameNanos { }
                                     listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), Int.MAX_VALUE)
@@ -1204,16 +1161,6 @@ internal fun NativeChatScreen(
                         modifier = Modifier
                             .align(Alignment.BottomCenter),
                     )
-                    pendingSendMotion?.let { motion ->
-                        SendMessageFlightOverlay(
-                            motion = motion,
-                            rootBounds = sendMotionRootBounds,
-                            wallpaperBackdrop = wallpaperBackdrop,
-                            onFinished = {
-                                if (pendingSendMotion?.token == motion.token) pendingSendMotion = null
-                            },
-                        )
-                    }
                 }
             }
                 // Keep the progressive material in the same full-screen stacking context as the
@@ -1235,7 +1182,6 @@ internal fun NativeChatScreen(
                     backdrop = chatBackdrop,
                     glassConfig = topBarGlassConfig,
                     modifier = Modifier.align(Alignment.TopCenter).zIndex(2f),
-                    onOpenCommandPalette = { showCommandPalette = true },
                 )
                 ultraBurst?.let { burst ->
                     UltraGlassShockwave(
@@ -1252,6 +1198,11 @@ internal fun NativeChatScreen(
                     onAnchorClick = { moreMenuExpanded = true },
                     onDismissRequest = { moreMenuExpanded = false },
                     items = listOf(
+                        FcodeMorphMenuItem(
+                            label = nativeText(language, "命令面板", "Command palette"),
+                            icon = HugeIcons.Code,
+                            onClick = { showCommandPalette = true },
+                        ),
                         FcodeMorphMenuItem(
                             label = nativeText(language, "搜索当前对话", "Search this conversation"),
                             icon = HugeIcons.Search01,
@@ -1270,8 +1221,9 @@ internal fun NativeChatScreen(
                         ),
                     ),
                     modifier = Modifier.fillMaxSize().zIndex(4f),
-                    // The top bar still owns the 新对话 action (48dp at the bar's 4dp end padding),
-                    // so the more anchor sits left of it, at the slot the old top-bar menu used.
+                    // The top bar owns only the 新对话 action now (48dp at the bar's 4dp end
+                    // padding; the command palette lives inside this menu), so the more anchor
+                    // sits flush left of it.
                     anchorEndOffset = 4.dp + 48.dp,
                 )
             }

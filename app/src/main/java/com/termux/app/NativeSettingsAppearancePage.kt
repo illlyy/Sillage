@@ -137,6 +137,7 @@ internal fun ChatAppearanceSettingsPage(
     showResponseStats: Boolean,
     showModelSubtitle: Boolean,
     showReasoningTitles: Boolean,
+    streamingMarkdownRender: Boolean,
     hideStatusBar: Boolean,
     compactComposerOnScroll: Boolean,
     onBack: () -> Unit,
@@ -147,6 +148,7 @@ internal fun ChatAppearanceSettingsPage(
     onShowResponseStats: (Boolean) -> Unit,
     onShowModelSubtitle: (Boolean) -> Unit,
     onShowReasoningTitles: (Boolean) -> Unit,
+    onStreamingMarkdownRender: (Boolean) -> Unit,
     onHideStatusBar: (Boolean) -> Unit,
     onCompactComposerOnScroll: (Boolean) -> Unit,
 ) {
@@ -160,6 +162,7 @@ internal fun ChatAppearanceSettingsPage(
             item { ToggleSettingsRow(HugeIcons.Sparkles, tr(lang, "\u6d41\u5f0f\u52a8\u753b", "Streaming animation"), tr(lang, "\u7528\u6e10\u53d8\u906e\u7f69\u663e\u793a\u65b0\u751f\u6210\u6587\u5b57", "Reveal newly generated text with a gradient mask"), animations, onAnimations) }
             item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u751f\u6210\u65f6\u56fa\u5b9a\u6b63\u6587\u9ad8\u5ea6", "Fixed streaming viewport"), tr(lang, "\u964d\u4f4e\u957f\u56de\u7b54\u6301\u7eed\u589e\u957f\u65f6\u7684\u5e03\u5c40\u5f00\u9500", "Reduce layout work while long responses grow"), fixedStreamingViewport, onFixedStreamingViewport) }
             item { ToggleSettingsRow(HugeIcons.ArrowRight01, tr(lang, "\u81ea\u52a8\u8ddf\u968f\u56de\u7b54", "Auto-follow output"), tr(lang, "\u751f\u6210\u65f6\u4fdd\u6301\u6700\u65b0\u5185\u5bb9\u53ef\u89c1", "Keep the newest output visible while generating"), follow, onFollow) }
+            item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "\u6d41\u5f0f\u6e32\u67d3 Markdown", "Render markdown while streaming"), tr(lang, "\u751f\u6210\u8fc7\u7a0b\u4e2d\u5b9e\u65f6\u6e32\u67d3\u5bcc\u6587\u672c Markdown\uff08\u6027\u80fd\u654f\u611f\uff0c\u4f4e\u7aef\u8bbe\u5907\u53ef\u80fd\u6389\u5e27\uff09", "Render rich Markdown live while generating (performance-sensitive)"), streamingMarkdownRender, onStreamingMarkdownRender) }
             item { SettingsSection(tr(lang, "\u754c\u9762", "Interface")) }
             item { ToggleSettingsRow(HugeIcons.LookTop, tr(lang, "\u9690\u85cf\u72b6\u6001\u680f", "Hide status bar"), tr(lang, "\u8ba9\u539f\u751f\u804a\u5929\u754c\u9762\u4f7f\u7528\u66f4\u5927\u7684\u53ef\u89c6\u533a\u57df", "Use more vertical space in the native chat UI"), hideStatusBar, onHideStatusBar) }
             item { ToggleSettingsRow(HugeIcons.Text, tr(lang, "滚动时收起输入框", "Compact composer on scroll"), tr(lang, "滑动对话后将输入框收成玻璃长条；点击长条会弹性展开", "Collapse the composer into a glass pill after scrolling; tap it to spring open"), compactComposerOnScroll, onCompactComposerOnScroll) }

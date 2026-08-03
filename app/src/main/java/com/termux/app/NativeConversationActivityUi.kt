@@ -53,6 +53,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
@@ -76,6 +77,18 @@ private fun nativeActivitySurfaceAlpha(fallback: Float): Float =
     } else {
         fallback
     }
+
+/**
+ * Body inputs captured at collapse time. Rendering the exit from this snapshot keeps the animated
+ * height constant while live group mutations (running flips, command output resolution) land, so
+ * the shrink completes instead of re-targeting and stranding a full-width empty card.
+ */
+private data class FrozenTimelineBody(
+    val reasoning: String,
+    val commands: List<NativeActivityItem>,
+    val items: List<NativeToolListItem>,
+    val stepCount: Int,
+)
 
 /** Unified live/history activity renderer backed only by domain DTOs. */
 @Composable
@@ -155,7 +168,6 @@ private fun NativeActivityTimelineCard(
     val chromeVisibility = remember(group.key) {
         MutableTransitionState(automaticExpansion)
     }
-    val bodyFullyCollapsed = bodyVisibility.isIdle && !bodyVisibility.currentState
     val chromeFullyExpanded = chromeVisibility.isIdle && chromeVisibility.currentState
     // A freshly-sealed historical card enters expanded (matching the live panel it replaces) and
     // folds itself back after a beat WITH the exit animation — the live panel used to be disposed
@@ -179,10 +191,12 @@ private fun NativeActivityTimelineCard(
             chromeVisibility.targetState = true
             bodyVisibility.targetState = chromeFullyExpanded
         } else {
-            // Keep the shell full width until AnimatedVisibility reports that the body is gone.
-            // This is animation-clock aware and cannot leave a delayed callback behind on reversal.
+            // Collapse width and body in the SAME phase. Previously the width waited for
+            // bodyVisibility to fully settle (bodyFullyCollapsed), so the Surface stayed a
+            // full-width colored block while the body faded and shrank — and if the exit was
+            // interrupted it stranded the card as a full-width empty rectangle.
             bodyVisibility.targetState = false
-            chromeVisibility.targetState = !bodyFullyCollapsed
+            chromeVisibility.targetState = false
         }
     }
     val rotation by animateFloatAsState(
@@ -193,6 +207,19 @@ private fun NativeActivityTimelineCard(
     val cardShape = RoundedCornerShape(18.dp)
     val groupedItems = remember(group.key, nonCommandItems) { groupConsecutiveTools(nonCommandItems) }
     val stepCount = (if (reasoning.isNotBlank()) 1 else 0) + group.commands.size + groupedItems.size
+    // Body inputs frozen at collapse time so live group mutations (running flips, command output
+    // resolution arriving mid-exit) cannot re-target the exit animation — which used to strand the
+    // card as a full-width empty rectangle. The header keeps rendering the live group, so status
+    // and step count still update while collapsed.
+    var frozenBody by remember(group.key) { mutableStateOf<FrozenTimelineBody?>(null) }
+    LaunchedEffect(group.key, expanded) {
+        frozenBody = if (expanded) null else FrozenTimelineBody(
+            reasoning = reasoning,
+            commands = group.commands,
+            items = groupedItems,
+            stepCount = stepCount,
+        )
+    }
     val statusColor = when {
         failedItems > 0 -> MaterialTheme.colorScheme.error
         group.running || runningCommands > 0 -> MaterialTheme.colorScheme.primary
@@ -210,7 +237,7 @@ private fun NativeActivityTimelineCard(
         ),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .36f)),
     ) {
-        Column {
+        Column(Modifier.clipToBounds()) {
             AnimatedVisibility(
                 visibleState = chromeVisibility,
                 enter = expandHorizontally(tween(180), expandFrom = Alignment.Start),
@@ -287,19 +314,28 @@ private fun NativeActivityTimelineCard(
             }
             AnimatedVisibility(
                 visibleState = bodyVisibility,
-                // Keep fade and height in lockstep (the old fade finished in ~80ms while the
-                // height tween ran 160ms, leaving a transparent shrinking rectangle that popped).
-                enter = fadeIn(tween(220)) + expandVertically(tween(260, easing = FastOutSlowInEasing), expandFrom = Alignment.Top),
-                exit = fadeOut(tween(200)) + shrinkVertically(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
+                // Collapse width and height together so the card background folds with the body
+                // instead of lingering as a full-width block. Fade stays in lockstep with the
+                // height tween (the old fade finished early, leaving a transparent shrinking
+                // rectangle that popped); the horizontal clip mirrors the chrome width phase so
+                // the Surface never outlives the content at full width.
+                enter = fadeIn(tween(220)) + expandVertically(tween(260, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) + expandHorizontally(tween(240, easing = FastOutSlowInEasing), expandFrom = Alignment.Start),
+                exit = fadeOut(tween(200)) + shrinkVertically(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top) + shrinkHorizontally(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Start),
             ) {
                 Column {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .38f))
                     Column(
                         Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
                     ) {
-                        val totalSteps = stepCount.coerceAtLeast(1)
+                        // While collapsed, render the frozen snapshot so live mutations cannot
+                        // re-target the exit; the live group feeds the body only when expanded.
+                        val body = frozenBody
+                        val bodyReasoning = body?.reasoning ?: reasoning
+                        val bodyCommands = body?.commands ?: group.commands
+                        val bodyItems = body?.items ?: groupedItems
+                        val totalSteps = (body?.stepCount ?: stepCount).coerceAtLeast(1)
                         var index = 0
-                        if (reasoning.isNotBlank()) {
+                        if (bodyReasoning.isNotBlank()) {
                             NativeTimelineStep(
                                 markerColor = MaterialTheme.colorScheme.primary,
                                 isLast = index++ == totalSteps - 1,
@@ -311,14 +347,14 @@ private fun NativeActivityTimelineCard(
                                     color = MaterialTheme.colorScheme.primary,
                                 )
                                 Text(
-                                    reasoning,
+                                    bodyReasoning,
                                     modifier = Modifier.padding(top = 4.dp),
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
                             }
                         }
-                        group.commands.forEach { command ->
+                        bodyCommands.forEach { command ->
                             val commandColor = when (command.status) {
                                 NativeActivityItemStatus.FAILED -> MaterialTheme.colorScheme.error
                                 NativeActivityItemStatus.RUNNING -> MaterialTheme.colorScheme.primary
@@ -338,7 +374,7 @@ private fun NativeActivityTimelineCard(
                                 }
                             }
                         }
-                        groupedItems.forEach { listItem ->
+                        bodyItems.forEach { listItem ->
                             val itemColor = when (listItem) {
                                 is NativeToolListItem.Item -> itemColorFor(listItem.item)
                                 is NativeToolListItem.Group -> listItem.itemColor()
