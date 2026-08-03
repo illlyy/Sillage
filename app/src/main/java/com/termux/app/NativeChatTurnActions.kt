@@ -135,9 +135,17 @@ internal data class PendingNativeSteer(
 
     internal fun CodexChatActivity.queueFollowUp(followUp: NativeQueuedFollowUp, clearComposer: Boolean = true): NativeSubmitResult {
         if (chatState.queuedFollowUps.none { it.id == followUp.id }) chatState.queuedFollowUps.add(followUp)
+        persistQueuedFollowUps()
         syncNativeContinuationHint()
         if (clearComposer) clearComposerAfterSubmit()
         return NativeSubmitResult(accepted = true, queued = true)
+    }
+
+    /** Mirrors the in-memory queue to the durable claim-ticket store for the current thread. */
+    internal fun CodexChatActivity.persistQueuedFollowUps() {
+        val threadId = currentThreadId ?: return
+        NativeQueuedMessageStore(getSharedPreferences("codex_mobile", MODE_PRIVATE))
+            .write(threadId, chatState.queuedFollowUps)
     }
 
     internal fun CodexChatActivity.startNewTurn(followUp: NativeQueuedFollowUp, clearComposer: Boolean = true): NativeSubmitResult {
@@ -227,13 +235,41 @@ internal data class PendingNativeSteer(
 
     internal fun CodexChatActivity.removeQueuedFollowUp(id: String) {
         chatState.queuedFollowUps.removeAll { it.id == id }
+        persistQueuedFollowUps()
         syncNativeContinuationHint()
     }
 
+    /**
+     * Claim-ticket dispatch: the durable store is taken (read + cleared) before anything is
+     * sent, so a completion-time flush and a session-restore flush can never double-send.
+     * Persisted items (restart recovery) are merged into the in-memory queue by id.
+     */
     internal fun CodexChatActivity.sendNextQueuedFollowUp() {
-        if (chatState.busy || compactionInProgress() || !chatState.ready || chatState.queuedFollowUps.isEmpty()) return
-        val followUp = chatState.queuedFollowUps.removeAt(0)
+        if (chatState.busy || compactionInProgress() || !chatState.ready) return
+        val threadId = currentThreadId ?: return
+        val store = NativeQueuedMessageStore(getSharedPreferences("codex_mobile", MODE_PRIVATE))
+        val persisted = store.take(threadId)
+        if (persisted.isNotEmpty()) {
+            val persistedIds = persisted.map { it.id }.toSet()
+            chatState.queuedFollowUps.removeAll { it.id in persistedIds }
+            chatState.queuedFollowUps.addAll(persisted)
+        }
+        val followUp = if (chatState.queuedFollowUps.isEmpty()) return else chatState.queuedFollowUps.removeAt(0)
+        persistQueuedFollowUps()
         startNewTurn(followUp, clearComposer = false)
+    }
+
+    /**
+     * Session-restore flush: dispatches one persisted queued message when the resumed thread
+     * is idle. The claim-ticket take inside [sendNextQueuedFollowUp] guarantees no double-send
+     * with the completion-time flush.
+     */
+    internal fun CodexChatActivity.flushRestoredQueuedMessages() {
+        val threadId = currentThreadId ?: return
+        if (chatState.busy || !chatState.ready || chatState.phase.active) return
+        val store = NativeQueuedMessageStore(getSharedPreferences("codex_mobile", MODE_PRIVATE))
+        if (store.count(threadId) == 0 && chatState.queuedFollowUps.isEmpty()) return
+        sendNextQueuedFollowUp()
     }
 
     internal fun CodexChatActivity.setChatMode(mode: String) {

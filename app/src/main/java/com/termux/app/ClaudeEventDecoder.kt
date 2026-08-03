@@ -30,8 +30,24 @@ internal class ClaudeEventDecoder(
     /** thinking block accumulation (for ReasoningCompleted) */
     private var thinkingBuffer: StringBuilder? = null
 
+    /** thinking accumulated from `system` subtype "thinking" messages (Claude Code CLI path) */
+    private var systemThinkingBuffer: StringBuilder? = null
+    private var surfacedSystemThinking = false
+
+    /** True once any thinking reached the host this turn, so the final-message fallback never duplicates. */
+    private var thinkingSurfacedThisTurn = false
+
+    /** True once text streamed via content_block deltas, so the assistant-message fallback never duplicates. */
+    private var textStreamedThisTurn = false
+
     /** content block index of the active thinking block, -1 when none */
     private var activeThinkingIndex = -1
+
+    /** Task tool_use id -> subagent capsule key (agentThreadId) */
+    private val subagentCapsules = HashMap<String, String>()
+
+    /** Task tool_use id -> subagent display name */
+    private val subagentNames = HashMap<String, String>()
 
     /** text block accumulation for final assistant message fallback */
     private var textBuffer: StringBuilder? = null
@@ -52,9 +68,28 @@ internal class ClaudeEventDecoder(
         surfacedToolUses.clear()
         surfacedToolResults.clear()
         thinkingBuffer = null
+        systemThinkingBuffer = null
+        surfacedSystemThinking = false
+        thinkingSurfacedThisTurn = false
+        textStreamedThisTurn = false
         activeThinkingIndex = -1
         textBuffer = null
+        subagentCapsules.clear()
+        subagentNames.clear()
         activeTurnId = ""
+    }
+
+    /**
+     * Adopts the authoritative session id the CLI echoes (first user-message line on a fresh
+     * session). The echo can arrive after [beginTurn] already armed the outbound turn, so a plain
+     * [reset] would wipe `activeTurnId` and the subsequent `result` completion would fall back to
+     * the session id — mismatching the `turnStarted` turn id the host recorded, which rejects the
+     * completion (turn never seals). Re-assert the armed turn id so the completion matches.
+     */
+    fun adoptSession(sessionId: String) {
+        val turn = activeTurnId
+        reset(sessionId)
+        if (turn.isNotBlank()) beginTurn(turn)
     }
 
     fun observeSession(line: JSONObject): String {
@@ -98,6 +133,24 @@ internal class ClaudeEventDecoder(
                 val message = line.optString("content").ifBlank { return }
                 if (line.optString("level") == "warning") emit("onHistoryWarning", message)
             }
+            "thinking" -> {
+                // Claude Code streams its thinking panel as system messages, not content blocks.
+                // Normalize both string and {kind, thinking} shapes so the host's reasoning panel
+                // streams live exactly like the Codex backend does.
+                val raw = line.opt("thinking")
+                val text = when (raw) {
+                    is String -> raw
+                    is JSONObject -> raw.optString("thinking").ifBlank { raw.optString("text") }
+                    else -> ""
+                }
+                if (text.isNotEmpty()) {
+                    surfacedSystemThinking = true
+                    thinkingSurfacedThisTurn = true
+                    val buffer = systemThinkingBuffer ?: StringBuilder().also { systemThinkingBuffer = it }
+                    buffer.append(text)
+                    emit("onReasoningDelta", text)
+                }
+            }
             else -> Unit
         }
     }
@@ -109,6 +162,7 @@ internal class ClaudeEventDecoder(
                 val block = event.optJSONObject("content_block") ?: return
                 when (block.optString("type")) {
                     "thinking" -> {
+                        thinkingSurfacedThisTurn = true
                         thinkingBuffer = StringBuilder()
                         activeThinkingIndex = event.optInt("index", -1)
                     }
@@ -123,7 +177,10 @@ internal class ClaudeEventDecoder(
                     "text_delta" -> {
                         textBuffer?.append(delta.optString("text"))
                         val text = delta.optString("text")
-                        if (text.isNotEmpty()) emit("onDelta", text)
+                        if (text.isNotEmpty()) {
+                            textStreamedThisTurn = true
+                            emit("onDelta", text)
+                        }
                     }
                     "thinking_delta" -> {
                         thinkingBuffer?.append(delta.optString("thinking"))
@@ -184,13 +241,46 @@ internal class ClaudeEventDecoder(
                     if (id.isBlank() || surfacedToolUses.contains(id)) continue
                     surfaceToolUse(id, block.optString("name"), block.optJSONObject("input") ?: JSONObject())
                 }
+                "text" -> {
+                    // The CLI can deliver the answer text as a full assistant message instead of
+                    // content_block deltas. Surface it as onDelta unless deltas already streamed it.
+                    if (!textStreamedThisTurn) {
+                        val text = block.optString("text")
+                        if (text.isNotEmpty()) emit("onDelta", text)
+                    }
+                }
                 else -> Unit
             }
         }
-        // Final assistant text fallback when streaming was disabled: not emitted to avoid
-        // duplicates; the stream path already delivered deltas.
-        val thinking = message.optString("thinking", "")
-        if (thinking.isNotEmpty() && thinkingBuffer == null) emit("onReasoningDelta", thinking)
+        // Fallback for thinking that reached only the final assistant message instead of content
+        // deltas. The transcript carries it as a content block of type "thinking"; only surface it
+        // once so the reasoning panel is not duplicated after a streamed chain of thought.
+        if (!thinkingSurfacedThisTurn && thinkingBuffer == null) {
+            val thinking = contentThinkingText(content).ifEmpty { message.optString("thinking") }
+            if (thinking.isNotEmpty()) {
+                thinkingSurfacedThisTurn = true
+                surfacedSystemThinking = true
+                val buffer = systemThinkingBuffer ?: StringBuilder().also { systemThinkingBuffer = it }
+                buffer.append(thinking)
+                emit("onReasoningDelta", thinking)
+            }
+        }
+    }
+
+    /** Concatenates `thinking` text blocks from an assistant content array. */
+    private fun contentThinkingText(content: JSONArray): String {
+        val out = StringBuilder()
+        for (i in 0 until content.length()) {
+            val block = content.optJSONObject(i) ?: continue
+            if (block.optString("type") == "thinking") {
+                val text = block.optString("thinking")
+                if (text.isNotEmpty()) {
+                    if (out.isNotEmpty()) out.append("\n\n")
+                    out.append(text)
+                }
+            }
+        }
+        return out.toString()
     }
 
     private fun decodeUser(line: JSONObject) {
@@ -226,6 +316,15 @@ internal class ClaudeEventDecoder(
                     .put("tool", detailId)
                     .put("status", if (isError) "failed" else "completed")
                     .put("payload", outputText)
+                    .toString())
+            }
+            subagentCapsules.remove(toolUseId)?.let { agentThreadId ->
+                emit("onSubagentEvent", JSONObject()
+                    .put("agentThreadId", agentThreadId)
+                    .put("callId", toolUseId)
+                    .put("name", subagentNames.remove(toolUseId) ?: "Task")
+                    .put("status", "done")
+                    .put("type", "subAgentActivity")
                     .toString())
             }
         }
@@ -265,6 +364,26 @@ internal class ClaudeEventDecoder(
                     .put("delta", plan).toString())
                 emit("onPlanComplete", JSONObject().put("item", JSONObject().put("id", id).put("text", plan)).toString())
             }
+            "Task", "Task_simple", "subagent_tool_use", "subagent" -> {
+                // Surface delegated subagent work as a live capsule (working -> done). The capsule
+                // is keyed by the Task tool-use id; loadSubagentHistory resolves the transcript.
+                val agentThreadId = input.optString("agentThreadId")
+                    .ifBlank { input.optString("agent_thread_id") }
+                    .ifBlank { id }
+                val name = input.optString("agentName")
+                    .ifBlank { input.optString("agentNickname") }
+                    .ifBlank { input.optString("name") }
+                    .ifBlank { "Task" }
+                subagentCapsules[id] = agentThreadId
+                subagentNames[id] = name
+                emit("onSubagentEvent", JSONObject()
+                    .put("agentThreadId", agentThreadId)
+                    .put("callId", id)
+                    .put("name", name)
+                    .put("status", "working")
+                    .put("type", "subAgentActivity")
+                    .toString())
+            }
             else -> {
                 val detailId = id
                 toolDetailIds[id] = detailId
@@ -297,6 +416,18 @@ internal class ClaudeEventDecoder(
         thinkingBuffer = null
         activeThinkingIndex = -1
         textBuffer = null
+        // Seal system-message thinking and forward result usage (tokens) so the reasoning panel
+        // closes exactly at turn end and the answer card shows stats.
+        if (surfacedSystemThinking) {
+            systemThinkingBuffer?.let { buffer ->
+                val full = buffer.toString()
+                if (full.isNotBlank()) emit("onReasoningComplete", full)
+            }
+            systemThinkingBuffer = null
+            surfacedSystemThinking = false
+        }
+        val usage = line.optJSONObject("usage")
+        if (usage != null) emit("onTokenUsage", JSONObject().put("usage", usage).toString())
         emit("onTurnComplete", JSONObject()
             .put("threadId", thread())
             .put("turnId", turnId)
@@ -319,7 +450,13 @@ internal class ClaudeEventDecoder(
         surfacedToolUses.clear()
         surfacedToolResults.clear()
         thinkingBuffer = null
+        systemThinkingBuffer = null
+        surfacedSystemThinking = false
+        thinkingSurfacedThisTurn = false
+        textStreamedThisTurn = false
         activeThinkingIndex = -1
         textBuffer = null
+        subagentCapsules.clear()
+        subagentNames.clear()
     }
 }

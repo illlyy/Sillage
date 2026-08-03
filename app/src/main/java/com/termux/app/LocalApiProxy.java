@@ -45,6 +45,11 @@ final class LocalApiProxy {
     private volatile boolean running;
     private ServerSocket server;
 
+    /** Invoked when a client probes {@code HEAD {base}/api/hello}; the Claude bridge uses it
+     *  as the CLI's initialization-complete signal (fresh stream-json sessions emit no
+     *  session_id until the first user message, so the probe is the reliable readiness marker). */
+    private volatile Runnable onHealthProbe = () -> {};
+
     LocalApiProxy(String upstreamBase) {
         this(upstreamBase, "openai_responses", false, MihomoManager.DEFAULT_MIXED_PORT, false, Collections.emptyMap(), false);
     }
@@ -87,6 +92,11 @@ final class LocalApiProxy {
     void stop() {
         running = false;
         try { if (server != null) server.close(); } catch (Exception ignored) {}
+    }
+
+    /** Registers a callback fired (on the accept worker thread) when a health probe arrives. */
+    void setOnHealthProbe(Runnable callback) {
+        onHealthProbe = callback == null ? () -> {} : callback;
     }
 
     boolean hasActiveRequests() {
@@ -147,6 +157,19 @@ final class LocalApiProxy {
                 readExactly(input, body);
             }
             boolean requestResponses = pathWithoutQuery(path).endsWith("/responses") && "POST".equalsIgnoreCase(method);
+            // Claude CLI runs an API health probe (HEAD {base}/api/hello) before sending real
+            // requests. Anthropic-compatible gateways commonly reject the unauthenticated probe
+            // with 401, which stalls the CLI's initialization. Answer the probe locally so the
+            // CLI proceeds to the real authenticated request, and notify the bridge — the probe
+            // is the CLI's initialization-complete signal for fresh stream-json sessions.
+            if (pathWithoutQuery(path).endsWith("/api/hello")
+                    && ("HEAD".equalsIgnoreCase(method) || "GET".equalsIgnoreCase(method))) {
+                onHealthProbe.run();
+                OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
+                writeAscii(clientOut, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                clientOut.flush();
+                return;
+            }
             String requestId = Long.toHexString(System.nanoTime());
             boolean subagentRequest = requestResponses && preventRecursiveSubagents && isSubagentRequest(headers);
             String requestModel = requestResponses ? requestModel(body) : "";
@@ -195,8 +218,10 @@ final class LocalApiProxy {
                 + " agentMessages=" + internalAgentMessages);
             logRoute(requestId, requestModel, internalEffort, wireEffort, ultraTransportEffort,
                 toolSummary, adaptChat ? "chat" : "responses", false, 0);
+            long upstreamStartNanos = System.nanoTime();
             HttpURLConnection connection = openUpstreamConnection(method, targetPath, headers, body, adaptChat ? "Responses->Chat" : "");
             int code = connection.getResponseCode();
+            Log.d(TAG, "id=" + requestId + " " + method + " -> " + code + " in " + nanosToMillis(System.nanoTime() - upstreamStartNanos) + "ms path=" + targetPath);
             // Headers arrived. From this point a reasoning model may legitimately spend
             // longer between SSE events, so switch from the short connection/first-byte
             // watchdog to the normal streaming idle timeout.

@@ -22,7 +22,25 @@ internal data class ClaudeProfile(
     val haikuModel: String = "",
     val sonnetModel: String = "",
     val opusModel: String = "",
+    val fableModel: String = "",
+    val smallFastModel: String = "",
     val subagentModel: String = "",
+    // Performance/context tuning (written verbatim to env, blank = omitted).
+    val maxContextTokens: String = "",
+    val autoCompactWindow: String = "",
+    val maxOutputTokens: String = "",
+    val apiTimeoutMs: String = "",
+    // cc-switch style behavior toggles (env written only when enabled).
+    val disableNonEssentialTraffic: Boolean = false,
+    val maxEffort: Boolean = false,
+    val enableToolSearch: Boolean = false,
+    val disableAutoUpdater: Boolean = false,
+    val experimentalAgentTeams: Boolean = false,
+    val disableExperimentalBetas: Boolean = false,
+    // includeCoAuthoredBy -> top-level settings.json key when enabled.
+    val includeCoAuthoredBy: Boolean = false,
+    // Arbitrary top-level settings.json keys (raw JSON object, merged into the root).
+    val extraSettingsJson: String = "",
     val extraEnv: Map<String, String> = emptyMap(),
 ) {
     fun sanitized(): ClaudeProfile = copy(
@@ -34,7 +52,16 @@ internal data class ClaudeProfile(
         haikuModel = haikuModel.trim(),
         sonnetModel = sonnetModel.trim(),
         opusModel = opusModel.trim(),
+        fableModel = fableModel.trim(),
+        smallFastModel = smallFastModel.trim(),
         subagentModel = subagentModel.trim(),
+        maxContextTokens = maxContextTokens.trim(),
+        autoCompactWindow = autoCompactWindow.trim(),
+        maxOutputTokens = maxOutputTokens.trim(),
+        apiTimeoutMs = apiTimeoutMs.trim(),
+        // Never validate/drop the raw JSON here: validation lives in the editor, tolerance in
+        // the writer, so invalid input is preserved rather than silently destroying user data.
+        extraSettingsJson = extraSettingsJson.trim(),
         extraEnv = extraEnv.mapValues { (_, value) -> value.trim() }
             .filterValues { it.isNotBlank() },
     )
@@ -54,7 +81,21 @@ internal data class ClaudeProfile(
             haikuModel = json.optString("haikuModel"),
             sonnetModel = json.optString("sonnetModel"),
             opusModel = json.optString("opusModel"),
+            fableModel = json.optString("fableModel"),
+            smallFastModel = json.optString("smallFastModel"),
             subagentModel = json.optString("subagentModel"),
+            maxContextTokens = json.optString("maxContextTokens"),
+            autoCompactWindow = json.optString("autoCompactWindow"),
+            maxOutputTokens = json.optString("maxOutputTokens"),
+            apiTimeoutMs = json.optString("apiTimeoutMs"),
+            disableNonEssentialTraffic = json.optBoolean("disableNonEssentialTraffic", false),
+            maxEffort = json.optBoolean("maxEffort", false),
+            enableToolSearch = json.optBoolean("enableToolSearch", false),
+            disableAutoUpdater = json.optBoolean("disableAutoUpdater", false),
+            experimentalAgentTeams = json.optBoolean("experimentalAgentTeams", false),
+            disableExperimentalBetas = json.optBoolean("disableExperimentalBetas", false),
+            includeCoAuthoredBy = json.optBoolean("includeCoAuthoredBy", false),
+            extraSettingsJson = json.optString("extraSettingsJson"),
             extraEnv = parseExtraEnv(json.optJSONObject("extraEnv")),
         )
 
@@ -135,7 +176,21 @@ internal class ClaudeProviderStore(private val prefs: SharedPreferences) {
                 .put("haikuModel", profile.haikuModel)
                 .put("sonnetModel", profile.sonnetModel)
                 .put("opusModel", profile.opusModel)
+                .put("fableModel", profile.fableModel)
+                .put("smallFastModel", profile.smallFastModel)
                 .put("subagentModel", profile.subagentModel)
+                .put("maxContextTokens", profile.maxContextTokens)
+                .put("autoCompactWindow", profile.autoCompactWindow)
+                .put("maxOutputTokens", profile.maxOutputTokens)
+                .put("apiTimeoutMs", profile.apiTimeoutMs)
+                .put("disableNonEssentialTraffic", profile.disableNonEssentialTraffic)
+                .put("maxEffort", profile.maxEffort)
+                .put("enableToolSearch", profile.enableToolSearch)
+                .put("disableAutoUpdater", profile.disableAutoUpdater)
+                .put("experimentalAgentTeams", profile.experimentalAgentTeams)
+                .put("disableExperimentalBetas", profile.disableExperimentalBetas)
+                .put("includeCoAuthoredBy", profile.includeCoAuthoredBy)
+                .put("extraSettingsJson", profile.extraSettingsJson)
                 .put("extraEnv", extra))
         }
         return array.toString()

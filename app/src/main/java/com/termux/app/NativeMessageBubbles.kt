@@ -510,6 +510,7 @@ internal fun StreamingResponseText(
     liveSnapshot: NativeStreamingMarkdownSnapshot? = null,
     onQuoteSelection: ((String) -> Unit)? = null,
     onLiveSnapshotPresented: ((Int) -> Unit)? = null,
+    projectPath: String = "",
 ) {
     if (finalOnlyReveal) {
         FinalOnlyAnswerReveal(text, revealStartedAt, onQuoteSelection)
@@ -538,6 +539,7 @@ internal fun StreamingResponseText(
             generation = generation,
             streaming = streaming,
             onQuoteSelection = onQuoteSelection,
+            projectPath = projectPath,
         )
     }
     if (streaming) {
@@ -580,6 +582,7 @@ internal fun StreamingMarkdownSnapshotContent(
     generation: Int,
     streaming: Boolean,
     onQuoteSelection: ((String) -> Unit)? = null,
+    projectPath: String = "",
 ) {
     val streamingFirstVisibleBlock = remember(snapshot.blocks, snapshot.tail.length, streaming) {
         if (!streaming) 0 else NativeStreamingMarkdownWindow.firstVisibleBlock(
@@ -634,7 +637,7 @@ internal fun StreamingMarkdownSnapshotContent(
                     // completed output is upgraded to rich Markdown in bounded batches above.
                     StableLiveTextChunk(block.text, reasoning = false)
                 } else {
-                    StableStreamingMarkdownBlock(block.text, onQuoteSelection)
+                    StableStreamingMarkdownBlock(block.text, onQuoteSelection, projectPath)
                 }
             }
         }
@@ -651,10 +654,10 @@ internal fun StreamingMarkdownSnapshotContent(
 }
 
 @Composable
-internal fun StableStreamingMarkdownBlock(text: String, onQuoteSelection: ((String) -> Unit)? = null) {
+internal fun StableStreamingMarkdownBlock(text: String, onQuoteSelection: ((String) -> Unit)? = null, projectPath: String = "") {
     // Restartable boundary: an immutable completed block is skipped on later deltas while
     // Markwon parses it once in the background. Only the unfinished tail keeps changing.
-    RichResponseText(text, onQuoteSelection)
+    RichResponseText(text, onQuoteSelection, projectPath)
 }
 
 @Composable
@@ -708,6 +711,7 @@ internal fun RikkaAssistantMessage(
                         liveSnapshot = liveSnapshot,
                         onQuoteSelection = onQuote,
                         onLiveSnapshotPresented = markLiveSnapshotPresented,
+                        projectPath = projectPath,
                     )
                 }
                 // Generating status and final actions share one fixed-height slot. Switching content
@@ -719,7 +723,7 @@ internal fun RikkaAssistantMessage(
                         label = "assistantChromeSlot",
                     ) { actionsVisible ->
                         if (actionsVisible) {
-                            MessageActions(text = actionText, onRetry = onRetry, allowShare = true)
+                            MessageActions(text = actionText, onRetry = onRetry, allowShare = true, assistant = true)
                         } else if (streaming) {
                             Row(modifier = Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
@@ -732,7 +736,7 @@ internal fun RikkaAssistantMessage(
                 if (LocalShowResponseStats.current && (streaming || usage != null)) {
                     Box(Modifier.fillMaxWidth().heightIn(min = 32.dp)) {
                         if (!streaming && showChrome && usage != null) {
-                            ResponseUsageFooterCompact(usage)
+                            ResponseUsageFooterCompact(usage, modelName = liveState?.modelLabel.orEmpty())
                         }
                     }
                 }
@@ -800,8 +804,15 @@ internal fun ResponseUsageFooter(usage: NativeTurnUsage) {
 }
 
 @Composable
-internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage) {
+internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: String = "") {
     val language = LocalNativeLanguage.current
+    val context = LocalContext.current
+    val priceStore = remember(context) {
+        NativeTokenPriceStore(context.applicationContext.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE))
+    }
+    val price = remember(modelName) { priceStore.priceForModel(modelName) }
+    val cost = remember(usage, price) { price?.let { estimateTurnCost(usage, it) } }
+    var showCostDetails by remember { mutableStateOf(false) }
     val prefix = if (usage.estimated) "≈" else ""
     if (usage.inputTokens <= 0 && usage.cachedInputTokens <= 0 && usage.outputTokens <= 0 &&
         usage.reasoningOutputTokens <= 0 && usage.outputTokensPerSecond <= 0.0 && usage.durationMs <= 0
@@ -815,12 +826,12 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage) {
     ) {
         if (usage.inputTokens > 0 || usage.cachedInputTokens > 0) {
             val cached = if (usage.cachedInputTokens > 0) {
-                nativeText(language, "（${usage.cachedInputTokens} 缓存）", " (${usage.cachedInputTokens} cached)")
+                nativeText(language, "（${formatNativeTokenCount(usage.cachedInputTokens)} 缓存）", " (${formatNativeTokenCount(usage.cachedInputTokens)} cached)")
             } else ""
             ResponseUsageMetric(
                 icon = HugeIcons.Upload02,
                 description = nativeText(language, "输入与缓存", "Input and cache"),
-                text = "$prefix${usage.inputTokens} tokens$cached",
+                text = "$prefix${formatNativeTokenCount(usage.inputTokens)} tokens$cached",
                 color = mutedColor,
             )
         }
@@ -828,7 +839,7 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage) {
             ResponseUsageMetric(
                 icon = HugeIcons.Download04,
                 description = nativeText(language, "输出", "Output"),
-                text = "$prefix${usage.outputTokens} tokens",
+                text = "$prefix${formatNativeTokenCount(usage.outputTokens)} tokens",
                 color = mutedColor,
             )
         }
@@ -836,7 +847,7 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage) {
             ResponseUsageMetric(
                 icon = HugeIcons.Idea01,
                 description = nativeText(language, "推理", "Reasoning"),
-                text = nativeText(language, "${usage.reasoningOutputTokens} 推理", "${usage.reasoningOutputTokens} reasoning"),
+                text = nativeText(language, "${formatNativeTokenCount(usage.reasoningOutputTokens)} 推理", "${formatNativeTokenCount(usage.reasoningOutputTokens)} reasoning"),
                 color = mutedColor,
             )
         }
@@ -858,7 +869,79 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage) {
                 color = mutedColor,
             )
         }
+        cost?.takeIf { it > 0.0 }?.let { estimated ->
+            ResponseUsageMetric(
+                icon = HugeIcons.ChartColumn,
+                description = nativeText(language, "成本", "Cost"),
+                text = "$prefix${formatNativeCost(estimated)}",
+                color = mutedColor,
+                onClick = { showCostDetails = true },
+            )
+        }
     }
+    if (showCostDetails && price != null) {
+        NativeCostDetailDialog(
+            usage = usage,
+            modelName = modelName,
+            price = price,
+            cost = cost ?: 0.0,
+            onDismiss = { showCostDetails = false },
+        )
+    }
+}
+
+@Composable
+internal fun NativeCostDetailDialog(
+    usage: NativeTurnUsage,
+    modelName: String,
+    price: NativeModelPrice,
+    cost: Double,
+    onDismiss: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    @Composable
+    fun row(label: String, tokens: Long, perMillion: Double) {
+        val lineCost = estimateTokenCost(tokens, perMillion)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "${formatNativeTokenCount(tokens)} × $${"%.3f".format(perMillion)}/M",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "$${"%.4f".format(lineCost)}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.End,
+            )
+        }
+    }
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(modelName.ifBlank { nativeText(language, "成本明细", "Cost details") }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                if (usage.inputTokens > 0) row(nativeText(language, "输入", "Input"), usage.inputTokens, price.inputPerMillion)
+                if (usage.cachedInputTokens > 0) row(nativeText(language, "缓存输入", "Cached input"), usage.cachedInputTokens, price.cachedInputPerMillion)
+                if (usage.outputTokens > 0) row(nativeText(language, "输出", "Output"), usage.outputTokens, price.outputPerMillion)
+                if (usage.reasoningOutputTokens > 0) row(nativeText(language, "推理输出", "Reasoning output"), usage.reasoningOutputTokens, price.outputPerMillion)
+                HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(nativeText(language, "合计", "Total"), modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(formatNativeCost(cost), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                }
+                Text(
+                    nativeText(language, "价格为估算值，可在设置中调整。", "Prices are estimates; tune them in Settings."),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "关闭", "Close")) } },
+    )
 }
 
 @Composable
@@ -867,11 +950,9 @@ internal fun ResponseUsageMetric(
     description: String,
     text: String,
     color: Color,
+    onClick: (() -> Unit)? = null,
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
+    val content: @Composable () -> Unit = {
         Icon(icon, contentDescription = description, modifier = Modifier.size(12.dp), tint = color)
         Text(
             text = text,
@@ -880,15 +961,37 @@ internal fun ResponseUsageMetric(
             maxLines = 1,
         )
     }
+    if (onClick != null) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier.fcodePressClickable(
+                onClickLabel = description,
+            ) { onClick() }.padding(horizontal = 2.dp),
+        ) { content() }
+    } else {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) { content() }
+    }
 }
 
 @Composable
-internal fun MessageActions(text: String, onEdit: (() -> Unit)? = null, onRetry: (() -> Unit)? = null, allowShare: Boolean = false) {
+internal fun MessageActions(
+    text: String,
+    onEdit: (() -> Unit)? = null,
+    onRetry: (() -> Unit)? = null,
+    allowShare: Boolean = false,
+    assistant: Boolean = false,
+) {
     val language = LocalNativeLanguage.current
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        IconButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)) }, modifier = Modifier.size(32.dp)) { Icon(HugeIcons.Copy01, "复制", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        FcodeCopyAction(text, formatMenu = assistant)
+        if (assistant && text.isNotBlank()) {
+            FcodeTtsAction(text)
+        }
         if (onEdit != null) IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) { Icon(HugeIcons.PencilEdit01, "编辑", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (onRetry != null) IconButton(onClick = onRetry, modifier = Modifier.size(32.dp)) { Icon(HugeIcons.Refresh03, "重新生成", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (allowShare) IconButton(onClick = {
@@ -898,15 +1001,101 @@ internal fun MessageActions(text: String, onEdit: (() -> Unit)? = null, onRetry:
     }
 }
 
+/**
+ * Copy action with format selection (pattern: claudecodeui MessageCopyControl). Assistant
+ * messages copy as plain text or Markdown; the plain-text conversion protects fenced code
+ * blocks so their content survives syntax stripping. A brief check feedback confirms the copy.
+ */
 @Composable
-internal fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+internal fun FcodeCopyAction(text: String, formatMenu: Boolean = false, modifier: Modifier = Modifier) {    val language = LocalNativeLanguage.current
+    val clipboard = LocalClipboardManager.current
+    var menuOpen by remember { mutableStateOf(false) }
+    var copiedAt by remember { mutableStateOf<Long?>(null) }
+    fun copy(format: String) {
+        val content = if (format == "md") text else convertMarkdownToPlainText(text)
+        clipboard.setText(androidx.compose.ui.text.AnnotatedString(content))
+        copiedAt = System.currentTimeMillis()
+    }
+    LaunchedEffect(copiedAt) {
+        if (copiedAt != null) {
+            kotlinx.coroutines.delay(1_600)
+            copiedAt = null
+        }
+    }
+    Box(modifier = modifier) {
+        IconButton(
+            onClick = { if (formatMenu) menuOpen = true else copy("text") },
+            modifier = Modifier.size(32.dp),
+        ) {
+            val copied = copiedAt != null
+            Icon(
+                if (copied) HugeIcons.Tick02 else HugeIcons.Copy01,
+                if (copied) {
+                    nativeText(language, "已复制", "Copied")
+                } else {
+                    nativeText(language, "复制", "Copy")
+                },
+                modifier = Modifier.size(16.dp),
+                tint = if (copied) Color(0xFF5E8B68) else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text(nativeText(language, "复制为文本", "Copy as text")) },
+                onClick = { copy("text"); menuOpen = false },
+            )
+            DropdownMenuItem(
+                text = { Text(nativeText(language, "复制为 Markdown", "Copy as Markdown")) },
+                onClick = { copy("md"); menuOpen = false },
+            )
+        }
+    }
+}
+
+/** Read-aloud action for assistant answers; morphs into a stop control while speaking. */
+@Composable
+internal fun FcodeTtsAction(text: String, modifier: Modifier = Modifier) {
+    val language = LocalNativeLanguage.current
+    val context = LocalContext.current
+    val speaking = FcodeTtsController.speaking
+    IconButton(
+        onClick = {
+            if (FcodeTtsController.speaking) {
+                FcodeTtsController.stop()
+            } else {
+                FcodeTtsController.speak(context, text)
+            }
+        },
+        modifier = Modifier.size(32.dp),
+    ) {
+        Icon(
+            if (speaking) HugeIcons.Cancel01 else HugeIcons.Voice,
+            if (speaking) {
+                nativeText(language, "停止朗读", "Stop reading")
+            } else {
+                nativeText(language, "朗读", "Read aloud")
+            },
+            modifier = Modifier.size(16.dp),
+            tint = if (speaking) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+internal fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, durationMs: Int = 280, content: @Composable () -> Unit) {
+    // Smooth, coordinated height+fade tween. The old spring delivered full height in ~120ms while
+    // the linear fade lagged behind — on enter that read as "a full-size bar, then text fills in";
+    // on exit the fade finished first leaving a transparent shrinking rectangle that popped away at
+    // the end (shifting the whole list). No spring means no overshoot, so the layout below moves
+    // monotonically and the auto-follow motor can track it instead of lagging then snapping.
+    // [durationMs] scales the whole accordion; the historical card uses a gentler, longer value.
     AnimatedVisibility(
         visible = visible,
         modifier = modifier,
-        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = spring(dampingRatio = 0.82f, stiffness = 360f), clip = true)
-            + fadeIn(tween(120, easing = LinearEasing)),
-        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = spring(dampingRatio = 0.86f, stiffness = 380f), clip = true)
-            + fadeOut(tween(90, easing = LinearEasing)),
+        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = tween(durationMs, easing = FastOutSlowInEasing), clip = true)
+            + fadeIn(tween(durationMs - 40, easing = LinearEasing)),
+        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = tween(durationMs - 40, easing = FastOutSlowInEasing), clip = true)
+            + fadeOut(tween(durationMs - 80, easing = LinearEasing)),
     ) { content() }
 }
 
@@ -1194,7 +1383,41 @@ internal fun ActiveProcessingPanel(
                 anchor.put("_openOverview", true)
                 openSubagentDrawer(anchor)
             },
+            onLoadSubagentHistory = onLoadSubagentHistory,
         )
+    } else if (state.phase.active) {
+        // No exploration group yet (model still thinking before any reasoning/command streams).
+        // Show a live elapsed "thinking" row so the wait is never a blank spinner.
+        ThinkingElapsedRow(state)
+    }
+}
+
+@Composable
+internal fun ThinkingElapsedRow(state: NativeChatState) {
+    val language = LocalNativeLanguage.current
+    val start = state.phaseStartedAt.takeIf { it > 0L } ?: state.turnStartedAt
+    var elapsedSeconds by remember { mutableStateOf(0L) }
+    LaunchedEffect(start, state.phase) {
+        while (start > 0L && state.phase.active) {
+            elapsedSeconds = ((System.currentTimeMillis() - start) / 1000L).coerceAtLeast(0L)
+            delay(1000L)
+        }
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 1.dp,
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(10.dp))
+            Text(
+                nativeText(language, "思考中 · ${elapsedSeconds}s", "Thinking · ${elapsedSeconds}s"),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

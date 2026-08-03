@@ -169,4 +169,146 @@ class ClaudeEventDecoderTest {
         val error = events.first { it.first == "onTurnError" }
         assertEquals("denied by policy", JSONObject(error.second).optString("message"))
     }
+
+    @Test
+    fun `system thinking object form maps to onReasoningDelta and seals on result`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"system","subtype":"thinking","session_id":"s1","thinking":{"kind":"thinking_block","thinking":"Let me think"}}"""),
+            "s1",
+        )
+        assertTrue(events.any { it.first == "onReasoningDelta" && it.second == "Let me think" })
+        events.clear()
+        decoder.decode(
+            line("""{"type":"result","session_id":"s1","subtype":"success","is_error":false,"result":"done"}"""),
+            "s1",
+        )
+        assertTrue(events.any { it.first == "onReasoningComplete" && it.second == "Let me think" })
+    }
+
+    @Test
+    fun `system thinking string form maps to onReasoningDelta`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"system","subtype":"thinking","session_id":"s1","thinking":"raw text"}"""),
+            "s1",
+        )
+        assertTrue(events.any { it.first == "onReasoningDelta" && it.second == "raw text" })
+    }
+
+    @Test
+    fun `task tool maps to subagent event working then done`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        val toolUseId = "toolu_task"
+        decoder.decode(
+            line("""{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"$toolUseId","name":"Task"}}}"""),
+            "s1",
+        )
+        decoder.decode(
+            line("""{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"description\":\"research X\"}"}}}"""),
+            "s1",
+        )
+        decoder.decode(line("""{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"""), "s1")
+        val started = events.first { it.first == "onSubagentEvent" }
+        val startedPayload = JSONObject(started.second)
+        assertEquals(toolUseId, startedPayload.optString("callId"))
+        assertEquals("working", startedPayload.optString("status"))
+        assertEquals("subAgentActivity", startedPayload.optString("type"))
+        // tool result closes the capsule as done
+        events.clear()
+        decoder.decode(
+            line("""{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"$toolUseId","content":"done","is_error":false}]}}"""),
+            "s1",
+        )
+        val done = events.first { it.first == "onSubagentEvent" }
+        assertEquals("done", JSONObject(done.second).optString("status"))
+    }
+
+    @Test
+    fun `result usage maps to onTokenUsage`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"result","session_id":"s1","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5}}"""),
+            "s1",
+        )
+        val usage = events.first { it.first == "onTokenUsage" }
+        assertTrue(usage.second.contains("input_tokens"))
+    }
+
+    @Test
+    fun `assistant text block maps to onDelta when not streamed`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]}}"""),
+            "s1",
+        )
+        assertTrue(events.any { it.first == "onDelta" && it.second == "Hello world" })
+    }
+
+    @Test
+    fun `assistant text block does not duplicate streamed deltas`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        // content_block deltas streamed the text first
+        decoder.decode(
+            line("""{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"""),
+            "s1",
+        )
+        events.clear()
+        // the full assistant message must not re-emit the same text
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]}}"""),
+            "s1",
+        )
+        assertTrue(events.none { it.first == "onDelta" })
+    }
+
+    @Test
+    fun `thinking content array block maps to onReasoningDelta`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"chain of thought"}]}}"""),
+            "s1",
+        )
+        assertTrue(events.any { it.first == "onReasoningDelta" && it.second == "chain of thought" })
+    }
+
+    @Test
+    fun `session echo adopt preserves the armed turn id`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        // The bridge arms the outbound turn before the CLI echoes its session id on the first
+        // user-message line. The echo adopts the session WITHOUT losing the turn id, so the
+        // result completion still carries the turnStarted id the host matched.
+        decoder.beginTurn("turn-1")
+        decoder.adoptSession("session-1")
+        decoder.decode(
+            line("""{"type":"result","session_id":"session-1","subtype":"success","is_error":false,"result":"done"}"""),
+            "session-1",
+        )
+        val complete = events.first { it.first == "onTurnComplete" }
+        val payload = JSONObject(complete.second)
+        assertEquals("turn-1", payload.optString("turnId"))
+    }
+
+    @Test
+    fun `plain reset still clears the armed turn id`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.beginTurn("turn-1")
+        decoder.reset("")
+        decoder.decode(
+            line("""{"type":"result","session_id":"session-1","subtype":"success","is_error":false,"result":"done"}"""),
+            "session-1",
+        )
+        val complete = events.first { it.first == "onTurnComplete" }
+        // With no armed turn, the completion falls back to the session id.
+        assertEquals("session-1", JSONObject(complete.second).optString("turnId"))
+    }
 }

@@ -274,6 +274,7 @@ import me.rerere.hugeicons.stroke.Tick02
 import me.rerere.hugeicons.stroke.Upload02
 import me.rerere.hugeicons.stroke.Voice
 import me.rerere.hugeicons.stroke.Zap
+import com.termux.shared.termux.TermuxConstants
 
 val LocalNativeLanguage = staticCompositionLocalOf { "zh" }
 val LocalStreamAnimationsEnabled = staticCompositionLocalOf { true }
@@ -281,6 +282,9 @@ val LocalFixedStreamingViewportEnabled = staticCompositionLocalOf { true }
 internal val LocalInteractiveScrollInProgress = staticCompositionLocalOf { false }
 internal val LocalTextSelectionActivityChanged = staticCompositionLocalOf<(Boolean) -> Unit> { { } }
 internal val LocalOpenSubagentDrawer = staticCompositionLocalOf<(JSONObject) -> Unit> { { } }
+/** Pause the auto-follow motor while a reasoning/command card expand or collapse animates, so the
+ * viewport never fights the user by chasing the bottom mid-gesture. No-op outside the chat screen. */
+internal val LocalPauseFollowDuringAnimation = staticCompositionLocalOf<() -> Unit> { { } }
 private const val CHAT_HISTORY_PAGE_SIZE = 24
 
 internal val NativeTurnPhase.showsProcessingPanel: Boolean
@@ -406,6 +410,7 @@ internal fun NativeChatScreen(
     onNewConversationAtProject: (String) -> Unit,
     onResumeConversation: (String) -> Unit,
     onUiMotionChanged: (Boolean) -> Unit,
+    onRefreshConversations: () -> Unit,
     onLoadSubagentHistory: (String) -> Unit,
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
@@ -536,6 +541,10 @@ internal fun NativeChatScreen(
     var showFilesSheet by remember { mutableStateOf(false) }
     var showConversationSearch by remember { mutableStateOf(false) }
     var showMessageSearch by remember { mutableStateOf(false) }
+    var showCommandPalette by remember { mutableStateOf(false) }
+    // (threadId, content prefix) of a full-text search hit; the loaded conversation flashes
+    // the matching message once, then the target clears.
+    var searchHighlight by remember { mutableStateOf<Pair<String, String>?>(null) }
     var renameConversation by remember { mutableStateOf<NativeConversation?>(null) }
     var deleteConversation by remember { mutableStateOf<NativeConversation?>(null) }
     var editMessage by remember { mutableStateOf<NativeChatMessage?>(null) }
@@ -547,10 +556,19 @@ internal fun NativeChatScreen(
     var previewAttachment by remember { mutableStateOf<NativeAttachment?>(null) }
     var showGoalDialog by remember { mutableStateOf(false) }
     var showWorkPanel by remember { mutableStateOf(false) }
+    var moreMenuExpanded by remember { mutableStateOf(false) }
+    // The morph menu is an in-window overlay; the drawer is a separate transform layer above it,
+    // so any opened drawer must first dismiss the menu.
+    LaunchedEffect(drawerState) {
+        snapshotFlow { drawerState.isOpen }.collect { open -> if (open) moreMenuExpanded = false }
+    }
     var showUserInputDrawer by remember(conversationListKey) { mutableStateOf(false) }
     var showPlanDecision by remember(conversationListKey) { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
     var drawerSubagentRaw by remember { mutableStateOf<String?>(null) }
+    // Approval details open on demand from the banner; a new request resets the detail view.
+    var showApprovalDetails by remember { mutableStateOf(false) }
+    LaunchedEffect(state.pendingApprovalRequest) { showApprovalDetails = false }
     val openSubagentDrawer = remember { { item: JSONObject -> drawerSubagentRaw = item.toString() } }
     val latestOnRetry = rememberUpdatedState(onRetry)
     val latestOnInputChange = rememberUpdatedState(onInputChange)
@@ -568,7 +586,7 @@ internal fun NativeChatScreen(
         }
     }
     val pauseFollowForReasoning: () -> Unit = remember(conversationListKey) {
-        { followPausedUntil = android.os.SystemClock.uptimeMillis() + 560L }
+        { followPausedUntil = android.os.SystemClock.uptimeMillis() + 700L }
     }
     val previewMessageAttachment: (NativeAttachment) -> Unit = remember {
         { attachment -> previewAttachment = attachment }
@@ -587,6 +605,11 @@ internal fun NativeChatScreen(
     LaunchedEffect(drawerState, listState) {
         snapshotFlow { drawerState.motionActive || listState.isScrollInProgress }
             .collect { active -> onUiMotionChanged(active) }
+    }
+    // Opening the drawer is the moment the user asks "what's in my list" — refresh the
+    // conversation scan so newly-finished transcripts appear instead of a stale list.
+    LaunchedEffect(drawerState.isOpen) {
+        if (drawerState.isOpen) onRefreshConversations()
     }
     DisposableEffect(Unit) {
         onDispose { onUiMotionChanged(false) }
@@ -666,8 +689,11 @@ internal fun NativeChatScreen(
 
             // Follow with a damped velocity rather than issuing a new scroll animation for
             // every streamed batch. This keeps the viewport moving continuously while the
-            // response grows, and prevents the staircase/jump effect on slow devices.
-            val targetVelocity = (overflow * 10f).coerceIn(0f, with(density) { 900.dp.toPx() })
+            // response grows, and prevents the staircase/jump effect on slow devices. The cap
+            // is high enough to track a reasoning/timeline block expanding above the answer
+            // (~1500dp/s for a 300dp/260ms open) so the answer text does not lag then snap to
+            // catch up; per-frame distance is still bounded by overflow so it never overshoots.
+            val targetVelocity = (overflow * 10f).coerceIn(0f, with(density) { 2000.dp.toPx() })
             val acceleration = (1f - kotlin.math.exp(-12.0f * elapsedSeconds)).coerceIn(0f, 1f)
             followVelocity += (targetVelocity - followVelocity) * acceleration
             val distance = (followVelocity * elapsedSeconds).coerceAtMost(overflow)
@@ -679,7 +705,9 @@ internal fun NativeChatScreen(
         val activeMotion = pendingSendMotion ?: return@LaunchedEffect
         onUiMotionChanged(true)
         try {
-            delay(1_600L)
+            // The send animation settles in ~half a second; holding stream publication for the
+            // full 1.6s makes a fast first reply appear frozen, so bound the motion hold.
+            delay(450L)
             if (pendingSendMotion?.token == activeMotion.token) pendingSendMotion = null
         } finally {
             onUiMotionChanged(false)
@@ -689,6 +717,7 @@ internal fun NativeChatScreen(
     androidx.compose.runtime.CompositionLocalProvider(
         LocalOpenSubagentDrawer provides openSubagentDrawer,
         LocalTextSelectionActivityChanged provides onTextSelectionActivityChanged,
+        LocalPauseFollowDuringAnimation provides pauseFollowForReasoning,
     ) {
     FcodeInteractiveDrawer(
         state = drawerState,
@@ -937,6 +966,13 @@ internal fun NativeChatScreen(
                                 val retryCallback = remember(message.id, previousUser) {
                                     previousUser?.let { prompt -> {retryItem(prompt) } }
                                 }
+                                // Full-text search jump target: flash the first message whose
+                                // content carries the hit prefix once the conversation loads.
+                                val isSearchTarget = remember(searchHighlight, message.id, message.content) {
+                                    val target = searchHighlight
+                                    target != null && target.first == state.currentThreadId &&
+                                        target.second.isNotBlank() && message.content.contains(target.second)
+                                }
                                 // Per-message reveal animation: bubbles scale in from the left
                                 // edge with a spring, like modern chat apps. State is keyed by
                                 // message id so streaming deltas or scroll recycling never
@@ -981,28 +1017,30 @@ internal fun NativeChatScreen(
                                         )
                                         .then(stableMessageModifier),
                                 ) {
-                                    RikkaMessageItem(
-                                        message = message,
-                                        assistantActionText = assistantChromeText[message.id],
-                                        chatState = state,
-                                        liveState = state.takeIf { message.id == liveAssistantId },
-                                        onEdit = editCallback,
-                                        onRetry = retryCallback,
-                                        onLoadSubagentHistory = loadSubagentHistory,
-                                        onQuote = quoteMessage,
-                                        onReasoningAutoCollapse = pauseFollowForReasoning,
-                                        onPreviewAttachment = previewMessageAttachment,
-                                        wallpaperBackdrop = wallpaperBackdrop,
-                                        sendingMotionActive = pendingSendMotion?.messageId == message.id,
-                                        onUserBubbleBounds = if (pendingSendMotion?.messageId == message.id) {
-                                            { bounds ->
-                                                val current = pendingSendMotion
-                                                if (current != null && current.messageId == message.id && current.targetBounds != bounds) {
-                                                    pendingSendMotion = current.copy(targetBounds = bounds)
+                                    FcodeSearchHighlightBox(isSearchTarget, Modifier.fillMaxWidth()) {
+                                        RikkaMessageItem(
+                                            message = message,
+                                            assistantActionText = assistantChromeText[message.id],
+                                            chatState = state,
+                                            liveState = state.takeIf { message.id == liveAssistantId },
+                                            onEdit = editCallback,
+                                            onRetry = retryCallback,
+                                            onLoadSubagentHistory = loadSubagentHistory,
+                                            onQuote = quoteMessage,
+                                            onReasoningAutoCollapse = pauseFollowForReasoning,
+                                            onPreviewAttachment = previewMessageAttachment,
+                                            wallpaperBackdrop = wallpaperBackdrop,
+                                            sendingMotionActive = pendingSendMotion?.messageId == message.id,
+                                            onUserBubbleBounds = if (pendingSendMotion?.messageId == message.id) {
+                                                { bounds ->
+                                                    val current = pendingSendMotion
+                                                    if (current != null && current.messageId == message.id && current.targetBounds != bounds) {
+                                                        pendingSendMotion = current.copy(targetBounds = bounds)
+                                                    }
                                                 }
-                                            }
-                                        } else null,
-                                    )
+                                            } else null,
+                                        )
+                                    }
                                 }
                             }
                             if (state.phase.showsProcessingPanel && liveAssistantId == null) {
@@ -1064,6 +1102,13 @@ internal fun NativeChatScreen(
                             onToggle = { showUserInputDrawer = !showUserInputDrawer },
                         )
                     }
+                    if (state.pendingApprovalRequest.isNotBlank()) {
+                        FcodeApprovalBanner(
+                            raw = state.pendingApprovalRequest,
+                            onDecision = { decision -> onAnswerApproval(state.pendingApprovalRequest, decision) },
+                            onOpenDetails = { showApprovalDetails = true },
+                        )
+                    }
                     if (state.activeGoalObjective.isNotBlank()) {
                         NativeGoalBanner(
                             objective = state.activeGoalObjective,
@@ -1084,6 +1129,7 @@ internal fun NativeChatScreen(
                         conversationKey = conversationListKey,
                         conversationMoving = listDragged,
                         hasConversation = state.messages.isNotEmpty(),
+                        projectPath = state.projectPath,
                         followUpAction = state.followUpSubmitAction,
                         queuedFollowUps = state.queuedFollowUps,
                         onFollowUpActionChange = onFollowUpActionChange,
@@ -1172,16 +1218,13 @@ internal fun NativeChatScreen(
                             }
                         }
                     },
-                    onOpenWorkPanel = { showWorkPanel = true },
-                    onSearch = { showMessageSearch = true },
-                    onExport = { shareConversation(context, state.conversationTitle, state.messages) },
-                    canExport = canExportConversation,
                     onNewConversation = onNewConversation,
                     // Sample both the wallpaper and scrolling conversation; title/actions remain
                     // separate and crisp above the material layer.
                     backdrop = chatBackdrop,
                     glassConfig = topBarGlassConfig,
                     modifier = Modifier.align(Alignment.TopCenter).zIndex(2f),
+                    onOpenCommandPalette = { showCommandPalette = true },
                 )
                 ultraBurst?.let { burst ->
                     UltraGlassShockwave(
@@ -1193,6 +1236,33 @@ internal fun NativeChatScreen(
                         onFinished = { if (ultraBurst?.token == burst.token) ultraBurst = null },
                     )
                 }
+                FcodeMorphMenu(
+                    expanded = moreMenuExpanded,
+                    onAnchorClick = { moreMenuExpanded = true },
+                    onDismissRequest = { moreMenuExpanded = false },
+                    items = listOf(
+                        FcodeMorphMenuItem(
+                            label = nativeText(language, "搜索当前对话", "Search this conversation"),
+                            icon = HugeIcons.Search01,
+                            onClick = { showMessageSearch = true },
+                        ),
+                        FcodeMorphMenuItem(
+                            label = nativeText(language, "工作面板", "Work panel"),
+                            icon = HugeIcons.LeftToRightListBullet,
+                            onClick = { showWorkPanel = true },
+                        ),
+                        FcodeMorphMenuItem(
+                            label = nativeText(language, "导出对话", "Export conversation"),
+                            icon = HugeIcons.Share08,
+                            enabled = canExportConversation,
+                            onClick = { shareConversation(context, state.conversationTitle, state.messages) },
+                        ),
+                    ),
+                    modifier = Modifier.fillMaxSize().zIndex(4f),
+                    // The top bar still owns the 新对话 action (48dp at the bar's 4dp end padding),
+                    // so the more anchor sits left of it, at the slot the old top-bar menu used.
+                    anchorEndOffset = 4.dp + 48.dp,
+                )
             }
         }
     }
@@ -1295,10 +1365,13 @@ internal fun NativeChatScreen(
             },
         )
     }
-    if (state.pendingApprovalRequest.isNotBlank()) {
+    if (state.pendingApprovalRequest.isNotBlank() && showApprovalDetails) {
         NativeApprovalDialog(
             raw = state.pendingApprovalRequest,
-            onDecision = { decision -> onAnswerApproval(state.pendingApprovalRequest, decision) },
+            onDecision = { decision ->
+                showApprovalDetails = false
+                onAnswerApproval(state.pendingApprovalRequest, decision)
+            },
         )
     }
     previewAttachment?.let { attachment ->
@@ -1389,8 +1462,34 @@ internal fun NativeChatScreen(
     if (showConversationSearch) {
         ConversationSearchDialog(
             conversations = state.conversations,
+            sessionsRoot = java.io.File(java.io.File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions"),
             onDismiss = { showConversationSearch = false },
-            onSelect = { onResumeConversation(it.threadId); showConversationSearch = false },
+            onSelect = { conversation, hit ->
+                onResumeConversation(conversation.threadId)
+                // Full-text hits carry a snippet: remember it so the conversation can scroll to
+                // and flash the matching message after it loads.
+                if (hit != null) {
+                    searchHighlight = conversation.threadId to hit.content.take(120)
+                } else {
+                    searchHighlight = null
+                }
+                showConversationSearch = false
+            },
+        )
+    }
+    if (showCommandPalette) {
+        FcodeCommandPalette(
+            visible = true,
+            conversations = state.conversations,
+            currentThreadId = state.currentThreadId,
+            onDismiss = { showCommandPalette = false },
+            onNewConversation = onNewConversation,
+            onResumeConversation = onResumeConversation,
+            onOpenSettings = {
+                context.startActivity(android.content.Intent(context, NativeSettingsActivity::class.java))
+            },
+            onToggleTheme = onToggleTheme,
+            onOpenFullTextSearch = { showCommandPalette = false; showConversationSearch = true },
         )
     }
     renameConversation?.let { conversation ->

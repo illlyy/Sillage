@@ -22,10 +22,11 @@ final class ClaudeNativeRuntime {
             String permissionMode,
             String allowedTools,
             String resumeThreadId,
-            boolean routeThroughMihomo) {
+            boolean routeThroughMihomo,
+            String modelOverride) {
         String requestedFingerprint = String.join("\n",
             value(configurationFingerprint), value(claudeBinPath),
-            value(permissionMode), value(allowedTools), value(resumeThreadId),
+            value(permissionMode), value(allowedTools),
             String.valueOf(routeThroughMihomo));
         if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
         appContext = activity.getApplicationContext();
@@ -35,7 +36,7 @@ final class ClaudeNativeRuntime {
             bridge = new ClaudeAgentBridge(activity, listener);
             fingerprint = requestedFingerprint;
             bridge.start(claudeBinPath, configDir, profile, permissionMode,
-                allowedTools, resumeThreadId, routeThroughMihomo);
+                allowedTools, resumeThreadId, routeThroughMihomo, modelOverride);
         } else {
             bridge.rebind(activity, listener);
         }

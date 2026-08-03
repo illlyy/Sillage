@@ -478,6 +478,7 @@ internal fun RikkaChatInput(
     onSend: (String, Rect?) -> NativeSubmitResult?,
     onHeightChanged: (Int) -> Unit,
     backdrop: Backdrop? = null,
+    projectPath: String = "",
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
@@ -583,6 +584,74 @@ internal fun RikkaChatInput(
     val imeVisible = WindowInsets.isImeVisible
     var collapsedAfterScroll by remember(conversationKey) { mutableStateOf(false) }
     var focusAfterExpand by remember(conversationKey) { mutableStateOf(false) }
+    // Cursor-aware slash-command menu (pattern: claudecodeui useSlashCommands.ts). The trigger
+    // range and query follow the text-field selection; code blocks suppress the trigger.
+    var slashMenuTrigger by remember { mutableStateOf<IntRange?>(null) }
+    var slashQuery by remember { mutableStateOf("") }
+    val slashCommands = remember(inputContext) {
+        val prefs = inputContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE)
+        orderSlashCommands(builtinSlashCommands(), readSlashUsage(prefs))
+    }
+    LaunchedEffect(textState) {
+        snapshotFlow { textState.selection }.collectLatest { selection ->
+            val text = textState.text.toString()
+            val cursor = selection.end.coerceAtLeast(0)
+            val range = nativeSlashTriggerRange(text, cursor)
+            slashMenuTrigger = range
+            slashQuery = if (range != null) text.substring(range.first, range.last + 1) else ""
+        }
+    }
+    val applySlashCommand: (NativeSlashCommand) -> Unit = remember(inputContext, textState) {
+        { command ->
+            val range = slashMenuTrigger ?: return@remember
+            textState.edit {
+                replace(range.first, range.last + 1, command.insertText)
+                selection = androidx.compose.ui.text.TextRange(range.first + command.insertText.length)
+            }
+            onValueChange(textState.text.toString())
+            recordSlashUsage(
+                inputContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE),
+                command.id,
+            )
+            slashMenuTrigger = null
+        }
+    }
+    // @-file mentions: the trigger follows the cursor; candidates are scanned from the project
+    // root once per query (IO), filtered by name/path and capped.
+    var mentionMenuTrigger by remember { mutableStateOf<IntRange?>(null) }
+    var mentionQuery by remember { mutableStateOf("") }
+    var mentionFiles by remember { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(textState) {
+        snapshotFlow { textState.selection }.collectLatest { selection ->
+            val text = textState.text.toString()
+            val cursor = selection.end.coerceAtLeast(0)
+            val range = nativeMentionTriggerRange(text, cursor)
+            mentionMenuTrigger = range
+            mentionQuery = if (range != null) text.substring(range.first + 1, range.last + 1) else ""
+        }
+    }
+    LaunchedEffect(mentionQuery, projectPath) {
+        val query = mentionQuery
+        if (query.isEmpty()) {
+            mentionFiles = emptyList()
+            return@LaunchedEffect
+        }
+        val root = java.io.File(projectPath)
+        val scanned = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            nativeScanMentionFiles(root)
+        }
+        mentionFiles = filterMentionFiles(scanned, query)
+    }
+    val applyMention: (String) -> Unit = remember(textState) {
+        { filePath ->
+            val range = mentionMenuTrigger ?: return@remember
+            val text = textState.text.toString()
+            val updated = nativeApplyMention(text, range, filePath)
+            textState.setTextAndPlaceCursorAtEnd(updated)
+            onValueChange(updated)
+            mentionMenuTrigger = null
+        }
+    }
     LaunchedEffect(compactOnScrollEnabled, hasConversation, conversationMoving, imeVisible) {
         when {
             !compactOnScrollEnabled || !hasConversation -> collapsedAfterScroll = false
@@ -910,6 +979,56 @@ internal fun RikkaChatInput(
                                 },
                             )
                         }
+                        DropdownMenu(
+                            expanded = mentionMenuTrigger != null,
+                            onDismissRequest = { mentionMenuTrigger = null },
+                            modifier = Modifier.widthIn(max = 320.dp),
+                        ) {
+                            if (mentionFiles.isEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text(nativeText(language, "没有匹配的文件", "No matching files"), style = MaterialTheme.typography.bodySmall) },
+                                    onClick = { mentionMenuTrigger = null },
+                                )
+                            } else {
+                                mentionFiles.forEach { filePath ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Column {
+                                                Text(filePath.substringAfterLast('/'), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                Text(filePath, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                        },
+                                        onClick = { applyMention(filePath) },
+                                    )
+                                }
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = slashMenuTrigger != null,
+                            onDismissRequest = { slashMenuTrigger = null },
+                            modifier = Modifier.widthIn(max = 320.dp),
+                        ) {
+                            val filtered = filterSlashCommands(slashCommands, slashQuery)
+                            if (filtered.isEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text(nativeText(language, "没有匹配命令", "No matching commands"), style = MaterialTheme.typography.bodySmall) },
+                                    onClick = { slashMenuTrigger = null },
+                                )
+                            } else {
+                                filtered.forEach { command ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                command.insertText.trim(),
+                                                fontFamily = FontFamily.Monospace,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                            )
+                                        },
+                                        onClick = { applySlashCommand(command) },
+                                    )
+                                }
+                            }
+                        }
                         AnimatedVisibility(
                             visible = !compactComposer,
                             enter = fadeIn(tween(145)) + expandVertically(
@@ -983,6 +1102,7 @@ internal fun RikkaChatInput(
                     hasAttachments = attachments.isNotEmpty(),
                     onStop = onStop,
                     onSend = submitCurrentText,
+                    followUpAction = followUpAction,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(
@@ -1071,6 +1191,7 @@ internal fun ComposerActionButton(
     glassConfig: LiquidGlassConfig? = null,
     isLightTheme: Boolean = true,
     liquidGlassTint: Color = Color.Transparent,
+    followUpAction: NativeFollowUpSubmitAction = NativeFollowUpSubmitAction.STEER,
 ) {
     val inputText = textState.text.toString()
     val action = nativeComposerAction(inputText, hasAttachments, enabled, loading)
@@ -1122,7 +1243,7 @@ internal fun ComposerActionButton(
                 contentDescription = if (stopMode) {
                     nativeText(LocalNativeLanguage.current, "停止生成", "Stop generating")
                 } else {
-                    nativeText(LocalNativeLanguage.current, "发送", "Send")
+                    nativeComposerSubmitHint(loading, followUpAction, LocalNativeLanguage.current)
                 },
                 modifier = Modifier.size(if (stopMode) 18.dp else 21.dp),
                 tint = when {

@@ -293,17 +293,24 @@ internal fun markdownBlocks(source: String): List<MarkdownBlock> {
 internal fun RichResponseText(
     text: String,
     onQuoteSelection: ((String) -> Unit)? = null,
+    projectPath: String = "",
 ) {
-    val initialDocument = remember(text) { NativeMarkdownDocumentParser.cached(text) }
-    val document by produceState<NativeMarkdownDocument?>(initialDocument, text) {
+    val normalized = remember(text) { normalizeResponseMarkdown(text) }
+    // Pure JSON output renders as a pretty-printed card instead of a wall of text.
+    if (looksLikeJsonResponse(normalized)) {
+        FcodeJsonCard(normalized)
+        return
+    }
+    val initialDocument = remember(normalized) { NativeMarkdownDocumentParser.cached(normalized) }
+    val document by produceState<NativeMarkdownDocument?>(initialDocument, normalized) {
         if (value == null) {
-            value = withContext(Dispatchers.Default) { NativeMarkdownDocumentParser.parseCached(text) }
+            value = withContext(Dispatchers.Default) { NativeMarkdownDocumentParser.parseCached(normalized) }
         }
     }
     val parsed = document
     if (parsed == null) {
         // Keep content visible while block segmentation runs off-main-thread.
-        StableLiveTextChunk(text, reasoning = false)
+        StableLiveTextChunk(normalized, reasoning = false)
         return
     }
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -316,7 +323,7 @@ internal fun RichResponseText(
                         FcodeMarkdownTable(table, block.text)
                     }
                     NativeMarkdownBlockType.PROSE -> if (block.text.isNotBlank()) {
-                        RichMarkdownText(block.text, onQuoteSelection)
+                        RichMarkdownText(block.text, onQuoteSelection, projectPath)
                     }
                 }
             }
@@ -877,6 +884,7 @@ internal data class MarkdownViewBindingTag(
 internal fun RichMarkdownText(
     text: String,
     onQuoteSelection: ((String) -> Unit)? = null,
+    projectPath: String = "",
 ) {
     val needsRichRenderer = remember(text) { NativeUiRenderSafety.requiresRichMarkdown(text) }
     val context = LocalContext.current
@@ -886,6 +894,15 @@ internal fun RichMarkdownText(
     val fontScaleKey = (chatFontScale * 100f).roundToInt()
     val themeKey = "${colors.cacheKey}|chat-font-$fontScaleKey"
     val onSelectionActivityChanged = LocalTextSelectionActivityChanged.current
+    var fileRef by remember { mutableStateOf<NativeMarkdownLinkAction.FileRef?>(null) }
+    val linkHandler = remember(projectPath) {
+        { linkAction: NativeMarkdownLinkAction ->
+            when (linkAction) {
+                is NativeMarkdownLinkAction.FileRef -> fileRef = linkAction
+                else -> Unit
+            }
+        }
+    }
     val markwon: Markwon? = if (needsRichRenderer) {
         remember(context.applicationContext, themeKey) {
             NativeMarkdownRenderer.get(context.applicationContext, colors, chatFontScale)
@@ -945,7 +962,15 @@ internal fun RichMarkdownText(
             val rendered = parsed
             if (rendered != null && markwon != null && view.tag != renderedTag) {
                 view.finishSelection()
-                val applied = runCatching { markwon.setParsedMarkdown(view, rendered) }.isSuccess
+                // Workspace-aware link routing: file references open in the viewer, external
+                // schemes in the browser, unknown links stay inert.
+                val withLinks = applyWorkspaceLinks(rendered) { action ->
+                    when (action) {
+                        is NativeMarkdownLinkAction.FileRef -> linkHandler(action)
+                        else -> Unit
+                    }
+                }
+                val applied = runCatching { markwon.setParsedMarkdown(view, withLinks) }.isSuccess
                 if (applied) view.tag = renderedTag else {
                     view.text = text
                     view.tag = plainTag
@@ -957,6 +982,55 @@ internal fun RichMarkdownText(
             }
         },
     )
+    fileRef?.let { ref ->
+        val resolved = remember(ref.path, projectPath) { resolveFilePath(ref.path, projectPath) }
+        if (resolved != null) {
+            FileViewDialog(
+                filePath = resolved,
+                fileName = ref.path.substringAfterLast('/').substringAfterLast('\\').ifBlank { ref.path },
+                onDismiss = { fileRef = null },
+            )
+        } else {
+            fileRef = null
+        }
+    }
+}
+
+/** Replaces URL spans with workspace-aware spans; external URLs keep browser behavior. */
+private fun applyWorkspaceLinks(
+    spanned: android.text.Spanned,
+    onFileRef: (NativeMarkdownLinkAction) -> Unit,
+): android.text.Spanned {
+    val spans = spanned.getSpans(0, spanned.length, android.text.style.URLSpan::class.java)
+    if (spans.isEmpty()) return spanned
+    val copy = android.text.SpannableStringBuilder(spanned)
+    for (span in spans) {
+        val start = copy.getSpanStart(span)
+        val end = copy.getSpanEnd(span)
+        if (start < 0 || end < 0) continue
+        copy.removeSpan(span)
+        copy.setSpan(WorkspaceLinkSpan(span.url, onFileRef), start, end, copy.getSpanFlags(span))
+    }
+    return copy
+}
+
+/** Link span that routes file references to the viewer and opens external URLs in the browser. */
+private class WorkspaceLinkSpan(
+    url: String,
+    private val onFileRef: (NativeMarkdownLinkAction) -> Unit,
+) : android.text.style.URLSpan(url) {
+    override fun onClick(widget: android.view.View) {
+        val action = resolveMarkdownLink(url)
+        when (action) {
+            NativeMarkdownLinkAction.External -> runCatching {
+                widget.context.startActivity(
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)),
+                )
+            }
+            is NativeMarkdownLinkAction.FileRef -> onFileRef(action)
+            NativeMarkdownLinkAction.None -> Unit
+        }
+    }
 }
 
 @Composable

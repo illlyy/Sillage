@@ -270,7 +270,7 @@ public class NativeHistorySnapshotTest {
 
     private static NativeChatMessage message(String id, NativeChatRole role, String content) {
         return new NativeChatMessage(id, role, content, false, 0L, false, null,
-            Collections.emptyList(), Collections.emptyList());
+            Collections.emptyList(), Collections.emptyList(), false);
     }
 
     private static String encoded(String prefix, JSONObject value) {

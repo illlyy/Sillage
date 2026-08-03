@@ -279,6 +279,8 @@ import me.rerere.hugeicons.stroke.Zap
 internal fun RikkaDrawerV2(
     currentThreadId: String,
     modelLabel: String,
+    backend: NativeBackendType,
+    onSwitchBackend: (NativeBackendType) -> Unit,
     conversations: List<NativeConversation>,
     onSearch: () -> Unit,
     onRenameConversation: (NativeConversation) -> Unit,
@@ -760,6 +762,11 @@ internal fun DrawerConversationTaskRow(
     val language = LocalNativeLanguage.current
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     var menuExpanded by remember(conversation.threadId) { mutableStateOf(false) }
+    // Real-time activity (from the process-wide store) wins over the persisted task state so a
+    // just-started or cross-host turn shows as running immediately.
+    val liveActivity = NativeSessionActivityStore.activityFor(conversation.threadId)
+    val liveRunning = liveActivity != null
+    val running = liveRunning || conversation.state == CodexTaskStore.RUNNING
     Box(Modifier.padding(start = if (indented) 28.dp else 0.dp)) {
         Surface(
             modifier = Modifier
@@ -774,7 +781,7 @@ internal fun DrawerConversationTaskRow(
             color = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent,
         ) {
             Row(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (conversation.state == CodexTaskStore.RUNNING) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                if (running) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
                 else Icon(HugeIcons.Sparkles, null, Modifier.size(18.dp), tint = if (conversation.state == CodexTaskStore.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(10.dp))
                 Text(conversation.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
@@ -996,19 +1003,128 @@ internal fun ConversationMenu(
 }
 
 @Composable
-internal fun ConversationSearchDialog(conversations: List<NativeConversation>, onDismiss: () -> Unit, onSelect: (NativeConversation) -> Unit) {
+internal fun ConversationSearchDialog(
+    conversations: List<NativeConversation>,
+    sessionsRoot: java.io.File?,
+    onDismiss: () -> Unit,
+    onSelect: (NativeConversation, NativeSearchHit?) -> Unit,
+) {
     var query by remember { mutableStateOf("") }
+    var mode by remember { mutableStateOf("title") }
+    var fullTextHits by remember { mutableStateOf<List<NativeSearchHit>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var searchProgress by remember { mutableStateOf(0 to 0) }
     val language = LocalNativeLanguage.current
-    val results = conversations.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+    val titleResults = conversations.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+    val engine = remember(sessionsRoot) {
+        NativeConversationSearchEngine(sessionsRoot = { sessionsRoot })
+    }
+    // Debounced, cancellation-safe search: every keystroke restarts this effect and cancels the
+    // previous scan (engine.search is cooperative), so stale results can never win.
+    LaunchedEffect(query, mode) {
+        if (mode != "fulltext") {
+            fullTextHits = emptyList()
+            searching = false
+            return@LaunchedEffect
+        }
+        val normalized = query.trim()
+        if (normalized.length < 2) {
+            fullTextHits = emptyList()
+            searching = false
+            return@LaunchedEffect
+        }
+        searching = true
+        kotlinx.coroutines.delay(250)
+        var lastProgress = 0 to 0
+        val hits = engine.search(normalized, progress = { scanned, total -> lastProgress = scanned to total })
+        searchProgress = lastProgress
+        fullTextHits = hits
+        searching = false
+    }
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(nativeText(language, "\u641c\u7d22\u5bf9\u8bdd", "Search conversations")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(HugeIcons.Search01, null) }, placeholder = { Text(nativeText(language, "\u641c\u7d22\u5bf9\u8bdd", "Search conversations")) })
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        shape = CircleShape,
+                        color = if (mode == "title") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                        modifier = Modifier.fcodePressClickable(onClickLabel = nativeText(language, "\u6309\u6807\u9898\u641c\u7d22", "Search by title")) { mode = "title" },
+                    ) { Text(nativeText(language, "\u6807\u9898", "Title"), Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium) }
+                    Surface(
+                        shape = CircleShape,
+                        color = if (mode == "fulltext") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                        modifier = Modifier.fcodePressClickable(onClickLabel = nativeText(language, "\u5168\u6587\u641c\u7d22", "Search full text")) { mode = "fulltext" },
+                    ) { Text(nativeText(language, "\u5168\u6587", "Full text"), Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium) }
+                }
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    leadingIcon = { Icon(HugeIcons.Search01, null) },
+                    placeholder = {
+                        Text(if (mode == "fulltext")
+                            nativeText(language, "\u641c\u7d22\u6240\u6709\u5bf9\u8bdd\u7684\u5185\u5bb9\u2026", "Search message content across conversations\u2026")
+                        else nativeText(language, "\u641c\u7d22\u5bf9\u8bdd", "Search conversations"))
+                    },
+                )
+                if (mode == "fulltext" && searching) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.8.dp)
+                        Spacer(Modifier.width(8.dp))
+                        val (scanned, total) = searchProgress
+                        Text(
+                            nativeText(language, "\u6b63\u5728\u641c\u7d22\u2026\uff08$scanned/$total\uff09", "Searching\u2026 ($scanned/$total)"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                when {
+                    mode == "fulltext" && query.trim().length < 2 -> Text(
+                        nativeText(language, "\u8f93\u5165\u81f3\u5c11 2 \u4e2a\u5b57\u7b26\u5f00\u59cb\u5168\u6587\u641c\u7d22", "Type at least 2 characters to search full text"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    mode == "fulltext" && !searching && fullTextHits.isEmpty() && query.trim().length >= 2 -> Text(
+                        nativeText(language, "\u6ca1\u6709\u627e\u5230\u5339\u914d\u5185\u5bb9", "No matching messages found"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    else -> Unit
+                }
                 LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
-                    items(results, key = { it.threadId }) { conversation ->
-                        NavigationDrawerItem(label = { Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }, selected = false, onClick = { onSelect(conversation) })
+                    if (mode == "title") {
+                        items(titleResults, key = { it.threadId }) { conversation ->
+                            NavigationDrawerItem(label = { Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }, selected = false, onClick = { onSelect(conversation, null) })
+                        }
+                    } else {
+                        items(fullTextHits.distinctBy { it.threadId }, key = { it.threadId + it.lineNumber }) { hit ->
+                            val conversation = conversations.firstOrNull { it.threadId == hit.threadId }
+                            NavigationDrawerItem(
+                                label = {
+                                    Column {
+                                        Text(
+                                            conversation?.title?.takeIf { it.isNotBlank() } ?: hit.threadId.take(12),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        Text(
+                                            hit.snippet,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                selected = false,
+                                onClick = { conversation?.let { onSelect(it, hit) } },
+                            )
+                        }
                     }
                 }
             }

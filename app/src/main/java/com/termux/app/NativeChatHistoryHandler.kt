@@ -40,93 +40,69 @@ import org.json.JSONObject
 
 
     internal fun CodexChatActivity.refreshConversations() {
-        val generation = ++conversationRefreshGeneration
-        android.util.Log.d("IlyopCodexTasks", "refresh generation=$generation")
-        if (NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE) {
-            refreshClaudeConversations(generation)
+        // The overlay_tasks_v1 preference listener fires synchronously on whichever thread wrote
+        // the pref — that can be a bridge thread. Generation/lastConversationBackend/list mutation
+        // must serialize on the UI thread to stay race-free with applyConversationSnapshot.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread { refreshConversations() }
             return
         }
-        val favorites = favoriteThreadIds()
-        val snapshot = CodexTaskStore.current(this)
-        val registeredProjectPaths = NativeDrawerProjectStore.registered(this).map(NativeDrawerProject::path)
-        fun visibleProjectPath(path: String): String = resolveNativeConversationProjectMigration(
-            cachedResolvedPath = path,
-            freshlyResolvedPath = null,
-            registeredProjectPaths = registeredProjectPaths,
-        ).registeredProjectPath.orEmpty()
-
-        // Task status and stored titles are cheap SharedPreferences data. Publish them
-        // immediately so a newly running/completed task appears without waiting for a
-        // recursive session-file scan.
-        val immediate = snapshot.map { task ->
-            NativeConversation(
-                task.threadId,
-                conversationTitleCache[task.threadId] ?: task.title,
-                task.state,
-                if (task.projectAssignmentKnown) visibleProjectPath(task.projectPath)
-                else visibleProjectPath(conversationProjectCache[task.threadId].orEmpty()),
-                task.threadId in favorites,
-                taskAttention(task.threadId, task.state),
-            )
-        }.sortedWith(compareByDescending<NativeConversation> { it.state == CodexTaskStore.RUNNING }
-            .thenByDescending { attentionPriority(it.attention) })
-        applyConversationSnapshot(generation, immediate)
-
-        Thread {
-            val missingProjectIds = snapshot.asSequence()
-                .filter { !it.projectAssignmentKnown && !conversationProjectCache.containsKey(it.threadId) }
-                .map { it.threadId }
-                .toList()
-            val resolvedProjects = if (missingProjectIds.isEmpty()) emptyMap()
-                else CodexAppServerBridge.resolveConversationProjects(missingProjectIds)
-            snapshot.asSequence().filterNot { it.projectAssignmentKnown }.forEach { task ->
-                val migration = resolveNativeConversationProjectMigration(
-                    cachedResolvedPath = conversationProjectCache[task.threadId],
-                    freshlyResolvedPath = resolvedProjects[task.threadId],
-                    registeredProjectPaths = registeredProjectPaths,
-                )
-                migration.resolvedPath?.let { conversationProjectCache[task.threadId] = it }
-                migration.registeredProjectPath?.let { project ->
-                    CodexTaskStore.assignProject(this, task.threadId, project)
-                }
-            }
-            val enriched = snapshot.mapNotNull { task ->
-                var title = conversationTitleCache[task.threadId] ?: task.title
-                val fallbackTitle = title.startsWith("Codex 任务")
-                if (fallbackTitle) {
-                    val resolvedTitle = CodexAppServerBridgeHistory.resolveConversationTitle(task.threadId)
-                    if (resolvedTitle.isNotBlank()) {
-                        title = resolvedTitle
-                        conversationTitleCache[task.threadId] = resolvedTitle
-                    }
-                }
-                val project = if (task.projectAssignmentKnown) visibleProjectPath(task.projectPath)
-                    else visibleProjectPath(conversationProjectCache[task.threadId].orEmpty())
-                if (fallbackTitle && title.startsWith("Codex 任务")) null
-                else NativeConversation(task.threadId, title, task.state, project, task.threadId in favorites, taskAttention(task.threadId, task.state))
-            }.sortedWith(compareByDescending<NativeConversation> { it.state == CodexTaskStore.RUNNING }
-                .thenByDescending { attentionPriority(it.attention) })
-            applyConversationSnapshot(generation, enriched)
-        }.apply { name = "CodexConversationMetadata" }.start()
+        val backend = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE))
+        chatState.backend = backend
+        val generation = ++conversationRefreshGeneration
+        android.util.Log.d("IlyopCodexTasks", "refresh generation=$generation backend=$backend")
+        if (backend != lastConversationBackend) {
+            // Backend switched: drop the other backend's records immediately so the drawer never
+            // flashes stale cross-backend data while the new backend's scan is in flight.
+            lastConversationBackend = backend
+            chatState.conversations.clear()
+        }
+        NativeConversationSourceRegistry.sourceFor(backend).refresh(this, backend, generation)
     }
 
-    /** Claude backend: conversations come from the transcript scan instead of the task store. */
-    internal fun CodexChatActivity.refreshClaudeConversations(generation: Int) {
-        Thread {
-            val conversations = ClaudeHistoryAdapter.listConversations(this)
-            applyConversationSnapshot(generation, conversations)
-        }.apply { name = "ClaudeConversationScan" }.start()
-    }
-
-    internal fun CodexChatActivity.applyConversationSnapshot(generation: Int, conversations: List<NativeConversation>) {        runOnUiThread {
-            if (generation != conversationRefreshGeneration || isFinishing || isDestroyed) return@runOnUiThread
-            android.util.Log.d("IlyopCodexTasks", "apply generation=$generation count=${conversations.size} first=${conversations.firstOrNull()?.title}")
+    internal fun CodexChatActivity.applyConversationSnapshot(backend: NativeBackendType, generation: Int, conversations: List<NativeConversation>) {        runOnUiThread {
+            if (generation != conversationRefreshGeneration ||
+                backend != NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) ||
+                isFinishing || isDestroyed) return@runOnUiThread
+            android.util.Log.d("IlyopCodexTasks", "apply generation=$generation backend=$backend count=${conversations.size} first=${conversations.firstOrNull()?.title}")
+            // Skip pointless re-clears: background task-state writes fire refreshes repeatedly and
+            // the list only changes when thread ids/titles differ. Re-clearing identical content is
+            // what made the drawer flash empty between same-backend refreshes.
+            val current = chatState.conversations
+            if (current.size == conversations.size && current.indices.all { index ->
+                    current[index].threadId == conversations[index].threadId && current[index].title == conversations[index].title
+                }
+            ) return@runOnUiThread
             chatState.conversations.clear()
             chatState.conversations.addAll(conversations)
             conversations.firstOrNull { it.threadId == currentThreadId }?.projectPath?.takeIf { it.isNotBlank() }?.let {
                 chatState.projectPath = it
             }
         }
+    }
+
+    /**
+     * Unified backend switch used by the drawer quick-switch and the onResume mismatch path.
+     * Terminates the running turn, persists the pref, tears down the leaving runtime (so its
+     * bridge stops writing task-state refreshes and can no longer publish records), spawns the
+     * requested backend, resets to a fresh conversation and reloads the drawer. Main thread only.
+     */
+    internal fun CodexChatActivity.switchBackend(to: NativeBackendType) {
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        if (NativeBackendType.current(prefs) == to) return
+        if (chatState.busy) stopCurrentTurn()
+        NativeBackendType.set(prefs, to)
+        chatState.backend = to
+        notificationTargetThreadId = null
+        if (to == NativeBackendType.CLAUDE) {
+            if (CodexNativeRuntime.exists()) CodexNativeRuntime.shutdown()
+        } else {
+            if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
+        }
+        bridge = null
+        startBackend()
+        newConversationAtProject("")
+        refreshConversations()
     }
 
     internal fun CodexChatActivity.favoriteThreadIds(): Set<String> {
@@ -278,6 +254,9 @@ import org.json.JSONObject
         }
         chatState.ready = false
         chatState.connectionLabel = "正在恢复对话…"
+        // A durable queue may survive a restart or a session switch: once this thread is idle
+        // again, dispatch the first queued message. Busy/resuming turns are guarded inside.
+        streamHandler.postDelayed(::flushRestoredQueuedMessages, 750L)
         val isClaude = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE
         expectedHistoryGeneration = if (isClaude) {
             bridge?.resumeConversation(threadId) ?: -1

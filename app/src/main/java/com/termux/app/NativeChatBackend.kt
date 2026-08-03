@@ -142,6 +142,7 @@ internal data class NativeBackendStartRequest(
         if (!configuration.hasRuntimeCredentials) {
             if (CodexNativeRuntime.exists()) CodexNativeRuntime.shutdown()
             bridge = null
+            attachedBackend = null
             chatState.ready = false
             chatState.addError("没有可用的 API 配置，请先返回首页创建并启用配置。")
             return
@@ -152,6 +153,7 @@ internal data class NativeBackendStartRequest(
         if (!binary.canExecute()) {
             if (CodexNativeRuntime.exists()) CodexNativeRuntime.shutdown()
             bridge = null
+            attachedBackend = null
             chatState.ready = false
             chatState.addError("Codex CLI 尚未安装，请先返回首页完成运行环境安装。")
             return
@@ -204,6 +206,7 @@ internal data class NativeBackendStartRequest(
             profile.hasV2Models(),
             profile.customSubagentStability && profile.hasCustomV2Models(),
         )
+        attachedBackend = NativeBackendType.CODEX
         if (!retainedThread.isNullOrBlank()) {
             val bridgeWasRecreated = CodexNativeRuntime.lastAttachRecreatedBridge()
             resumeConversation(
@@ -217,10 +220,12 @@ internal data class NativeBackendStartRequest(
     internal fun CodexChatActivity.startClaudeBackend(
         generation: Int,
         preferConfiguredDefault: Boolean = false,
+        modelOverride: String? = null,
     ) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         backendConfigurationLoaded = true
         pendingBackendConfigurationReload = false
+        pendingClaudeModelSwitch = ""
         activeProfileId = ""
         val store = ClaudeProviderStore(prefs)
         val profile = store.active()
@@ -228,6 +233,7 @@ internal data class NativeBackendStartRequest(
         if (profile == null) {
             if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
             bridge = null
+            attachedBackend = null
             chatState.ready = false
             chatState.addError("没有可用的 Claude API 配置，请先返回首页在设置中创建。")
             return
@@ -235,16 +241,26 @@ internal data class NativeBackendStartRequest(
         if (!claudeBin.canExecute()) {
             if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
             bridge = null
+            attachedBackend = null
             chatState.ready = false
             chatState.addError("Claude CLI 尚未安装，请先返回首页在设置中下载。")
             return
         }
-        val model = profile.model.ifBlank { ClaudeProfile.DEFAULT_MODEL }
+        activeProfileId = profile.id
+        val primaryModel = profile.model.ifBlank { ClaudeProfile.DEFAULT_MODEL }
         chatState.modelOptions.clear()
-        chatState.modelOptions.add(NativeModelOption(id = model, name = model, efforts = listOf("none"), defaultEffort = "none"))
-        chatState.selectedModel = model
-        chatState.modelLabel = model
+        chatState.modelOptions.addAll(buildClaudeModelOptions(profile))
+        // Effective model: an explicit picker selection wins, then the stored per-profile
+        // preference, then the profile primary. Persisted so a re-attach keeps the choice.
+        val requestedModel = modelOverride?.takeIf { it.isNotBlank() }
+            ?: prefs.getString(modelPreferenceKey(profile.id), null)?.takeIf { it.isNotBlank() }
+            ?: primaryModel
+        val effectiveModel = chatState.modelOptions.firstOrNull { it.id.equals(requestedModel, ignoreCase = true) }?.id
+            ?: primaryModel
+        chatState.selectedModel = effectiveModel
+        chatState.modelLabel = chatState.modelOptions.firstOrNull { it.id == effectiveModel }?.name ?: effectiveModel
         chatState.selectedEffort = "none"
+        prefs.edit().putString(modelPreferenceKey(profile.id), effectiveModel).apply()
         chatState.connectionLabel = "正在连接 Claude…"
         chatState.ready = false
 
@@ -256,9 +272,16 @@ internal data class NativeBackendStartRequest(
             NativePermissionMode.WORKSPACE -> "acceptEdits"
             else -> "bypassPermissions"
         }
-        val fingerprint = listOf(profile.apiKey, profile.apiKeyField, profile.baseUrl, model,
-            profile.haikuModel, profile.sonnetModel, profile.opusModel, profile.subagentModel,
-            profile.extraEnv, claudePermissionMode).joinToString("\n")
+        // The fingerprint drives bridge re-spawn; it must cover every field that changes the
+        // spawned CLI (credentials, tiers, tuning, toggles, custom JSON) plus the active model.
+        val fingerprint = listOf(profile.apiKey, profile.apiKeyField, profile.baseUrl, profile.model,
+            profile.haikuModel, profile.sonnetModel, profile.opusModel, profile.fableModel,
+            profile.smallFastModel, profile.subagentModel,
+            profile.maxContextTokens, profile.autoCompactWindow, profile.maxOutputTokens, profile.apiTimeoutMs,
+            profile.disableNonEssentialTraffic, profile.maxEffort, profile.enableToolSearch,
+            profile.disableAutoUpdater, profile.experimentalAgentTeams, profile.disableExperimentalBetas,
+            profile.includeCoAuthoredBy, profile.extraSettingsJson, profile.extraEnv,
+            claudePermissionMode, effectiveModel).joinToString("\n")
         val configDir = File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".claude").absolutePath
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false)
         val retainedRuntime = ClaudeNativeRuntime.exists()
@@ -276,12 +299,61 @@ internal data class NativeBackendStartRequest(
             allowedClaudeTools(permissionMode),
             retainedThread.orEmpty(),
             routeThroughMihomo,
+            effectiveModel,
         )
+        attachedBackend = NativeBackendType.CLAUDE
         if (!retainedThread.isNullOrBlank()) {
             // The bridge restarts internally when the target differs from its current session;
             // this call always re-wires the UI state (loading route, history snapshot).
             resumeConversation(retainedThread, retainedRuntime = retainedRuntime)
         }
+    }
+
+    /**
+     * Model options for the Claude backend model picker. Each entry's id is the **resolved
+     * concrete model id** (configured tier model, else the primary) — full ids are always
+     * accepted by the CLI's `--model` flag, avoiding alias-version surprises (e.g. `fable` on
+     * an older CLI). Duplicates collapse via the map, so a relay that maps every tier to one
+     * model (e.g. Kimi) shows a single clean entry, and a blank tier that resolves to the
+     * primary folds into the primary entry. The display name keeps the tier label for clarity.
+     */
+    internal fun buildClaudeModelOptions(profile: ClaudeProfile): List<NativeModelOption> {
+        val primary = profile.model.ifBlank { ClaudeProfile.DEFAULT_MODEL }
+        val byId = LinkedHashMap<String, NativeModelOption>()
+        // Primary first so it always appears with its plain label; a tier resolving to the
+        // primary (blank config) collapses into it instead of duplicating the id.
+        byId[primary] = NativeModelOption(
+            id = primary,
+            name = primary,
+            efforts = listOf("none"),
+            defaultEffort = "none",
+        )
+        fun tier(label: String, configured: String) {
+            val resolved = configured.ifBlank { primary }
+            if (!byId.containsKey(resolved)) {
+                byId[resolved] = NativeModelOption(
+                    id = resolved,
+                    name = "$label · $resolved",
+                    efforts = listOf("none"),
+                    defaultEffort = "none",
+                )
+            }
+        }
+        tier("Sonnet", profile.sonnetModel)
+        tier("Opus", profile.opusModel)
+        tier("Haiku", profile.haikuModel)
+        tier("Fable", profile.fableModel)
+        return byId.values.toList()
+    }
+
+    /** Applies a Claude model switch that was deferred because a turn was running. */
+    internal fun CodexChatActivity.applyPendingClaudeModelSwitch() {
+        if (pendingClaudeModelSwitch.isBlank()) return
+        val model = pendingClaudeModelSwitch
+        pendingClaudeModelSwitch = ""
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        if (NativeBackendType.current(prefs) != NativeBackendType.CLAUDE) return
+        startClaudeBackend(++backendStartGeneration, modelOverride = model)
     }
 
     /** Claude tool allow-list for non-bypass permission modes; read-only gets a minimal set. */
@@ -383,6 +455,7 @@ internal data class NativeBackendStartRequest(
         val option = chatState.modelOptions.firstOrNull { it.id.equals(modelId, ignoreCase = true) } ?: return
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         val profileId = activeProfileId
+        val changed = !chatState.selectedModel.equals(option.id, ignoreCase = true)
         val storedEffort = if (profileId.isBlank()) "" else {
             prefs.getString(effortPreferenceKey(profileId, option.id), null)
                 ?.trim()
@@ -402,6 +475,15 @@ internal data class NativeBackendStartRequest(
             .put("profileId", profileId)
             .put("model", chatState.selectedModel)
             .put("effort", chatState.selectedEffort))
+        // Claude: the CLI's model is fixed at spawn, so a picker change must re-spawn the bridge
+        // with the new model (resuming the current thread). Busy turns defer the switch.
+        if (changed && NativeBackendType.current(prefs) == NativeBackendType.CLAUDE) {
+            if (chatState.busy) {
+                pendingClaudeModelSwitch = option.id
+            } else {
+                startClaudeBackend(++backendStartGeneration, modelOverride = option.id)
+            }
+        }
     }
 
     internal fun CodexChatActivity.selectNativeEffort(effort: String) {

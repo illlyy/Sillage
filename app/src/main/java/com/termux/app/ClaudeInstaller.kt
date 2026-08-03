@@ -53,22 +53,13 @@ internal object ClaudeInstaller {
             var error: String? = null
             try {
                 ensureLayout()
-                val archive = File(TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH, ARCHIVE)
-                progress.onStage("下载", "正在下载 Claude CLI ($VERSION)…")
-                val digest = download(context, archive, progress)
-                if (!digest.equals(EXPECTED_SHA256, ignoreCase = true)) {
-                    throw IOException("SHA-256 校验失败（期望 $EXPECTED_SHA256，实际 $digest）")
-                }
-                progress.onStage("解压", "正在解压可执行文件…")
-                val destination = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
-                extractClaude(archive, destination)
-                if (!destination.setExecutable(true, false)) throw IOException("无法设置可执行权限")
-                archive.delete()
-                // The official binary is dynamically linked against musl; install the bundled loader.
-                if (ClaudeMuslRuntime.needsMuslLoader(destination) && !ClaudeMuslRuntime.isLoaderPresent()) {
-                    progress.onStage("musl", "正在安装 musl 运行时…")
-                    val muslError = ClaudeMuslRuntime.installFromAssets(context)
-                    if (muslError != null) throw IOException(muslError)
+                val node = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "node")
+                if (node.isFile()) {
+                    // The npm-installed CLI runs through Node.js. The official bun-based musl
+                    // binary hangs during initialization on Android, so Node is the reliable path.
+                    installViaNpm(context, node, progress)
+                } else {
+                    installOfficialBinary(context, progress)
                 }
                 success = true
             } catch (t: Throwable) {
@@ -76,6 +67,54 @@ internal object ClaudeInstaller {
             }
             progress.onComplete(success, error)
         }, "ClaudeInstaller").start()
+    }
+
+    /** npm global install of the official CLI package; requires the Node.js dev tool. */
+    private fun installViaNpm(context: Context, node: File, progress: Progress) {
+        val npm = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "npm")
+        if (!npm.isFile()) throw IOException("未找到 npm，请先安装 Node.js 开发工具")
+        progress.onStage("npm", "正在通过 npm 安装 Claude Code（首次约 2-3 分钟）…")
+        val home = File(TermuxConstants.TERMUX_HOME_DIR_PATH)
+        val command = listOf(
+            npm.absolutePath, "install", "-g", "@anthropic-ai/claude-code",
+            "--no-fund", "--no-audit", "--loglevel=error",
+        )
+        val process = ProcessBuilder(command)
+            .directory(home)
+            .apply {
+                environment()["HOME"] = home.absolutePath
+                environment()["TMPDIR"] = File(home, ".tmp").absolutePath
+                environment()["npm_config_cache"] = File(home, ".npm").absolutePath
+            }
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val exit = process.waitFor()
+        if (exit != 0) {
+            throw IOException("npm 安装失败（exit $exit）：${output.take(600)}")
+        }
+        val claude = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
+        if (!claude.isFile()) throw IOException("npm 安装完成但未找到 claude 入口：${output.take(300)}")
+    }
+
+    private fun installOfficialBinary(context: Context, progress: Progress) {
+        val archive = File(TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH, ARCHIVE)
+        progress.onStage("下载", "正在下载 Claude CLI ($VERSION)…")
+        val digest = download(context, archive, progress)
+        if (!digest.equals(EXPECTED_SHA256, ignoreCase = true)) {
+            throw IOException("SHA-256 校验失败（期望 $EXPECTED_SHA256，实际 $digest）")
+        }
+        progress.onStage("解压", "正在解压可执行文件…")
+        val destination = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
+        extractClaude(archive, destination)
+        if (!destination.setExecutable(true, false)) throw IOException("无法设置可执行权限")
+        archive.delete()
+        // The official binary is dynamically linked against musl; install the bundled loader.
+        if (ClaudeMuslRuntime.needsMuslLoader(destination) && !ClaudeMuslRuntime.isLoaderPresent()) {
+            progress.onStage("musl", "正在安装 musl 运行时…")
+            val muslError = ClaudeMuslRuntime.installFromAssets(context)
+            if (muslError != null) throw IOException(muslError)
+        }
     }
 
     private fun ensureLayout() {

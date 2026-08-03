@@ -96,8 +96,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -132,13 +130,11 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -256,17 +252,14 @@ import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.InLove
 import me.rerere.hugeicons.stroke.Idea01
 import me.rerere.hugeicons.stroke.LanguageCircle
-import me.rerere.hugeicons.stroke.LeftToRightListBullet
 import me.rerere.hugeicons.stroke.Menu03
 import me.rerere.hugeicons.stroke.MessageAdd01
-import me.rerere.hugeicons.stroke.MoreVertical
+import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Copy01
 import me.rerere.hugeicons.stroke.Refresh03
-import me.rerere.hugeicons.stroke.Share08
 import me.rerere.hugeicons.stroke.LookTop
 import me.rerere.hugeicons.stroke.PencilEdit01
-import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Settings03
 import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.TransactionHistory
@@ -306,14 +299,11 @@ internal fun RikkaTopBar(
     title: String,
     modelLabel: String,
     onOpenDrawer: () -> Unit,
-    onOpenWorkPanel: () -> Unit,
-    onSearch: () -> Unit,
-    onExport: () -> Unit,
-    canExport: Boolean,
     onNewConversation: () -> Unit,
     backdrop: Backdrop? = null,
     glassConfig: TopBarLiquidGlassConfig,
     modifier: Modifier = Modifier,
+    onOpenCommandPalette: (() -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
     // Liquid Glass samples the live backdrop for progressive glass. Material stays transparent:
@@ -323,7 +313,6 @@ internal fun RikkaTopBar(
         glassConfig.enabled && liquidGlassSupported && backdrop != null
     val isLight = rememberIsLightTheme()
     val tint = if (isLight) Color.White else Color.Black
-    var menuExpanded by remember { mutableStateOf(false) }
     val glassMaterialModifier = if (useProgressiveGlass) {
         Modifier.drawPlainBackdrop(
             backdrop = backdrop,
@@ -377,31 +366,13 @@ internal fun RikkaTopBar(
                     }
                 },
                 actions = {
+                    if (onOpenCommandPalette != null) {
+                        IconButton(onClick = onOpenCommandPalette) {
+                            Icon(HugeIcons.Search01, contentDescription = nativeText(language, "命令面板", "Command palette"))
+                        }
+                    }
                     IconButton(onClick = onNewConversation) {
                         Icon(HugeIcons.MessageAdd01, contentDescription = nativeText(language, "新对话", "New conversation"))
-                    }
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(HugeIcons.MoreVertical, contentDescription = nativeText(language, "更多操作", "More actions"))
-                        }
-                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                            DropdownMenuItem(
-                                text = { Text(nativeText(language, "搜索当前对话", "Search this conversation")) },
-                                leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
-                                onClick = { menuExpanded = false; onSearch() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(nativeText(language, "工作面板", "Work panel")) },
-                                leadingIcon = { Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(18.dp)) },
-                                onClick = { menuExpanded = false; onOpenWorkPanel() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(nativeText(language, "导出对话", "Export conversation")) },
-                                leadingIcon = { Icon(HugeIcons.Share08, null, Modifier.size(18.dp)) },
-                                enabled = canExport,
-                                onClick = { menuExpanded = false; onExport() },
-                            )
-                        }
                     }
                 },
             )

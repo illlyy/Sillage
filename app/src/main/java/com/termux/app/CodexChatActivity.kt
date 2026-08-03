@@ -145,6 +145,11 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         internal val stalePendingStateCleaned = java.util.concurrent.atomic.AtomicBoolean(false)
         internal const val STREAM_CATCH_UP_CHUNK_CHARS = 1_200
         internal const val STREAM_CATCH_UP_DELAY_MS = 24L
+        internal const val MOTION_DEFER_CAP_MS = 400L
+        // Smooth stream reveal: a whole-answer dump is paced out at this rate instead of being
+        // released in 1_200-char pages. Real per-token streaming stays unaffected (backlog small).
+        internal const val STREAM_REVEAL_CHARS_PER_SEC = 2_400
+        internal const val MIN_STREAM_REVEAL_PER_FLUSH = 12
     }
 
 
@@ -208,6 +213,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
 
     internal var pendingBackendConfigurationReload = false
 
+    /** Claude-only: a model-picker switch requested mid-turn; applied when the turn completes. */
+    internal var pendingClaudeModelSwitch = ""
+
     internal var runtimeStartAttempted = false
 
     internal var pendingCachedHistoryThreadId: String? = null
@@ -217,6 +225,15 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
     internal var lifecycleHandoffRouteThreadId = ""
 
     internal var conversationRefreshGeneration = 0
+
+    /** Backend whose records were last applied to the drawer; null until the first refresh. */
+    internal var lastConversationBackend: NativeBackendType? = null
+
+    /** Backend the currently-attached [bridge] belongs to; null when no bridge is attached.
+     *  This is the source of truth for whether a backend switch actually restarted the runtime —
+     *  distinct from the process-wide per-runtime singletons (which both stay alive after any
+     *  toggle and therefore cannot tell you which backend the activity is routed to). */
+    internal var attachedBackend: NativeBackendType? = null
 
     internal var subagentRouteGeneration = subagentRouteCounter.incrementAndGet()
 
@@ -284,7 +301,11 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
 
     internal var reasoningPendingSince = 0L
 
+    internal var reasoningLastFlushAtMs = 0L
+
     internal var answerPendingSince = 0L
+
+    internal var answerLastFlushAtMs = 0L
     /**
      * Direct-manipulation and navigation motion owns the UI thread. Stream deltas keep buffering
      * while those animations run, but no growing text snapshot is published into Compose until
@@ -294,6 +315,11 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
     internal var uiMotionActive = false
 
     internal var uiMotionCatchUpGeneration = 0
+
+    /** Uptime when this buffer's flush first deferred for UI motion (0 = not deferring). */
+    internal var reasoningMotionDeferSince = 0L
+
+    internal var answerMotionDeferSince = 0L
 
     internal val flushReasoningRunnable = Runnable {
         reasoningFlushScheduled = false
@@ -496,6 +522,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                     onNewConversationAtProject = ::newConversationAtProject,
                     onResumeConversation = ::resumeConversation,
                     onUiMotionChanged = ::setUiMotionActive,
+                    onRefreshConversations = ::refreshConversations,
                     onLoadSubagentHistory = ::loadSubagentHistory,
                     onModelSelected = ::selectNativeModel,
                     onEffortSelected = ::selectNativeEffort,
@@ -878,6 +905,12 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 chatState.addActivity(value)
             }
             "onTurnComplete" -> {
+                // Publish any tail still buffered by the chunked stream flush before the phase
+                // seals: a deferred flush can otherwise leave the final tokens missing from the
+                // sealed answer (visible only after re-entering).
+                flushReasoningDeltas(force = true)
+                flushAnswerDeltas(force = true)
+                flushCommandDeltas()
                 val completion = value.takeIf { it.isNotBlank() }
                     ?.let { runCatching { JSONObject(it) }.getOrNull() }
                 val completionThreadId = completion?.let(::protocolEventThread).orEmpty()
@@ -948,6 +981,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 if (!hasPendingContinuation) stopFrameDiagnostics()
                 refreshConversations()
                 if (!hasPendingContinuation) applyPendingProviderConfiguration()
+                if (!hasPendingContinuation) applyPendingClaudeModelSwitch()
                 val hasQueuedFollowUp = chatState.queuedFollowUps.isNotEmpty()
                 if (hasQueuedFollowUp) {
                     // Keep the completion barrier observable for one frame, then start exactly one
@@ -993,8 +1027,27 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 chatState.addError(value)
                 stopFrameDiagnostics()
                 applyPendingProviderConfiguration()
+                applyPendingClaudeModelSwitch()
             }
             "onLog" -> Unit
+        }
+        publishSessionActivity()
+    }
+
+    /**
+     * Single writer into [NativeSessionActivityStore] for the visible conversation. The store
+     * feeds the drawer status dots and any cross-conversation UI from one source of truth.
+     */
+    private fun publishSessionActivity() {
+        val threadId = currentThreadId ?: return
+        if (chatState.phase.active) {
+            NativeSessionActivityStore.markProcessing(
+                threadId = threadId,
+                statusText = chatState.processingLabel,
+                canInterrupt = chatState.phase != NativeTurnPhase.STOPPING && chatState.busy,
+            )
+        } else {
+            NativeSessionActivityStore.markIdle(threadId)
         }
     }
 
@@ -1031,14 +1084,30 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         // The WebUI intentionally takes exclusive ownership of the Codex backend. When its
         // host finishes, this Activity is still in the back stack with a reference to the old,
         // stopped bridge; rebuild it before accepting another native turn.
-        if (runtimeStartAttempted && !backendConfigurationLoaded && isBackendCliInstalled()) {
-            startBackend(preferConfiguredDefault = true)
-        } else if (backendConfigurationLoaded && bridge != null && !backendRuntimeExists()) {
-            bridge = null
-            startBackend()
-        } else {
-            bridge?.loadSkills()
-            reloadProviderConfigurationIfChanged()
+        val currentBackend = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE))
+        when {
+            runtimeStartAttempted && !backendConfigurationLoaded && isBackendCliInstalled() -> {
+                startBackend(preferConfiguredDefault = true)
+                refreshConversations()
+            }
+            // A settings-page switch only writes the pref. The activity's attached bridge is the
+            // truth for routing: if it belongs to the other backend, run a full switchBackend
+            // (tear down the leaving runtime, spawn the requested one, reset to a fresh chat).
+            // backendRuntimeExists() alone cannot detect this — it probes the process-wide per-
+            // backend singletons, which both stay alive after any toggle, so both bridges exist
+            // once a user has switched back and forth and the old bridge would be kept forever.
+            backendConfigurationLoaded && bridge != null && attachedBackend != null && attachedBackend != currentBackend ->
+                switchBackend(currentBackend)
+            backendConfigurationLoaded && bridge != null && !backendRuntimeExists() -> {
+                bridge = null
+                startBackend()
+                refreshConversations()
+            }
+            else -> {
+                bridge?.loadSkills()
+                reloadProviderConfigurationIfChanged()
+                refreshConversations()
+            }
         }
         if (chatState.busy) startFrameDiagnostics()
     }
@@ -1079,6 +1148,8 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         backendStartGeneration++
         backendScope.cancel()
         persistLifecycleHandoffBeforeDetach()
+        // The bridge keeps running when the activity detaches; the turn may still be live in
+        // another host. Do not clear the activity map — just drop this activity's observation.
         streamHandler.removeCallbacksAndMessages(null)
         getSharedPreferences("codex_mobile", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(taskPreferenceListener)
         if (NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE) {

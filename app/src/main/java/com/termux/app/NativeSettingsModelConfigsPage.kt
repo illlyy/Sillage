@@ -98,10 +98,16 @@ import me.rerere.hugeicons.stroke.LookTop
 import me.rerere.hugeicons.stroke.MagicWand01
 import me.rerere.hugeicons.stroke.Moon02
 import me.rerere.hugeicons.stroke.Refresh03
+import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Settings03
+import me.rerere.hugeicons.stroke.Shield01
 import me.rerere.hugeicons.stroke.Sparkles
+import me.rerere.hugeicons.stroke.TestTube01
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tick02
+import me.rerere.hugeicons.stroke.User03
+import me.rerere.hugeicons.stroke.UserMultiple
+import me.rerere.hugeicons.stroke.Zap
 
 
 @Composable
@@ -363,6 +369,17 @@ private fun ClaudeModelChip(label: String, selected: String, onSelect: (String) 
     }
 }
 
+/** Compact group heading for the Claude editor's advanced section (lighter than SettingsSection). */
+@Composable
+private fun CompactSectionLabel(title: String) {
+    Text(
+        title,
+        Modifier.padding(start = 20.dp, top = 14.dp, bottom = 2.dp),
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+    )
+}
+
 @Composable
 private fun ClaudeModelPickerDialog(
     lang: String,
@@ -445,6 +462,22 @@ internal fun ClaudeConfigurationEditor(
     var sonnetModel by remember { mutableStateOf(initial?.sonnetModel ?: "") }
     var opusModel by remember { mutableStateOf(initial?.opusModel ?: "") }
     var subagentModel by remember { mutableStateOf(initial?.subagentModel ?: "") }
+    var fableModel by remember { mutableStateOf(initial?.fableModel ?: "") }
+    var smallFastModel by remember { mutableStateOf(initial?.smallFastModel ?: "") }
+    var maxContextTokens by remember { mutableStateOf(initial?.maxContextTokens ?: "") }
+    var autoCompactWindow by remember { mutableStateOf(initial?.autoCompactWindow ?: "") }
+    var maxOutputTokens by remember { mutableStateOf(initial?.maxOutputTokens ?: "") }
+    var apiTimeoutMs by remember { mutableStateOf(initial?.apiTimeoutMs ?: "") }
+    var disableNonEssentialTraffic by remember { mutableStateOf(initial?.disableNonEssentialTraffic ?: false) }
+    var maxEffort by remember { mutableStateOf(initial?.maxEffort ?: false) }
+    var enableToolSearch by remember { mutableStateOf(initial?.enableToolSearch ?: false) }
+    var disableAutoUpdater by remember { mutableStateOf(initial?.disableAutoUpdater ?: false) }
+    var experimentalAgentTeams by remember { mutableStateOf(initial?.experimentalAgentTeams ?: false) }
+    var disableExperimentalBetas by remember { mutableStateOf(initial?.disableExperimentalBetas ?: false) }
+    var includeCoAuthoredBy by remember { mutableStateOf(initial?.includeCoAuthoredBy ?: false) }
+    var extraSettingsJson by remember { mutableStateOf(initial?.extraSettingsJson ?: "") }
+    val extraSettingsJsonValid = extraSettingsJson.isBlank() ||
+        runCatching { org.json.JSONObject(extraSettingsJson) }.isSuccess
     var extraEnv by remember { mutableStateOf(initial?.extraEnv?.toMutableMap() ?: mutableMapOf()) }
     var newEnvKey by remember { mutableStateOf("") }
     var newEnvValue by remember { mutableStateOf("") }
@@ -482,7 +515,21 @@ internal fun ClaudeConfigurationEditor(
         haikuModel = profile.haikuModel
         sonnetModel = profile.sonnetModel
         opusModel = profile.opusModel
+        fableModel = profile.fableModel
+        smallFastModel = profile.smallFastModel
         subagentModel = profile.subagentModel
+        maxContextTokens = profile.maxContextTokens
+        autoCompactWindow = profile.autoCompactWindow
+        maxOutputTokens = profile.maxOutputTokens
+        apiTimeoutMs = profile.apiTimeoutMs
+        disableNonEssentialTraffic = profile.disableNonEssentialTraffic
+        maxEffort = profile.maxEffort
+        enableToolSearch = profile.enableToolSearch
+        disableAutoUpdater = profile.disableAutoUpdater
+        experimentalAgentTeams = profile.experimentalAgentTeams
+        disableExperimentalBetas = profile.disableExperimentalBetas
+        includeCoAuthoredBy = profile.includeCoAuthoredBy
+        extraSettingsJson = profile.extraSettingsJson
         extraEnv = profile.extraEnv.toMutableMap()
     }
 
@@ -575,9 +622,10 @@ internal fun ClaudeConfigurationEditor(
                     Text(tr(lang, "官方模型", "Official models"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(6.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        ClaudeModelChip("claude-sonnet-4-5", model) { model = it }
-                        ClaudeModelChip("claude-opus-4-1", model) { model = it }
+                        ClaudeModelChip("claude-sonnet-5", model) { model = it }
+                        ClaudeModelChip("claude-opus-5", model) { model = it }
                         ClaudeModelChip("claude-haiku-4-5", model) { model = it }
+                        ClaudeModelChip("claude-fable-5", model) { model = it }
                     }
                 }
             }
@@ -607,6 +655,7 @@ internal fun ClaudeConfigurationEditor(
                 }
             }
             if (showAdvanced) {
+                item { CompactSectionLabel(tr(lang, "模型档位", "Model tiers")) }
                 item {
                     SettingsTextField(value = haikuModel, onValueChange = { haikuModel = it }, label = tr(lang, "Haiku 档模型（空=主模型）", "Haiku tier (blank = primary)"), placeholder = "")
                 }
@@ -617,7 +666,75 @@ internal fun ClaudeConfigurationEditor(
                     SettingsTextField(value = opusModel, onValueChange = { opusModel = it }, label = tr(lang, "Opus 档模型（空=主模型）", "Opus tier (blank = primary)"), placeholder = "")
                 }
                 item {
+                    SettingsTextField(value = fableModel, onValueChange = { fableModel = it }, label = tr(lang, "Fable 档模型（空=主模型）", "Fable tier (blank = primary)"), placeholder = "")
+                }
+                item {
+                    SettingsTextField(value = smallFastModel, onValueChange = { smallFastModel = it }, label = tr(lang, "小/快速模型（可选）", "Small/fast model (optional)"), placeholder = "")
+                }
+                item {
                     SettingsTextField(value = subagentModel, onValueChange = { subagentModel = it }, label = tr(lang, "子代理模型（可选）", "Subagent model (optional)"), placeholder = "")
+                }
+                item { CompactSectionLabel(tr(lang, "性能与上下文", "Performance & context")) }
+                item {
+                    SettingsTextField(value = maxContextTokens, onValueChange = { maxContextTokens = it }, label = tr(lang, "上下文上限（token）", "Max context tokens"), placeholder = "240000", keyboardType = KeyboardType.Number)
+                }
+                item {
+                    SettingsTextField(value = autoCompactWindow, onValueChange = { autoCompactWindow = it }, label = tr(lang, "自动压缩阈值", "Auto-compact window"), placeholder = "0.75", keyboardType = KeyboardType.Number)
+                }
+                item {
+                    SettingsTextField(value = maxOutputTokens, onValueChange = { maxOutputTokens = it }, label = tr(lang, "输出上限（token）", "Max output tokens"), placeholder = "32000", keyboardType = KeyboardType.Number)
+                }
+                item {
+                    SettingsTextField(value = apiTimeoutMs, onValueChange = { apiTimeoutMs = it }, label = tr(lang, "请求超时（毫秒）", "API timeout (ms)"), placeholder = "600000", keyboardType = KeyboardType.Number)
+                }
+                item { CompactSectionLabel(tr(lang, "行为开关", "Behavior")) }
+                item {
+                    ToggleSettingsRow(HugeIcons.Shield01, tr(lang, "隐私模式", "Privacy mode"), tr(lang, "禁止 Claude 发出非必要网络请求", "Block Claude's non-essential network traffic"), disableNonEssentialTraffic) { disableNonEssentialTraffic = it }
+                }
+                item {
+                    ToggleSettingsRow(HugeIcons.Zap, tr(lang, "最大推理强度", "Max effort"), tr(lang, "使用最大推理强度", "Use maximum thinking effort"), maxEffort) { maxEffort = it }
+                }
+                item {
+                    ToggleSettingsRow(HugeIcons.Search01, tr(lang, "启用工具搜索", "Tool search"), tr(lang, "工具很多时按需加载工具定义", "Load tool schemas on demand"), enableToolSearch) { enableToolSearch = it }
+                }
+                item {
+                    ToggleSettingsRow(HugeIcons.Refresh03, tr(lang, "禁用自动更新", "Disable auto-update"), tr(lang, "阻止 CLI 自动升级", "Prevent the CLI from auto-upgrading"), disableAutoUpdater) { disableAutoUpdater = it }
+                }
+                item {
+                    ToggleSettingsRow(HugeIcons.UserMultiple, tr(lang, "实验性智能体团队", "Agent teams"), tr(lang, "启用实验性 teammates 功能", "Enable experimental agent teammates"), experimentalAgentTeams) { experimentalAgentTeams = it }
+                }
+                item {
+                    ToggleSettingsRow(HugeIcons.TestTube01, tr(lang, "禁用实验性 Beta", "Disable experimental betas"), tr(lang, "关闭实验性 beta 功能", "Disable experimental beta features"), disableExperimentalBetas) { disableExperimentalBetas = it }
+                }
+                item {
+                    ToggleSettingsRow(HugeIcons.User03, tr(lang, "协作署名", "Include co-author"), tr(lang, "提交信息附带 Co-Authored-By", "Add Co-Authored-By to commits"), includeCoAuthoredBy) { includeCoAuthoredBy = it }
+                }
+                item { CompactSectionLabel(tr(lang, "自定义 settings.json", "Custom settings.json")) }
+                item {
+                    SettingsMultilineField(
+                        value = extraSettingsJson,
+                        onValueChange = { extraSettingsJson = it },
+                        label = tr(lang, "顶层 JSON（可选）", "Top-level JSON (optional)"),
+                        placeholder = """{"permissions":{"allow":["Read","Bash(*)"]}}""",
+                    )
+                }
+                if (!extraSettingsJsonValid) {
+                    item {
+                        Text(
+                            tr(lang, "JSON 格式错误，保存后该配置段将被忽略", "Invalid JSON — this block will be ignored on save"),
+                            Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
+                item {
+                    Text(
+                        tr(lang, "键会合并进 settings.json 顶层；env 为保留键，includeCoAuthoredBy 由上方开关管理。", "Keys merge at the top level of settings.json; env is reserved and includeCoAuthoredBy is managed by the switch."),
+                        Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
                 }
                 item { SettingsSection(tr(lang, "附加环境变量", "Extra env vars")) }
                 extraEnv.forEach { (key, value) ->
@@ -655,7 +772,15 @@ internal fun ClaudeConfigurationEditor(
                                     name = name, apiKey = apiKey, apiKeyField = apiKeyField,
                                     baseUrl = baseUrl, model = model,
                                     haikuModel = haikuModel, sonnetModel = sonnetModel,
-                                    opusModel = opusModel, subagentModel = subagentModel,
+                                    opusModel = opusModel, fableModel = fableModel,
+                                    smallFastModel = smallFastModel, subagentModel = subagentModel,
+                                    maxContextTokens = maxContextTokens, autoCompactWindow = autoCompactWindow,
+                                    maxOutputTokens = maxOutputTokens, apiTimeoutMs = apiTimeoutMs,
+                                    disableNonEssentialTraffic = disableNonEssentialTraffic, maxEffort = maxEffort,
+                                    enableToolSearch = enableToolSearch, disableAutoUpdater = disableAutoUpdater,
+                                    experimentalAgentTeams = experimentalAgentTeams, disableExperimentalBetas = disableExperimentalBetas,
+                                    includeCoAuthoredBy = includeCoAuthoredBy,
+                                    extraSettingsJson = extraSettingsJson,
                                     extraEnv = extraEnv.toMap(),
                                 ),
                         )
@@ -700,14 +825,14 @@ private object ClaudePresets {
     val OFFICIAL = ClaudeProfile(
         id = "", name = "官方 API", apiKey = "",
         apiKeyField = ClaudeSettingsWriter.FIELD_API_KEY,
-        baseUrl = "", model = "claude-sonnet-4-20250514",
-        sonnetModel = "claude-sonnet-4-20250514", opusModel = "claude-opus-4-1",
-        haikuModel = "claude-haiku-4-5",
+        baseUrl = "", model = "claude-sonnet-5",
+        sonnetModel = "claude-sonnet-5", opusModel = "claude-opus-5",
+        haikuModel = "claude-haiku-4-5", fableModel = "claude-fable-5",
     )
     val GENERIC_RELAY = ClaudeProfile(
         id = "", name = "通用中转", apiKey = "",
         apiKeyField = ClaudeSettingsWriter.FIELD_AUTH_TOKEN,
-        baseUrl = "https://api.example.com", model = "claude-sonnet-4-5",
+        baseUrl = "https://api.example.com", model = "claude-sonnet-5",
     )
     val DEEPSEEK = ClaudeProfile(
         id = "", name = "DeepSeek", apiKey = "",

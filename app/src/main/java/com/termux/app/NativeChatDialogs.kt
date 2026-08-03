@@ -466,33 +466,47 @@ internal fun NativeUserInputDrawer(raw: String, onAnswer: (String) -> Unit, onDi
                     val questionId = question.optString("id", "answer").ifBlank { "answer" }
                     val header = question.optString("header").ifBlank { nativeText(language, "\u95ee\u9898 ${index + 1}", "Question ${index + 1}") }
                     val prompt = question.optString("question", question.optString("prompt", "")).ifBlank { nativeText(language, "\u6a21\u578b\u9700\u8981\u4f60\u7684\u56de\u7b54", "The model needs your input") }
-                    val options = question.optJSONArray("options")
-                    val allowOther = question.optBoolean("isOther", options == null || options.length() == 0)
+                    val multi = nativeQuestionMultiSelect(question)
+                    val optionList = nativeQuestionOptions(question)
+                    val optionLabels = optionList.map { it.label }.toSet()
+                    val allowOther = nativeQuestionOtherAllowed(question)
                     val secret = question.optBoolean("isSecret", false)
+                    val currentValue = answers[questionId].orEmpty()
                     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                             Text(header, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                             Text(prompt, style = MaterialTheme.typography.bodyLarge, lineHeight = 23.sp)
-                            if (options != null) for (optionIndex in 0 until options.length()) {
-                                val option = options.optJSONObject(optionIndex)
-                                val label = option?.optString("label", option.optString("value", "")) ?: options.optString(optionIndex)
-                                val description = option?.optString("description").orEmpty()
+                            if (multi) {
+                                Text(
+                                    nativeText(language, "\u53ef\u591a\u9009", "Select all that apply"),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            optionList.forEach { option ->
+                                val selected = if (multi) {
+                                    option.label in nativeSelectedLabels(currentValue)
+                                } else {
+                                    currentValue == option.label
+                                }
                                 Surface(
-                                    modifier = Modifier.fillMaxWidth().clickable { answers = answers + (questionId to label) },
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        answers = answers + (questionId to nativeToggleOption(currentValue, option.label, multi))
+                                    },
                                     shape = RoundedCornerShape(14.dp),
-                                    color = if (answers[questionId] == label) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                    border = if (answers[questionId] == label) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)) else null,
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)) else null,
                                 ) {
                                     Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                                        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                                        if (description.isNotBlank()) Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(option.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                        if (option.description.isNotBlank()) Text(option.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
                             }
-                            if (allowOther || options == null || options.length() == 0) {
+                            if (allowOther || optionList.isEmpty()) {
                                 OutlinedTextField(
-                                    value = answers[questionId].orEmpty().takeUnless { value -> options != null && (0 until options.length()).any { optionIndex -> options.optJSONObject(optionIndex)?.optString("label") == value } }.orEmpty(),
-                                    onValueChange = { answers = answers + (questionId to it) },
+                                    value = nativeOtherPart(currentValue, optionLabels),
+                                    onValueChange = { answers = answers + (questionId to nativeApplyOtherValue(currentValue, optionLabels, it)) },
                                     modifier = Modifier.fillMaxWidth(),
                                     label = { Text(nativeText(language, "\u5176\u4ed6\u56de\u7b54", "Other answer")) },
                                     placeholder = { Text(nativeText(language, "\u8f93\u5165\u56de\u7b54", "Type your answer")) },
@@ -505,14 +519,23 @@ internal fun NativeUserInputDrawer(raw: String, onAnswer: (String) -> Unit, onDi
                     }
                 }
             }
-            Button(
-                onClick = {
-                    onAnswer(encodeNativeUserInputAnswers(answers))
-                },
-                enabled = complete,
+            Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(18.dp),
-            ) { Text(nativeText(language, "\u63d0\u4ea4\u5168\u90e8\u56de\u7b54", "Submit answers")) }
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = { onAnswer(encodeNativeUserInputAnswers(emptyMap())) },
+                    modifier = Modifier.weight(1f),
+                ) { Text(nativeText(language, "\u5168\u90e8\u8df3\u8fc7", "Skip all")) }
+                Button(
+                    onClick = {
+                        onAnswer(encodeNativeUserInputAnswers(answers))
+                    },
+                    enabled = complete,
+                    modifier = Modifier.weight(2.2f),
+                    shape = RoundedCornerShape(18.dp),
+                ) { Text(nativeText(language, "\u63d0\u4ea4\u5168\u90e8\u56de\u7b54", "Submit answers")) }
+            }
             Spacer(Modifier.height(4.dp))
         }
     }

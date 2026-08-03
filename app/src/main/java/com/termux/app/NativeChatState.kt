@@ -156,14 +156,55 @@ internal object NativeChatLifecycleHandoff {
                 it.role == NativeChatRole.ERROR && it.content == message.content
             }
         }
-        if (missingErrors.isEmpty()) return fresh
-        val mergedMessages = fresh.messages + missingErrors
+        // A plan card is a client-side artifact: the fresh transcript tail may be read a write
+        // behind the live stream, so carry a handoff plan the fresh rows do not cover yet.
+        // Inserted at its handoff-relative position (between the prompt/answer and the approval),
+        // not appended to the end.
+        val mergedMessages = mergeMissingPlans(fresh.messages, handoff.history.messages, missingErrors)
+        if (mergedMessages.size == fresh.messages.size) return fresh
         return fresh.copy(
             messages = mergedMessages,
             estimatedChars = estimateChars(mergedMessages, fresh.planJson, fresh.planExplanation),
             // This is a synthesized merge, not the exact disk fingerprint.
             contentFingerprint = 0L,
         )
+    }
+
+    /** Merges the handoff's dedicated plan messages that fresh lacks, at their relative position. */
+    private fun mergeMissingPlans(
+        fresh: List<NativeChatMessage>,
+        handoff: List<NativeChatMessage>,
+        missingErrors: List<NativeChatMessage>,
+    ): List<NativeChatMessage> {
+        val result = ArrayList<NativeChatMessage>(fresh.size + 2)
+        result.addAll(fresh)
+        var anchorIndex = -1
+        for (handoffMessage in handoff) {
+            when {
+                handoffMessage.role == NativeChatRole.USER || handoffMessage.role == NativeChatRole.ASSISTANT -> {
+                    for (candidateIndex in (anchorIndex + 1) until result.size) {
+                        if (covers(result[candidateIndex], handoffMessage)) {
+                            anchorIndex = candidateIndex
+                            break
+                        }
+                    }
+                }
+                handoffMessage.role == NativeChatRole.ACTIVITY &&
+                    handoffMessage.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) -> {
+                    val handoffPlan = decodeNativeProposedPlan(handoffMessage.content)
+                    val alreadyPresent = result.any {
+                        it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) &&
+                            decodeNativeProposedPlan(it.content) == handoffPlan
+                    }
+                    if (!alreadyPresent && handoffPlan.isNotBlank()) {
+                        result.add(anchorIndex + 1, handoffMessage)
+                        anchorIndex++
+                    }
+                }
+            }
+        }
+        result.addAll(missingErrors)
+        return result
     }
 
     private fun freshCoversHandoff(
@@ -295,6 +336,9 @@ internal class NativeChatState {
     }
 
     val messages = mutableStateListOf<NativeChatMessage>()
+
+    /** Optimistic user echoes awaiting fingerprint reconciliation with the server transcript. */
+    val pendingEchoMessages = mutableStateListOf<NativeChatMessage>()
     val conversations = mutableStateListOf<NativeConversation>()
     val modelOptions = mutableStateListOf<NativeModelOption>()
     val attachments = mutableStateListOf<NativeAttachment>()
@@ -350,6 +394,7 @@ internal class NativeChatState {
     var phase by mutableStateOf(NativeTurnPhase.IDLE)
     val busy: Boolean get() = phase.active
     var modelLabel by mutableStateOf("")
+    var backend by mutableStateOf(NativeBackendType.CODEX)
     var conversationTitle by mutableStateOf("新对话")
     var conversationAnimationKey by mutableStateOf("new-${UUID.randomUUID()}")
     var selectedModel by mutableStateOf("")
@@ -808,6 +853,7 @@ internal class NativeChatState {
         turnTerminationBarrier.reset()
         historyLoading = false
         messages.clear()
+        pendingEchoMessages.clear()
         planJson = "[]"
         planExplanation = ""
         planPanelAdded = false
@@ -878,14 +924,27 @@ internal class NativeChatState {
         revision++
     }
 
+    /**
+     * Clears the enter-expanded hint once a freshly-sealed activity card has auto-collapsed, so it
+     * does not re-expand+re-collapse every time the row scrolls back into view or the user revisits.
+     */
+    fun markActivityAutoCollapsed(messageId: String) {
+        val index = messages.indexOfFirst { it.id == messageId && it.enterExpanded }
+        if (index >= 0) {
+            messages[index] = messages[index].copy(enterExpanded = false)
+        }
+    }
+
     fun addFollowUpUser(text: String, skills: List<NativeSkill>, attachments: List<NativeAttachment>): NativeChatMessage {
         val message = NativeChatMessage(
+            id = nativeEchoId(),
             role = NativeChatRole.USER,
             content = text,
             skills = skills.toList(),
             attachments = attachments.toList(),
         )
         messages.add(message)
+        pendingEchoMessages.add(message)
         revision++
         return message
     }
@@ -905,8 +964,9 @@ internal class NativeChatState {
         // never let a later error update it instead of the current turn's card.
         retryStatusMessageId = ""
         retryStatusAttempts = 0
-        val message = NativeChatMessage(role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList())
+        val message = NativeChatMessage(id = nativeEchoId(), role = NativeChatRole.USER, content = text, skills = skills.toList(), attachments = attachments.toList())
         messages.add(message)
+        pendingEchoMessages.add(message)
         turnMessageStartIndex = messages.size
         resetLiveActivityReducerForTurn()
         phase = NativeTurnPhase.WAITING
@@ -1120,7 +1180,7 @@ internal class NativeChatState {
         if (insertAt == null) messages.add(message) else messages.add(insertAt, message)
     }
 
-    private fun sealCurrentPhase() {
+    private fun sealCurrentPhase(enterExpanded: Boolean = false) {
         if (reasoningText.isBlank() && liveCommandBuffers.isEmpty() && toolDetails.isEmpty() && liveSubagents.isEmpty()) return
         val process = "PROCESS2|" + NativeBase64.encode(processPayload().toByteArray(Charsets.UTF_8))
         val insertAt = (phaseMessageStartIndex until messages.size)
@@ -1131,7 +1191,12 @@ internal class NativeChatState {
                     NativeHistoryAdapter.decodeCompaction(messages[it].content) != null
             }
             ?: messages.size
-        messages.add(insertAt, NativeChatMessage(role = NativeChatRole.ACTIVITY, content = process, revealStartedAt = System.currentTimeMillis()))
+        messages.add(insertAt, NativeChatMessage(
+            role = NativeChatRole.ACTIVITY,
+            content = process,
+            revealStartedAt = System.currentTimeMillis(),
+            enterExpanded = enterExpanded,
+        ))
     }
 
     fun beginReasoningAfterAnswerIfNeeded() {
@@ -1877,9 +1942,16 @@ internal class NativeChatState {
             planPanelAdded = true
         }
         // The parser already did JSON/Base64/DTO work off-main. Keep the UI boundary to one
-        // snapshot-list replacement regardless of history size.
+        // snapshot-list replacement regardless of history size. Pending optimistic echoes are
+        // reconciled against the server rows so a refresh never duplicates or drops a just-sent
+        // user message (JSONL indexing may lag behind the turn completion).
+        val echoes = pendingEchoMessages.toList()
+        val reconciled = reconcileNativeEchoes(echoes, parsed)
+        if (reconciled.claimedEchoIds.isNotEmpty()) {
+            pendingEchoMessages.removeAll { it.id in reconciled.claimedEchoIds }
+        }
         messages.clear()
-        messages.addAll(parsed)
+        messages.addAll(reconciled.merged)
         restoreLiveAssistantFromSnapshot()
         val historyModel = NativeHistoryAdapter.renderModel(currentThreadId, parsed)
         historicalActivityGroups = historyModel.activities
@@ -2034,7 +2106,7 @@ internal class NativeChatState {
                 completeCommand(unfinished.toString(), key.removePrefix("item:").takeIf { key.startsWith("item:") })
             }
         }
-        sealCurrentPhase()
+        sealCurrentPhase(enterExpanded = true)
         clearReasoning()
         clearLiveCommandBuffers()
         toolDetails.clear()

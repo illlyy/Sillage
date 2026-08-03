@@ -31,10 +31,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.ArrowDown01
 import me.rerere.hugeicons.stroke.LeftToRightListBullet
 import me.rerere.hugeicons.stroke.Tick02
 import org.json.JSONArray
@@ -55,6 +58,9 @@ internal fun NativePlanActivityMessage(
     val text = message.content
     if (text.startsWith(NATIVE_PROPOSED_PLAN_PREFIX)) {
         val planText = remember(text) { decodeNativeProposedPlan(text) }
+        // Default-collapsed once ready: drafting stays expanded so the stream is visible, then
+        // the completed card folds to a compact header until the user taps to open it.
+        var expanded by remember(message.id, message.streaming) { mutableStateOf(message.streaming) }
         Surface(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
             shape = RoundedCornerShape(20.dp),
@@ -64,7 +70,9 @@ internal fun NativePlanActivityMessage(
         ) {
             Column {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { expanded = !expanded }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(HugeIcons.LeftToRightListBullet, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
@@ -78,13 +86,39 @@ internal fun NativePlanActivityMessage(
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                         )
                     }
-                    if (message.streaming) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
-                    else Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = Color(0xFF5E8B68))
+                    if (message.streaming) {
+                        CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = Color(0xFF5E8B68))
+                        Spacer(Modifier.width(7.dp))
+                        Icon(
+                            HugeIcons.ArrowDown01, null,
+                            Modifier.size(16.dp).rotate(if (expanded) 180f else 0f),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                        )
+                    }
                 }
-                if (planText.isNotBlank()) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
-                    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
-                        renderPlanText(planText, message.streaming)
+                if (!expanded && planText.isNotBlank() && !message.streaming) {
+                    // Compact preview line keeps the collapsed card informative.
+                    Text(
+                        planText.replace('\n', ' '),
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.55f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                AnimatedVisibility(
+                    visible = expanded && planText.isNotBlank(),
+                    enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(tween(180)),
+                    exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(tween(120)),
+                ) {
+                    Column {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                        Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+                            renderPlanText(planText, message.streaming)
+                        }
                     }
                 }
             }
@@ -95,7 +129,7 @@ internal fun NativePlanActivityMessage(
     val parts = text.split('|')
     val completed = parts.getOrNull(1) == "complete"
     val count = parts.getOrNull(2)?.toIntOrNull() ?: 0
-    var expanded by remember(message.id) { mutableStateOf(true) }
+    var expanded by remember(message.id, completed) { mutableStateOf(!completed) }
     val planSteps = remember(planJson) { parseNativePlanItems(planJson) }
     Surface(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { expanded = !expanded },

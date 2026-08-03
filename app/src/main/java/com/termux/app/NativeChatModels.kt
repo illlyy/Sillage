@@ -92,4 +92,7 @@ data class NativeChatMessage(
     val usage: NativeTurnUsage? = null,
     val skills: List<NativeSkill> = emptyList(),
     val attachments: List<NativeAttachment> = emptyList(),
+    // True when this durable ACTIVITY row was just sealed from a live turn (turn completion). The
+    // historical card enters expanded and auto-collapses with animation instead of popping in.
+    val enterExpanded: Boolean = false,
 )

@@ -31,6 +31,7 @@ class ClaudeModelFetcherTest {
 
     @Test
     fun `official fallback list is available offline`() {
-        assertTrue(ClaudeModelFetcher.officialModels().contains("claude-sonnet-4-5"))
+        assertTrue(ClaudeModelFetcher.officialModels().contains("claude-sonnet-5"))
+        assertTrue(ClaudeModelFetcher.officialModels().contains("claude-fable-5"))
     }
 }

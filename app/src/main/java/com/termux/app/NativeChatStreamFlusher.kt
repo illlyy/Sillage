@@ -47,6 +47,10 @@ import org.json.JSONObject
         answerFlushScheduled = false
         planFlushScheduled = false
         commandFlushScheduled = false
+        reasoningMotionDeferSince = 0L
+        answerMotionDeferSince = 0L
+        reasoningLastFlushAtMs = 0L
+        answerLastFlushAtMs = 0L
         val droppedReasoning = pendingReasoning.length
         val droppedAnswer = pendingAnswer.length
         val droppedPlan = pendingPlan.length
@@ -86,12 +90,31 @@ import org.json.JSONObject
         return true
     }
 
-    internal fun CodexChatActivity.consumeStreamChunk(buffer: StringBuilder, force: Boolean): String {
-        var end = if (force) buffer.length else minOf(buffer.length, CodexChatActivity.STREAM_CATCH_UP_CHUNK_CHARS)
+    internal fun CodexChatActivity.consumeStreamChunk(
+        buffer: StringBuilder,
+        force: Boolean,
+        limit: Int = CodexChatActivity.STREAM_CATCH_UP_CHUNK_CHARS,
+    ): String {
+        var end = if (force) buffer.length else minOf(buffer.length, limit)
         if (end in 1 until buffer.length && Character.isHighSurrogate(buffer[end - 1])) end--
         val chunk = buffer.substring(0, end)
         buffer.delete(0, end)
         return chunk
+    }
+
+    /**
+     * Smooth reveal cap: pace a large buffered dump (whole-answer from the Claude relay) out over
+     * time instead of releasing it in 1_200-char pages. Real per-token streaming keeps a small
+     * backlog so the cap never binds; completion (force) still drains everything.
+     */
+    internal fun CodexChatActivity.streamRevealLimit(force: Boolean, lastFlushAt: Long): Pair<Int, Long> {
+        val now = android.os.SystemClock.uptimeMillis()
+        val elapsedMs = if (lastFlushAt == 0L) 32L else (now - lastFlushAt).coerceIn(16L, 250L)
+        val limit = if (force) Int.MAX_VALUE else maxOf(
+            (CodexChatActivity.STREAM_REVEAL_CHARS_PER_SEC * elapsedMs / 1000).toInt(),
+            CodexChatActivity.MIN_STREAM_REVEAL_PER_FLUSH,
+        )
+        return limit to now
     }
 
     internal fun CodexChatActivity.flushReasoningDeltas(force: Boolean = false) {
@@ -99,11 +122,29 @@ import org.json.JSONObject
         reasoningFlushScheduled = false
         if (pendingReasoning.isEmpty()) {
             reasoningPendingSince = 0L
+            reasoningMotionDeferSince = 0L
+            reasoningLastFlushAtMs = 0L
             releaseLegacyPendingStreamScopeIfIdle()
             return
         }
-        if (rejectMismatchedLegacyStreamFlush()) return
-        if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) return
+        if (rejectMismatchedLegacyStreamFlush()) {
+            reasoningMotionDeferSince = 0L
+            return
+        }
+        if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (reasoningMotionDeferSince == 0L) {
+                reasoningMotionDeferSince = now
+            } else if (now - reasoningMotionDeferSince >= CodexChatActivity.MOTION_DEFER_CAP_MS) {
+                // Motion has held publication for too long (e.g. a long auto-follow run). Break the
+                // cap so a live turn never strands its tail behind a permanently active scroll.
+                reasoningMotionDeferSince = 0L
+            } else {
+                reasoningFlushScheduled = true
+                streamHandler.postDelayed(flushReasoningRunnable, 32L)
+                return
+            }
+        }
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingReasoning.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
         if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingReasoning.length, boundary, now - reasoningPendingSince, force)) {
@@ -111,7 +152,10 @@ import org.json.JSONObject
             streamHandler.postDelayed(flushReasoningRunnable, 32L)
             return
         }
-        val value = consumeStreamChunk(pendingReasoning, force)
+        val reveal = streamRevealLimit(force, reasoningLastFlushAtMs)
+        reasoningLastFlushAtMs = reveal.second
+        val value = consumeStreamChunk(pendingReasoning, force, reveal.first)
+        reasoningMotionDeferSince = 0L
         if (pendingReasoning.isEmpty()) {
             reasoningPendingSince = 0L
         } else {
@@ -146,11 +190,29 @@ import org.json.JSONObject
         answerFlushScheduled = false
         if (pendingAnswer.isEmpty()) {
             answerPendingSince = 0L
+            answerMotionDeferSince = 0L
+            answerLastFlushAtMs = 0L
             releaseLegacyPendingStreamScopeIfIdle()
             return
         }
-        if (rejectMismatchedLegacyStreamFlush()) return
-        if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) return
+        if (rejectMismatchedLegacyStreamFlush()) {
+            answerMotionDeferSince = 0L
+            return
+        }
+        if (NativeUiRenderSafety.shouldDeferStreamFlushForUiMotion(uiMotionActive, force)) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (answerMotionDeferSince == 0L) {
+                answerMotionDeferSince = now
+            } else if (now - answerMotionDeferSince >= CodexChatActivity.MOTION_DEFER_CAP_MS) {
+                // Motion has held publication for too long (e.g. a long auto-follow run). Break the
+                // cap so a live turn never strands its tail behind a permanently active scroll.
+                answerMotionDeferSince = 0L
+            } else {
+                answerFlushScheduled = true
+                streamHandler.postDelayed(flushAnswerRunnable, 32L)
+                return
+            }
+        }
         val now = android.os.SystemClock.uptimeMillis()
         val boundary = pendingAnswer.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
         if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingAnswer.length, boundary, now - answerPendingSince, force)) {
@@ -158,7 +220,10 @@ import org.json.JSONObject
             streamHandler.postDelayed(flushAnswerRunnable, 32L)
             return
         }
-        val value = consumeStreamChunk(pendingAnswer, force)
+        val reveal = streamRevealLimit(force, answerLastFlushAtMs)
+        answerLastFlushAtMs = reveal.second
+        val value = consumeStreamChunk(pendingAnswer, force, reveal.first)
+        answerMotionDeferSince = 0L
         if (pendingAnswer.isEmpty()) {
             answerPendingSince = 0L
         } else {

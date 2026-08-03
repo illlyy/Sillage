@@ -3,6 +3,7 @@
 package com.termux.app
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.spring
@@ -48,6 +49,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +66,7 @@ import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Tick02
 import me.rerere.hugeicons.stroke.Zap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -82,6 +85,9 @@ internal fun NativeActivityGroupRenderer(
     modifier: Modifier = Modifier,
     onSubagentClick: (NativeSubagentVisual) -> Unit = {},
     onSubagentOverflowClick: (List<NativeSubagentVisual>) -> Unit = {},
+    onLoadSubagentHistory: ((String) -> Unit)? = null,
+    enterExpanded: Boolean = false,
+    onAutoCollapsed: (() -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
     val reasoning = group.reasoning.trim()
@@ -106,6 +112,9 @@ internal fun NativeActivityGroupRenderer(
                 group = group,
                 reasoning = reasoning,
                 nonCommandItems = nonCommandItems,
+                onLoadSubagentHistory = onLoadSubagentHistory,
+                enterExpanded = enterExpanded,
+                onAutoCollapsed = onAutoCollapsed,
             )
         }
         if (renderedSubagents.isNotEmpty()) NativeSubagentVisualFlowRow(
@@ -128,12 +137,16 @@ private fun NativeActivityTimelineCard(
     group: NativeActivityGroup,
     reasoning: String,
     nonCommandItems: List<NativeActivityItem>,
+    onLoadSubagentHistory: ((String) -> Unit)? = null,
+    enterExpanded: Boolean = false,
+    onAutoCollapsed: (() -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
     val runningCommands = group.runningCommandCount
     val failedItems = group.failedCount
     val automaticExpansion = group.expandedByDefault ||
-        nativeCommandCollectionAutoExpanded(runningCommands, failedItems)
+        nativeCommandCollectionAutoExpanded(runningCommands, failedItems) ||
+        enterExpanded
     var userExpanded by remember(group.key) { mutableStateOf<Boolean?>(null) }
     val expanded = resolveNativeCommandDisclosure(automaticExpansion, userExpanded)
     val bodyVisibility = remember(group.key) {
@@ -144,6 +157,21 @@ private fun NativeActivityTimelineCard(
     }
     val bodyFullyCollapsed = bodyVisibility.isIdle && !bodyVisibility.currentState
     val chromeFullyExpanded = chromeVisibility.isIdle && chromeVisibility.currentState
+    // A freshly-sealed historical card enters expanded (matching the live panel it replaces) and
+    // folds itself back after a beat WITH the exit animation — the live panel used to be disposed
+    // and a collapsed sibling popped in, which read as "no animation".
+    val pauseFollowForToggle = LocalPauseFollowDuringAnimation.current
+    val currentExpanded by rememberUpdatedState(expanded)
+    LaunchedEffect(group.key, enterExpanded, group.running) {
+        if (enterExpanded && !group.running) {
+            delay(1_200)
+            if (currentExpanded) {
+                userExpanded = false
+                pauseFollowForToggle()
+                onAutoCollapsed?.invoke()
+            }
+        }
+    }
     SideEffect {
         if (expanded) {
             // Expand the shell first. The body only enters after the full-width shell has settled,
@@ -163,7 +191,8 @@ private fun NativeActivityTimelineCard(
         label = "activityTimelineArrow",
     )
     val cardShape = RoundedCornerShape(18.dp)
-    val stepCount = (if (reasoning.isNotBlank()) 1 else 0) + group.commands.size + nonCommandItems.size
+    val groupedItems = remember(group.key, nonCommandItems) { groupConsecutiveTools(nonCommandItems) }
+    val stepCount = (if (reasoning.isNotBlank()) 1 else 0) + group.commands.size + groupedItems.size
     val statusColor = when {
         failedItems > 0 -> MaterialTheme.colorScheme.error
         group.running || runningCommands > 0 -> MaterialTheme.colorScheme.primary
@@ -202,6 +231,7 @@ private fun NativeActivityTimelineCard(
                             nativeText(language, "展开思考与执行", "Expand reasoning and actions")
                         },
                     ) {
+                        pauseFollowForToggle()
                         userExpanded = !resolveNativeCommandDisclosure(
                             automaticExpansion,
                             userExpanded,
@@ -257,8 +287,10 @@ private fun NativeActivityTimelineCard(
             }
             AnimatedVisibility(
                 visibleState = bodyVisibility,
-                enter = fadeIn(tween(100)) + expandVertically(tween(170), expandFrom = Alignment.Top),
-                exit = fadeOut(tween(80)) + shrinkVertically(tween(160), shrinkTowards = Alignment.Top),
+                // Keep fade and height in lockstep (the old fade finished in ~80ms while the
+                // height tween ran 160ms, leaving a transparent shrinking rectangle that popped).
+                enter = fadeIn(tween(220)) + expandVertically(tween(260, easing = FastOutSlowInEasing), expandFrom = Alignment.Top),
+                exit = fadeOut(tween(200)) + shrinkVertically(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
             ) {
                 Column {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .38f))
@@ -306,19 +338,26 @@ private fun NativeActivityTimelineCard(
                                 }
                             }
                         }
-                        nonCommandItems.forEach { item ->
-                            val itemColor = when (item.status) {
-                                NativeActivityItemStatus.FAILED -> MaterialTheme.colorScheme.error
-                                NativeActivityItemStatus.RUNNING -> MaterialTheme.colorScheme.primary
-                                NativeActivityItemStatus.WAITING -> MaterialTheme.colorScheme.tertiary
-                                NativeActivityItemStatus.COMPLETED -> MaterialTheme.colorScheme.onSurfaceVariant
+                        groupedItems.forEach { listItem ->
+                            val itemColor = when (listItem) {
+                                is NativeToolListItem.Item -> itemColorFor(listItem.item)
+                                is NativeToolListItem.Group -> listItem.itemColor()
                             }
-                            key(item.id) {
+                            key(listItem.firstItem.id) {
                                 NativeTimelineStep(
                                     markerColor = itemColor,
                                     isLast = index++ == totalSteps - 1,
                                 ) {
-                                    NativeToolTimelineContent(item)
+                                    when (listItem) {
+                                        is NativeToolListItem.Item -> when (listItem.item.type) {
+                                            NativeActivityItemType.SUBAGENT -> FcodeSubagentCard(
+                                                item = listItem.item,
+                                                onLoadHistory = { thread -> onLoadSubagentHistory?.invoke(thread) },
+                                            )
+                                            else -> NativeToolTimelineContent(listItem.item)
+                                        }
+                                        is NativeToolListItem.Group -> FcodeToolGroup(listItem)
+                                    }
                                 }
                             }
                         }
@@ -364,12 +403,7 @@ private fun NativeTimelineStep(
 @Composable
 private fun NativeToolTimelineContent(item: NativeActivityItem) {
     val language = LocalNativeLanguage.current
-    val label = when (item.type) {
-        NativeActivityItemType.FILE_CHANGE -> nativeText(language, "文件修改", "File change")
-        NativeActivityItemType.WEB_SEARCH -> nativeText(language, "网页搜索", "Web search")
-        NativeActivityItemType.TOOL -> nativeText(language, "工具调用", "Tool")
-        else -> nativeText(language, "活动", "Activity")
-    }
+    val label = NativeToolConfigs.of(item.type).label(language)
     val detail = item.title.ifBlank { item.text }.trim()
     Text(
         label,
@@ -561,8 +595,9 @@ private fun NativeCommandRow(
     var outputLoading by remember(command.id) { mutableStateOf(false) }
 
     LaunchedEffect(expanded, command.outputRef, command.outputPreview) {
+        // Do NOT clear resolvedOutput on collapse: clearing it at the same frame the exit animation
+        // starts shrinks the content under the still-animating height, leaving blank space that pops.
         if (!shouldResolveNativeCommandOutput(expanded, command.outputRef)) {
-            resolvedOutput = null
             outputLoading = false
             return@LaunchedEffect
         }
@@ -574,6 +609,7 @@ private fun NativeCommandRow(
     }
 
     val visibleOutput = if (command.outputRef.isBlank()) command.outputPreview else resolvedOutput.orEmpty()
+    val pauseFollowForToggle = LocalPauseFollowDuringAnimation.current
     Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -585,7 +621,10 @@ private fun NativeCommandRow(
                     } else {
                         nativeText(language, "展开命令详情", "Expand command details")
                     },
-                ) { userExpanded = !expanded }
+                ) {
+                    pauseFollowForToggle()
+                    userExpanded = !expanded
+                }
                 .padding(
                     start = if (showStatusDot) 12.dp else 0.dp,
                     end = if (showStatusDot) 12.dp else 0.dp,

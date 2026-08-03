@@ -18,6 +18,13 @@ internal object ClaudeHistoryAdapter {
     private const val MAX_SESSION_SCAN = 400
     private const val MAX_TITLE_CHARS = 52
 
+    // Transcript metadata cache: the conversation list is rebuilt on every drawer/resume refresh,
+    // and re-reading every file's first line + title tail is real flash I/O. Reuse the previous
+    // row when the file is unchanged (same size + mtime), so only new/changed transcripts cost a
+    // scan. Bounded by the file set (MAX_SESSION_SCAN) plus pruned entries for deleted files.
+    private class TranscriptMetadata(val size: Long, val modifiedAt: Long, val conversation: NativeConversation)
+    private val transcriptCache = java.util.concurrent.ConcurrentHashMap<String, TranscriptMetadata>()
+
     fun configDir(): File = File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".claude")
 
     fun projectsRoot(): File = File(configDir(), "projects")
@@ -32,23 +39,32 @@ internal object ClaudeHistoryAdapter {
         for (file in candidates) {
             if (scanned >= MAX_SESSION_SCAN) break
             scanned++
+            val cached = transcriptCache[file.absolutePath]
+            if (cached != null && cached.size == file.length() && cached.modifiedAt == file.lastModified()) {
+                result.add(cached.conversation)
+                continue
+            }
             val sessionId = readSessionId(file) ?: continue
             val title = resolveTitle(file, sessionId)
                 .ifBlank { firstUserPrompt(file, sessionId) }
                 .ifBlank { "Claude 会话" }
             val project = readProjectPath(file)
-            result.add(
-                NativeConversation(
-                    threadId = sessionId,
-                    title = title,
-                    state = CodexTaskStore.COMPLETED,
-                    projectPath = project,
-                    favorite = false,
-                ),
+            val conversation = NativeConversation(
+                threadId = sessionId,
+                title = title,
+                state = CodexTaskStore.COMPLETED,
+                projectPath = project,
+                favorite = false,
             )
+            transcriptCache[file.absolutePath] = TranscriptMetadata(file.length(), file.lastModified(), conversation)
+            result.add(conversation)
         }
         // Most recent transcripts last (append-only); show newest first.
         result.reverse()
+        if (transcriptCache.size > MAX_SESSION_SCAN * 2) {
+            val live = candidates.mapTo(java.util.HashSet()) { it.absolutePath }
+            transcriptCache.entries.removeIf { it.key !in live }
+        }
         return result
     }
 
@@ -76,10 +92,25 @@ internal object ClaudeHistoryAdapter {
                     NativeChatMessage(role = NativeChatRole.USER, content = text, revealStartedAt = createdAt),
                 )
             } else if (type == "assistant") {
-                val text = extractText(entry.optJSONObject("message"))
+                val message = entry.optJSONObject("message")
+                val text = extractText(message)
                 if (text.isNotBlank()) {
                     if (assistantBuffer.isNotEmpty()) assistantBuffer.append("\n\n")
                     assistantBuffer.append(text)
+                }
+                // The plan mode proposal is a tool_use in the assistant content array. Restore it
+                // as a dedicated PROPOSED_PLAN card so a reloaded conversation keeps the plan the
+                // user saw — otherwise it only survives while the live session is in memory.
+                val plan = extractPlan(message)
+                if (plan.isNotBlank()) {
+                    flushAssistant(messages, assistantBuffer, createdAt)
+                    messages.add(
+                        NativeChatMessage(
+                            role = NativeChatRole.ACTIVITY,
+                            content = encodeNativeProposedPlan(plan),
+                            revealStartedAt = createdAt,
+                        ),
+                    )
                 }
             }
         }
@@ -110,6 +141,21 @@ internal object ClaudeHistoryAdapter {
             }
             else -> ""
         }
+    }
+
+    /** Extracts the plan proposal from an ExitPlanMode tool_use inside an assistant message. */
+    private fun extractPlan(message: JSONObject?): String {
+        if (message == null) return ""
+        val content = message.opt("content") ?: return ""
+        if (content !is org.json.JSONArray) return ""
+        for (i in 0 until content.length()) {
+            val block = content.optJSONObject(i) ?: continue
+            if (block.optString("type") == "tool_use" && block.optString("name") == "ExitPlanMode") {
+                val plan = block.optJSONObject("input")?.optString("plan").orEmpty()
+                if (plan.isNotBlank()) return plan
+            }
+        }
+        return ""
     }
 
     // ---------------------------------------------------------------- file helpers
