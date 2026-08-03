@@ -97,5 +97,13 @@ adb shell screencap -p /sdcard/x.png && adb pull /sdcard/x.png
 - **`JAVA_HOME` 未设置 / 版本不对** → `./gradlew` 立即报 `Unable to locate a Java Runtime`。设 `JAVA_HOME` 到 JDK 17。
 - **构建卡在 bootstrap 下载** → 需要外网；镜像/代理异常时检查网络，SHA 不匹配会报错（那是版本改动的正常提醒）。
 - **`assembleRelease` 产出 unsigned APK** → 缺 `FCODE_*` 签名环境变量。要发布必须走 RELEASING.md 的 tag → CI 流程（CI 里有真实签名 Secret）。
+- **`assembleRelease` 时 Gradle daemon 崩溃（`insufficient memory ... Chunk::new`）** → 本地 R8 内存吃紧。用 `--no-daemon` + 更大堆并把堆基址抬到 4GB 之上，给原生内存留地址空间：
+  ```bash
+  ./gradlew :app:assembleRelease --no-daemon -Dorg.gradle.jvmargs="-Xmx3g -XX:HeapBaseMinAddress=4g \
+  --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED \
+  --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED \
+  --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED"
+  ```
+  （`-Dorg.gradle.jvmargs` 会覆盖 `gradle.properties` 里的 `-Xmx2048M`；GitHub Actions runner 内存充足，无此问题。）
 - **版本号不合法** → `validateVersionName` 强制 `X.Y.Z`（semver 2.0.0）。写 `0.3.2`，不要写 `0.3.2` 之外的形式。
 - **改了 `assets/codex-desktop/` 但被覆盖** → 那是构建产物，改它会丢；升级走 `tools/build-codex-web-assets.ps1`（见 docs/08）。
