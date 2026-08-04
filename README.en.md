@@ -1,6 +1,6 @@
 <h1 align="center">Sillage</h1>
 
-<p align="center"><strong>AI Coding & Mobile Development Workspace for Android</strong></p>
+<p align="center"><strong>AI coding workspace for Android, powered by the real Codex CLI</strong></p>
 
 <p align="center">Collaborate with AI, manage projects, run a terminal and get development work done — on your phone or tablet.</p>
 
@@ -22,11 +22,15 @@
 
 ## About Sillage
 
-Sillage is an AI coding app designed for Android that packs everything you need for AI-assisted development into a single APK: native AI chat, agent task execution, Git project workspace, Termux terminal, Codex WebUI, MCP/Skills extensions, a floating bubble and an optional in-app proxy.
+Most "AI chat" apps on mobile are toys. Sillage is not one of them — it runs on the **real Codex CLI** as its backend, bringing the complete desktop-grade agent experience to Android:
 
-Open a project on your mobile device, describe the task to the AI, watch it execute in real time, approve sensitive operations, review code changes, and continue the development work — no desktop machine required.
+- **A real agent, not just a chatbot**: the AI makes execution plans, runs commands and edits code — and asks for your approval before touching anything sensitive, all visible in real time.
+- **A complete dev environment**: built-in Termux terminal, Git workspace, MCP/Skills extensions and the Codex WebUI — one APK is a whole dev machine.
+- **Native experience**: everything runs in a native Compose UI with smooth streaming output and deep customization.
 
-Sillage does not provide model accounts or API credits. You need to bring your own compatible model API.
+Open a project, describe the task to the AI, watch it execute in real time, approve operations, review code changes and continue development — no desktop machine required.
+
+Bring your own API key — no account needed. Free and open source. Sillage does not provide model accounts or API credits.
 
 ## Feature Overview
 
@@ -49,7 +53,7 @@ Sillage does not provide model accounts or API credits. You need to bring your o
 
 ## 1. Native AI Chat
 
-The core experience: a smooth native chat interface with streaming output, rich Markdown, code highlighting, tables and formulas — rendered in real time as the model generates.
+The core experience: a native chat interface backed by the **real Codex CLI**, with streaming output, rich Markdown, code highlighting, tables and formulas — rendered in real time during generation. All agent capabilities (planning, execution, approvals, subagents) are driven locally by the Codex CLI.
 
 - **Streaming output**: reasoning and answers appear piece by piece, live.
 - **Rich text rendering**: headings, lists, tables, formulas, code blocks with syntax highlighting; optionally enable "streaming Markdown rendering" for live preview during generation.
