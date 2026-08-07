@@ -122,7 +122,10 @@ import org.json.JSONObject
             goalRetryWaitingForCompletion = false
             chatState.activeGoalObjective = ""
             chatState.activeGoalStatus = "active"
-            syncNativeContinuationHint()
+            // A goal-complete arrives after the last turn already completed with the goal still
+            // "active", which parked the phase in the continuation wait. Release the latch and
+            // seal that wait now that nothing is pending anymore.
+            syncSubagentContinuationAndIdle()
         }
     }
 

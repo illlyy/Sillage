@@ -95,6 +95,37 @@ import org.json.JSONObject
         }
     }
 
+    /**
+     * Re-derives the bridge continuation latch after a subagent status change and closes the
+     * "继续处理中" continuation wait once nothing is pending anymore.
+     *
+     * A background subagent runs on its own thread; its terminal session state is only observable
+     * through the subagent-history poll, because the child thread's protocol events are filtered
+     * out of the visible route. The parent turn therefore completes with hasPendingContinuation=true
+     * and the phase parks in WAITING. This is the only writer that learns when the subagent really
+     * finished, so it must be the one to release the latch and seal the phase — otherwise the
+     * conversation spins in "处理中" forever until the user leaves and re-enters.
+     */
+    internal fun CodexChatActivity.syncSubagentContinuationAndIdle() {
+        val stillPending = hasNativeContinuationPending()
+        syncNativeContinuationHint()
+        if (stillPending || !chatState.ready || chatState.historyLoading) return
+        if (chatState.pendingUserInputRequest.isNotBlank() || chatState.pendingApprovalRequest.isNotBlank()) return
+        if (compactionInProgress()) return
+        // Only the continuation wait is safe to seal here. User-input, approval, retry and
+        // reconnect waits use the same WAITING phase but must keep the spinner.
+        val continuationLabel = nativeText(nativeLanguage, "继续处理中", "Continuing")
+        if (chatState.phase != NativeTurnPhase.WAITING || chatState.processingLabel != continuationLabel) return
+        NativeChatDiagnostics.record(this, "continuation_wait_sealed", JSONObject()
+            .put("thread", currentThreadId.orEmpty().take(8))
+            .put("activeSubagents", chatState.subagentStatuses.values.count { it == "working" || it == "waiting" })
+            .put("goal", chatState.activeGoalObjective.ifBlank { "" }.take(20)))
+        chatState.phase = NativeTurnPhase.COMPLETED
+        chatState.connectionLabel = "已连接"
+        chatState.processingLabel = ""
+        currentThreadId?.let { NativeSessionActivityStore.markIdle(it) }
+    }
+
     internal fun CodexChatActivity.detachNativeContinuationHintBeforeRouteChange(nextThreadId: String?) {
         val previousThreadId = currentThreadId?.takeIf { it.isNotBlank() } ?: return
         if (previousThreadId == nextThreadId?.trim()) return
@@ -656,24 +687,25 @@ import org.json.JSONObject
             // app-server is still inside the same turn; keep the UI in a waiting state and update
             // the existing card in place. The retry limit is an internal provider retry, not a
             // reason to show five visually identical error cards.
-            chatState.updateRetryStatus(message, automaticGoal, terminal = false)
+            chatState.updateRetryStatus(CodexAppServerBridgeProtocol.translateModelError(message), automaticGoal, terminal = false)
             return
         }
         drainPendingNativeUiEvents()
+        val displayMessage = CodexAppServerBridgeProtocol.translateModelError(message)
         if (automaticGoal) {
             goalRetryCycleActive = true
             goalRetryWaitingForCompletion = true
             syncNativeContinuationHint()
-            chatState.updateRetryStatus(message, automaticGoal = true, terminal = true)
+            chatState.updateRetryStatus(displayMessage, automaticGoal = true, terminal = true)
             // Normally turn/completed arrives first. This fallback also recovers from older
             // app-server builds that only emit the final error notification.
             scheduleGoalRetry()
         } else {
             syncNativeContinuationHint()
-            chatState.updateRetryStatus(message, automaticGoal = false, terminal = true)
+            chatState.updateRetryStatus(displayMessage, automaticGoal = false, terminal = true)
             stopFrameDiagnostics()
             currentThreadId?.let { threadId ->
-                NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.FAILED, message.hashCode().toString(), "")
+                NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.FAILED, displayMessage.hashCode().toString(), "")
             }
         }
     }

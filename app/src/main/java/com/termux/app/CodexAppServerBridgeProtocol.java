@@ -654,4 +654,65 @@ final class CodexAppServerBridgeProtocol {
             || "onCommandDeltaV2".equals(function) || "onProtocolDelta".equals(function);
     }
 
+    /**
+     * Turns app-server/CLI model-rejection messages into actionable guidance for the native chat.
+     * The CLI's own strings are English and terse ("There's an issue with the selected model
+     * (deepseek-v4-pro)...", "rejected unsupported model/reasoning combination: ..."). The raw
+     * message is kept when nothing matches. Pure so it is unit-testable.
+     */
+    static String translateModelError(String raw) {
+        if (raw == null || raw.isEmpty()) return raw;
+        String lower = raw.toLowerCase(Locale.ROOT);
+        String model = extractModelName(raw);
+        if (lower.contains("unsupported model/reasoning combination")
+                || lower.contains("does not support")) {
+            String effort = extractEffort(raw);
+            StringBuilder hint = new StringBuilder();
+            hint.append("所选模型");
+            if (!model.isEmpty()) hint.append(" ").append(model);
+            hint.append(" 不支持当前推理强度");
+            if (!effort.isEmpty()) hint.append(" ").append(effort);
+            hint.append("。请降低思维强度，或在「模型目录」中为该模型添加该强度后重试。");
+            return hint.toString();
+        }
+        if (lower.contains("issue with the selected model")
+                || lower.contains("may not exist")
+                || lower.contains("may not have access")
+                || lower.contains("model not found")
+                || lower.contains("unknown model")) {
+            StringBuilder hint = new StringBuilder();
+            hint.append("所选模型");
+            if (!model.isEmpty()) hint.append(" ").append(model);
+            hint.append(" 无法使用：它不在当前 API 的可用模型列表中，或该 API Key 无权访问它。");
+            hint.append("请到「模型目录」确认已添加该模型，或更换为 API 提供的模型 ID。");
+            return hint.toString();
+        }
+        return raw;
+    }
+
+    /** Extracts a model id from messages like "model (deepseek-v4-pro)" or "model \"gpt-5.6-sol\"". */
+    static String extractModelName(String raw) {
+        if (raw == null) return "";
+        java.util.regex.Matcher m = MODEL_NAME_PATTERN.matcher(raw);
+        if (m.find()) {
+            String first = m.group(1);
+            String second = m.group(2);
+            return first == null ? (second == null ? "" : second) : first;
+        }
+        return "";
+    }
+
+    /** Extracts the offending reasoning effort from "does not support \"ultra\"". */
+    static String extractEffort(String raw) {
+        if (raw == null) return "";
+        java.util.regex.Matcher m = EFFORT_PATTERN.matcher(raw);
+        if (m.find()) return m.group(1);
+        return "";
+    }
+
+    private static final java.util.regex.Pattern MODEL_NAME_PATTERN = java.util.regex.Pattern.compile(
+        "(?:model|selected model)\\s*\\(([^)]+)\\)|model\\s+[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
+    private static final java.util.regex.Pattern EFFORT_PATTERN = java.util.regex.Pattern.compile(
+        "does not support\\s+[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
+
 }

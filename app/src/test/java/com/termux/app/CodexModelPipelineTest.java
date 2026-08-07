@@ -534,6 +534,38 @@ public class CodexModelPipelineTest {
     }
 
     @Test
+    public void modelRejectionErrorsTranslateToActionableGuidance() {
+        String selectedModel = CodexAppServerBridgeProtocol.translateModelError(
+            "There's an issue with the selected model (deepseek-v4-pro). It may not exist or you may not have access to it.");
+        assertTrue(selectedModel.contains("deepseek-v4-pro"));
+        assertTrue(selectedModel.contains("模型目录"));
+        assertFalse(selectedModel.contains("There's an issue"));
+
+        String unsupportedEffort = CodexAppServerBridgeProtocol.translateModelError(
+            "rejected unsupported model/reasoning combination: \"deepseek-v4-pro\" does not support \"ultra\".");
+        assertTrue(unsupportedEffort.contains("不支持当前推理强度"));
+        assertTrue(unsupportedEffort.contains("ultra"));
+
+        // Non-model errors pass through unchanged.
+        String other = "upstream timeout after 300000 ms";
+        assertEquals(other, CodexAppServerBridgeProtocol.translateModelError(other));
+        assertEquals("", CodexAppServerBridgeProtocol.translateModelError(""));
+        assertEquals(null, CodexAppServerBridgeProtocol.translateModelError(null));
+    }
+
+    @Test
+    public void modelAndEffortExtractorsHandleBareAndQuotedForms() {
+        assertEquals("deepseek-v4-pro", CodexAppServerBridgeProtocol.extractModelName(
+            "There's an issue with the selected model (deepseek-v4-pro)."));
+        assertEquals("gpt-5.6-sol", CodexAppServerBridgeProtocol.extractModelName(
+            "model \"gpt-5.6-sol\" does not support \"max\"."));
+        assertEquals("", CodexAppServerBridgeProtocol.extractModelName("no model here"));
+        assertEquals("ultra", CodexAppServerBridgeProtocol.extractEffort(
+            "model \"glm-5.2\" does not support \"ultra\"."));
+        assertEquals("", CodexAppServerBridgeProtocol.extractEffort("nothing to extract"));
+    }
+
+    @Test
     public void turnRuntimeDiagnosticReportsEffectiveUltraMode() throws Exception {
         File session = File.createTempFile("codex-turn", ".jsonl");
         try (FileWriter writer = new FileWriter(session)) {

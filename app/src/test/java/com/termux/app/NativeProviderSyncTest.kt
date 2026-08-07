@@ -107,6 +107,49 @@ class NativeProviderSyncTest {
         assertNotEquals(catalogChanged, NativeProviderSync.configurationFingerprint(profile, true))
     }
 
+    @Test
+    fun catalogAlwaysIncludesConfiguredDefaultModel() {
+        // A profile whose default model is absent from the catalog would make app-server fall
+        // back to its built-in catalog and reject the custom model.
+        val onlyOther = CodexProviderStore.ModelConfig("Other", "other-model", 100_000L)
+        val emptyCatalog = profile("p", "deepseek-v4-pro", emptyList())
+        val missingDefault = profile("p", "deepseek-v4-pro", listOf(onlyOther))
+
+        val emptyNormalized = NativeProviderSync.ensureDefaultModelInCatalog(emptyCatalog)
+        assertEquals(listOf("deepseek-v4-pro"), emptyNormalized.map { it.id })
+
+        val missingNormalized = NativeProviderSync.ensureDefaultModelInCatalog(missingDefault)
+        assertEquals(listOf("deepseek-v4-pro", "other-model"), missingNormalized.map { it.id })
+
+        // Blank default model leaves the catalog untouched.
+        val noDefault = profile("p", "", emptyList())
+        assertTrue(NativeProviderSync.ensureDefaultModelInCatalog(noDefault).isEmpty())
+    }
+
+    @Test
+    fun modelOptionsSurfacesDefaultModelWhenCatalogIsEmpty() {
+        val profile = profile("p", "deepseek-v4-pro", emptyList())
+
+        val options = NativeProviderSync.modelOptions(profile)
+
+        assertEquals(listOf("deepseek-v4-pro"), options.map { it.id })
+        assertEquals("deepseek-v4-pro", options.single().name)
+        assertTrue(options.single().efforts.isNotEmpty())
+    }
+
+    @Test
+    fun modelOptionsKeepsExistingCatalogOrderAndDefaultEntry() {
+        val a = CodexProviderStore.ModelConfig("A", "model-a", 100_000L)
+        val b = CodexProviderStore.ModelConfig("B", "model-b", 50_000L)
+        val profile = profile("p", "model-a", listOf(a, b))
+
+        // Default model already present: catalog order is preserved.
+        assertEquals(
+            listOf("model-a", "model-b"),
+            NativeProviderSync.ensureDefaultModelInCatalog(profile).map { it.id },
+        )
+    }
+
     private fun profile(
         id: String,
         defaultModel: String,

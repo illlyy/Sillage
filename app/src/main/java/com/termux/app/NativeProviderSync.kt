@@ -6,9 +6,27 @@ import java.security.MessageDigest
 internal object NativeProviderSync {
     private const val MISSING_CONFIGURATION = "missing-provider"
 
+    /**
+     * The model catalog that backs both the UI picker and the app-server's
+     * `model_catalog_json`. If the configured default model is absent from `profile.models`,
+     * the app-server falls back to its built-in catalog and rejects the model with
+     * "There's an issue with the selected model". Returns a catalog copy that always
+     * contains the default model (unless it is blank).
+     */
+    @JvmStatic
+    fun ensureDefaultModelInCatalog(profile: CodexProviderStore.Profile): List<CodexProviderStore.ModelConfig> {
+        val defaultModel = profile.model.trim()
+        if (defaultModel.isEmpty()) return profile.models
+        val present = profile.models.any { it.id.equals(defaultModel, ignoreCase = true) }
+        if (present) return profile.models
+        val result = profile.models.toMutableList()
+        result.add(0, CodexProviderStore.ModelConfig(defaultModel, defaultModel, 0L))
+        return result
+    }
+
     @JvmStatic
     fun modelOptions(profile: CodexProviderStore.Profile): List<NativeModelOption> =
-        profile.models.map { model ->
+        ensureDefaultModelInCatalog(profile).map { model ->
             val efforts = model.supportedReasoningEfforts.split(',')
                 .map { it.trim().lowercase() }
                 .filter { it.isNotEmpty() }

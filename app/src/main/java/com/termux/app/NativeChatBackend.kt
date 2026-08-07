@@ -177,8 +177,12 @@ internal data class NativeBackendStartRequest(
         )
         backendScope.launch {
             // JSON construction, writing and FileDescriptor.sync() stay off the UI thread, but
-            // complete before app-server startup reads the catalog.
-            backendCatalogPreparer.prepare(request.profile.models)
+            // complete before app-server startup reads the catalog. The catalog is normalized to
+            // always include the configured default model so app-server does not fall back to its
+            // built-in catalog and reject a custom model (e.g. "There's an issue with the selected
+            // model (deepseek-v4-pro)").
+            val catalogModels = NativeProviderSync.ensureDefaultModelInCatalog(request.profile)
+            backendCatalogPreparer.prepare(catalogModels)
             if (request.generation != backendStartGeneration || isFinishing || isDestroyed) return@launch
             attachPreparedBackend(request)
         }

@@ -94,6 +94,13 @@ import org.json.JSONObject
         NativeBackendType.set(prefs, to)
         chatState.backend = to
         notificationTargetThreadId = ""
+        // Drop the leaving backend's records the instant the switch starts. startBackend() below
+        // synchronously spawns/attaches the CLI and can take a second or more, so waiting until
+        // the trailing refreshConversations() would leave the old backend's list visible under
+        // the new backend's highlight in the drawer ("混杂") whenever the attach is slow.
+        conversationRefreshGeneration++
+        lastConversationBackend = to
+        chatState.conversations.clear()
         if (to == NativeBackendType.CLAUDE) {
             if (CodexNativeRuntime.exists()) CodexNativeRuntime.shutdown()
         } else {
@@ -185,6 +192,12 @@ import org.json.JSONObject
         if (!shouldRetry) {
             chatState.loadingSubagentHistories.remove(thread)
             subagentHistoryAttempts.remove(thread)
+            // The subagent never produced a terminal session state (crashed, killed, or its
+            // task_complete event is not in the format we scan). Do not let its "working" latch
+            // keep the conversation stuck in the continuation wait forever — the capsule keeps
+            // the item-level status independently.
+            if (!terminal) chatState.subagentStatuses.remove(thread)
+            syncSubagentContinuationAndIdle()
             return
         }
         val delayMs = when {
@@ -199,6 +212,9 @@ import org.json.JSONObject
                     ?: chatState.loadingSubagentHistories.remove(thread)
             }
         }, delayMs)
+        // A background subagent's terminal state is only observable through this poll. Release
+        // the parent continuation latch and close the "继续处理中" wait once nothing is pending.
+        syncSubagentContinuationAndIdle()
     }
 
     internal fun CodexChatActivity.resumeConversation(threadId: String, retainedRuntime: Boolean = false) {

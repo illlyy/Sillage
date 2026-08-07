@@ -4758,7 +4758,11 @@ public final class CodexHomeActivity extends Activity {
     private File writeModelCatalogFile(CodexProviderStore.Profile profile) {
         File codexHome = new File(TermuxConstants.TERMUX_HOME_DIR, ".codex");
         File catalogFile = new File(codexHome, MODEL_CATALOG_FILENAME);
-        return CodexModelCatalog.writeAtomic(catalogFile, profile == null ? null : profile.models);
+        // Normalize the catalog to always include the configured default model so app-server
+        // does not fall back to its built-in catalog and reject a custom model.
+        java.util.List<CodexProviderStore.ModelConfig> models = profile == null ? null
+            : NativeProviderSync.ensureDefaultModelInCatalog(profile);
+        return CodexModelCatalog.writeAtomic(catalogFile, models);
     }
 
     private void persistCodexConfiguration(final String url, final String key, final String selectedModel) {

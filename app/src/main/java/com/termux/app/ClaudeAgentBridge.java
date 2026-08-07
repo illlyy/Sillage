@@ -561,7 +561,22 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             String detail = stderrLine.isEmpty() ? "" : "（CLI 输出：" + stderrLine + "）";
             int exit = exitValue();
             String exitDetail = exit >= 0 ? "（退出码 " + exit + "）" : "";
-            String message = "Claude CLI 进程已退出" + exitDetail + detail;
+            String message;
+            if (exit == 159 || stderrLine.toLowerCase().contains("bad system call")
+                    || stderrLine.toLowerCase().contains("epoll_pwait2")
+                    || stderrLine.toLowerCase().contains("sigsys")
+                    || stderrLine.toLowerCase().contains("seccomp")) {
+                // The Android app sandbox seccomp filter blocks epoll_pwait2, which the bundled
+                // Bun-based CLI needs during startup. This is a system-level restriction that no
+                // flag or config can bypass. The npm-installed CLI runs through Node.js instead,
+                // so it does not touch that syscall.
+                message = "Claude CLI 因系统沙箱限制退出" + exitDetail
+                    + "（seccomp 不允许 Bun 运行时所需的 epoll_pwait2 系统调用）。"
+                    + "请在设置中安装 Node.js 开发工具后，通过 npm 重新安装 Claude（node 版可正常运行）；"
+                    + "当前设备装的是官方 Bun 版，受该限制影响。";
+            } else {
+                message = "Claude CLI 进程已退出" + exitDetail + detail;
+            }
             if (report.syntheticCompletion) emit("onTurnComplete", syntheticCompletionPayload());
             emit("onNativeError", message);
         }

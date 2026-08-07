@@ -1331,8 +1331,11 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                 android.util.Log.w(TAG, "app-server exited with code " + exitCode);
                 if (webView == null) {
                     CodexTaskStore.markInterruptedTasks(appContext);
+                    // A crash during a turn that used a custom model/effort is often app-server
+                    // rejecting the model configuration. Surface a hint in the disconnect notice.
                     emit("onNativeError", "Codex backend disconnected unexpectedly (exit code "
-                        + exitCode + "). The current task has stopped.");
+                        + exitCode + "). The current task has stopped."
+                        + " 如果正在使用自定义模型，请到「模型目录」确认已添加该模型并核对推理强度设置。");
                 }
                 Activity boundActivity = boundActivity();
                 if (boundActivity instanceof CodexHomeActivity) {
