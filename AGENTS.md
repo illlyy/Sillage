@@ -49,7 +49,7 @@ vendor/             codex-web（资产快照源）、rikkahub-native（只读参
 - 流式输出必须经 `NativeStreamEventBatcher`，禁止绕过门控直接派发。
 - `assets/codex-desktop/` 是产物，手改会被 `tools/build-codex-web-assets.ps1` 覆盖；升级走 `vendor/codex-web/UPSTREAM.md` 流程。
 - 版本常量在 `gradle.properties`（无 version catalog）；路径常量在 termux-shared `TermuxConstants`。
-- 用户可见文案中英双语（`values/` + `values-en/`），代码注释/日志用英文。
+- 用户可见文案：**目前中文为主，但中文全部硬编码在 Kotlin 里**（`res/` 只有继承自 Termux 的英文 `values/strings.xml`，没有 `values-en/` 也没有 `values-zh*`）。新增文案优先用资源字符串，新页面不要新增硬编码中文；收口计划见 `docs/12-feature-plan.md` 的 `F-I18N-01`。代码注释/日志用英文。
 - 敏感数据（API Key、Token、订阅地址）永不进日志、崩溃上报、文档。
 
 ## 注意事项（踩过的坑）
