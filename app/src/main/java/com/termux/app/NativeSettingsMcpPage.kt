@@ -125,21 +125,22 @@ internal fun McpSettingsPage(
     val snapshot by produceState(McpSettingsSnapshot(), revision) {
         value = withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
-                val servers = NativeMcpConfigStore.load()
+                val servers = NativeMcpStoreFacade.load(prefs)
                 McpSettingsSnapshot(
                     loaded = true,
                     servers = servers,
-                    statuses = NativeMcpRuntimeStatusStore.load(context, servers),
+                    statuses = if (NativeMcpStoreFacade.isClaude(prefs)) emptyMap() else NativeMcpRuntimeStatusStore.load(context, servers),
                 )
             }.getOrElse { McpSettingsSnapshot(true, error = it.message.orEmpty()) }
         }
     }
+    val isClaude = NativeMcpStoreFacade.isClaude(prefs)
     fun markChanged() {
-        prefs.edit().putLong(NativeMcpConfigStore.REVISION_KEY, System.currentTimeMillis()).apply()
+        prefs.edit().putLong(NativeMcpStoreFacade.revisionKey(prefs), System.currentTimeMillis()).apply()
         revision++
     }
     fun refreshStatus() {
-        if (refreshing) return
+        if (refreshing || isClaude) return
         refreshing = true
         CodexNativeRuntime.refreshMcpStatus()
         scope.launch {
@@ -150,10 +151,16 @@ internal fun McpSettingsPage(
     }
     SettingsScaffold(
         "MCP",
-        tr(lang, "\u4e0e WebUI \u5171\u7528 Codex config.toml \u4e2d\u7684\u5916\u90e8\u5de5\u5177", "Share external tools from Codex config.toml with WebUI"),
+        tr(
+            lang,
+            if (isClaude) "\u4e0e Claude Code \u5171\u7528 ~/.claude.json \u4e2d\u7684 mcpServers \u5168\u5c40\u5de5\u5177"
+            else "\u4e0e WebUI \u5171\u7528 Codex config.toml \u4e2d\u7684\u5916\u90e8\u5de5\u5177",
+            if (isClaude) "Share external tools from the ~/.claude.json mcpServers table with Claude Code"
+            else "Share external tools from Codex config.toml with WebUI",
+        ),
         onBack,
     ) { pad ->
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+        LazyColumn(Modifier.fillMaxWidth(), contentPadding = pad) {
             item {
                 Text(
                     tr(lang, "\u4fdd\u5b58\u540e\u8fd4\u56de\u804a\u5929\u9875\u4f1a\u81ea\u52a8\u91cd\u8f7d\u540e\u7aef\uff0c\u65b0\u5bf9\u8bdd\u5373\u53ef\u4f7f\u7528 MCP \u5de5\u5177\u3002", "After saving, returning to chat reloads the backend so new conversations can use the MCP tools."),
@@ -162,7 +169,7 @@ internal fun McpSettingsPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (snapshot.loaded && snapshot.servers.isNotEmpty()) {
+            if (snapshot.loaded && snapshot.servers.isNotEmpty() && !isClaude) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = { refreshStatus() }, enabled = !refreshing) {
@@ -174,7 +181,7 @@ internal fun McpSettingsPage(
                 }
             }
             when {
-                !snapshot.loaded -> item { EmptySettingsState(HugeIcons.Code, tr(lang, "\u6b63\u5728\u8bfb\u53d6 MCP", "Loading MCP"), tr(lang, "\u6b63\u5728\u89e3\u6790 config.toml", "Parsing config.toml")) }
+                !snapshot.loaded -> item { EmptySettingsState(HugeIcons.Code, tr(lang, "\u6b63\u5728\u8bfb\u53d6 MCP", "Loading MCP"), if (isClaude) tr(lang, "\u6b63\u5728\u89e3\u6790 ~/.claude.json", "Parsing ~/.claude.json") else tr(lang, "\u6b63\u5728\u89e3\u6790 config.toml", "Parsing config.toml")) }
                 snapshot.error.isNotBlank() -> item { Text(snapshot.error, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error) }
                 snapshot.servers.isEmpty() -> item { EmptySettingsState(HugeIcons.Code, tr(lang, "\u8fd8\u6ca1\u6709 MCP \u670d\u52a1", "No MCP servers"), tr(lang, "\u6dfb\u52a0 STDIO \u6216 Streamable HTTP \u670d\u52a1", "Add a STDIO or Streamable HTTP server")) }
                 else -> {
@@ -197,7 +204,7 @@ internal fun McpSettingsPage(
                                             Text(if (server.isHttp) "HTTP" else "STDIO", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
                                         }
                                         Spacer(Modifier.width(6.dp))
-                                        McpRuntimeStatusBadge(lang, runtimeStatus)
+                                        if (!isClaude) McpRuntimeStatusBadge(lang, runtimeStatus)
                                     }
                                     Text(
                                         if (server.isHttp) server.url else listOf(server.command, server.args.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" "),
@@ -214,18 +221,20 @@ internal fun McpSettingsPage(
                                         "disabled" -> tr(lang, "\u5df2\u7981\u7528\uff0c\u4e0d\u4f1a\u5f71\u54cd\u5bf9\u8bdd", "Disabled; chat will continue normally")
                                         else -> tr(lang, "\u7b49\u5f85\u804a\u5929\u540e\u7aef\u68c0\u6d4b\uff0c\u70b9\u51fb\u5237\u65b0\u72b6\u6001\u91cd\u8bd5", "Waiting for probe; tap Refresh to retry")
                                     }
-                                    Text(
-                                        statusDetail,
-                                        modifier = Modifier.padding(top = 5.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (runtimeStatus.state == "unavailable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                                        maxLines = 4,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                    if (!isClaude) {
+                                        Text(
+                                            statusDetail,
+                                            modifier = Modifier.padding(top = 5.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (runtimeStatus.state == "unavailable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                            maxLines = 4,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
                                 Switch(server.enabled, onCheckedChange = { enabled ->
                                     scope.launch {
-                                        runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpConfigStore.setEnabled(server.key, enabled) } }
+                                        runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpStoreFacade.setEnabled(prefs, server.key, enabled) } }
                                             .onSuccess { markChanged() }
                                             .onFailure { Toast.makeText(context, it.message, Toast.LENGTH_LONG).show() }
                                     }
@@ -273,7 +282,7 @@ internal fun McpServerEditorPage(
     onDeleted: () -> Unit,
 ) {
     val loaded by produceState<Pair<Boolean, NativeMcpServerConfig?>>(false to null, existingKey) {
-        value = withContext(kotlinx.coroutines.Dispatchers.IO) { true to NativeMcpConfigStore.load().firstOrNull { it.key == existingKey } }
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) { true to NativeMcpStoreFacade.load(prefs).firstOrNull { it.key == existingKey } }
     }
     if (!loaded.first) {
         SettingsScaffold("MCP", tr(lang, "\u6b63\u5728\u8bfb\u53d6\u914d\u7f6e", "Loading configuration"), onBack) { pad -> Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -293,6 +302,7 @@ private fun McpServerEditorContent(
     onSaved: () -> Unit,
     onDeleted: () -> Unit,
 ) {
+    val isClaude = NativeMcpStoreFacade.isClaude(prefs)
     val scope = rememberCoroutineScope()
     var name by remember { mutableStateOf(existing?.key.orEmpty()) }
     var http by remember { mutableStateOf(existing?.isHttp ?: false) }
@@ -323,7 +333,7 @@ private fun McpServerEditorContent(
             put(line.substring(0, split).trim(), line.substring(split + 1).trim())
         }
     }
-    fun markChanged() = prefs.edit().putLong(NativeMcpConfigStore.REVISION_KEY, System.currentTimeMillis()).apply()
+    fun markChanged() = prefs.edit().putLong(NativeMcpStoreFacade.revisionKey(prefs), System.currentTimeMillis()).apply()
     fun save() {
         val cleanName = name.trim()
         if (!cleanName.matches(Regex("[A-Za-z0-9_-][A-Za-z0-9_. -]{0,80}"))) { error = tr(lang, "\u540d\u79f0\u683c\u5f0f\u4e0d\u6b63\u786e", "Invalid server name"); return }
@@ -350,7 +360,7 @@ private fun McpServerEditorContent(
         }.getOrElse { error = it.message.orEmpty(); return }
         busy = true; error = ""
         scope.launch {
-            runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpConfigStore.save(server, existing?.key) } }
+            runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpStoreFacade.save(prefs, server, existing?.key) } }
                 .onSuccess { markChanged(); onSaved() }
                 .onFailure { error = it.message.orEmpty() }
             busy = false
@@ -371,8 +381,10 @@ private fun McpServerEditorContent(
                     FilterChip(http, { http = true; error = "" }, { Text("Streamable HTTP") }, modifier = Modifier.weight(1f))
                 }
             }
-            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u542f\u7528", "Enabled"), tr(lang, "\u5141\u8bb8 Codex \u542f\u52a8\u5e76\u4f7f\u7528\u6b64\u670d\u52a1", "Allow Codex to start and use this server"), enabled) { enabled = it } }
-            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u5fc5\u9700\u670d\u52a1", "Required"), tr(lang, "\u521d\u59cb\u5316\u5931\u8d25\u65f6\u8ba9 Codex \u542f\u52a8\u5931\u8d25", "Fail Codex startup if this server cannot initialize"), required) { required = it } }
+            item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u542f\u7528", "Enabled"), tr(lang, "\u5141\u8bb8\u540e\u7aef\u542f\u52a8\u5e76\u4f7f\u7528\u6b64\u670d\u52a1", "Allow the backend to start and use this server"), enabled) { enabled = it } }
+            if (!isClaude) {
+                item { ToggleSettingsRow(HugeIcons.Code, tr(lang, "\u5fc5\u9700\u670d\u52a1", "Required"), tr(lang, "\u521d\u59cb\u5316\u5931\u8d25\u65f6\u8ba9 Codex \u542f\u52a8\u5931\u8d25", "Fail Codex startup if this server cannot initialize"), required) { required = it } }
+            }
             item { SettingsSection(tr(lang, "\u8fde\u63a5", "Connection")) }
             item { SettingsTextField(commandOrUrl, { commandOrUrl = it; error = "" }, if (http) "URL" else tr(lang, "\u547d\u4ee4", "Command"), if (http) "https://example.com/mcp" else "npx") }
             if (!http) {
@@ -400,13 +412,15 @@ private fun McpServerEditorContent(
     if (confirmDelete && existing != null) AlertDialog(
         onDismissRequest = { confirmDelete = false },
         title = { Text(tr(lang, "\u5220\u9664 ${existing.key}\uff1f", "Remove ${existing.key}?")) },
-        text = { Text(tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece config.toml \u4e2d\u79fb\u9664\u3002", "This server will be removed from config.toml.")) },
+        text = { Text(if (isClaude)
+            tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece ~/.claude.json \u7684 mcpServers \u4e2d\u79fb\u9664\u3002", "This server will be removed from the mcpServers table in ~/.claude.json.")
+        else tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece config.toml \u4e2d\u79fb\u9664\u3002", "This server will be removed from config.toml.")) },
         dismissButton = { TextButton({ confirmDelete = false }) { Text(tr(lang, "\u53d6\u6d88", "Cancel")) } },
         confirmButton = { TextButton({
             confirmDelete = false
             scope.launch {
                 busy = true
-                runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpConfigStore.remove(existing.key) } }
+                runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpStoreFacade.remove(prefs, existing.key) } }
                     .onSuccess { markChanged(); onDeleted() }
                     .onFailure { error = it.message.orEmpty() }
                 busy = false

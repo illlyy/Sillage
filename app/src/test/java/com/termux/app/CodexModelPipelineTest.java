@@ -627,6 +627,135 @@ public class CodexModelPipelineTest {
     }
 
     @Test
+    public void collaborationSummaryRecordsSchemaShapeButNoPromptText() throws Exception {
+        JSONObject request = new JSONObject()
+            .put("tools", new JSONArray()
+                .put(new JSONObject().put("type", "function").put("name", "exec_command"))
+                .put(new JSONObject().put("type", "namespace").put("name", "collaboration")
+                    .put("tools", new JSONArray()
+                        .put(new JSONObject().put("type", "function").put("name", "spawn_agent")
+                            .put("description", "private prompt must not appear")
+                            .put("parameters", new JSONObject().put("type", "object")
+                                .put("properties", new JSONObject()
+                                    .put("task", new JSONObject().put("type", "string"))
+                                    .put("model", new JSONObject().put("type", "string")))))
+                        .put(new JSONObject().put("type", "function").put("name", "wait_agent")))));
+        String summary = LocalApiProxy.collaborationToolSummary(
+            request.toString().getBytes(StandardCharsets.UTF_8));
+        // Both halves matter: the extra `model` property is exactly the kind of deviation an
+        // upstream rejects when it reserves the namespace.
+        assertTrue(summary.contains("collaboration.spawn_agent{description,name,parameters,type}(model,task)"));
+        assertTrue(summary.contains("collaboration.wait_agent{name,type}()"));
+        assertFalse(summary.contains("private prompt"));
+        assertFalse(summary.contains("exec_command"));
+    }
+
+    @Test
+    public void collaborationSummaryCoversFlattenedToolsAndEmptyRequests() throws Exception {
+        JSONObject flattened = new JSONObject()
+            .put("tools", new JSONArray()
+                .put(new JSONObject().put("type", "function").put("name", "collaboration.spawn_agent"))
+                .put(new JSONObject().put("type", "function").put("name", "wait_agent"))
+                .put(new JSONObject().put("type", "function").put("name", "shell")));
+        String summary = LocalApiProxy.collaborationToolSummary(
+            flattened.toString().getBytes(StandardCharsets.UTF_8));
+        assertTrue(summary.contains("collaboration.spawn_agent{name,type}()"));
+        assertTrue(summary.contains("wait_agent{name,type}()"));
+        assertFalse(summary.contains("shell"));
+        assertEquals("none", LocalApiProxy.collaborationToolSummary(
+            new JSONObject().put("model", "glm-5.2").toString().getBytes(StandardCharsets.UTF_8)));
+        assertEquals("unparsed", LocalApiProxy.collaborationToolSummary(
+            "not json".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    public void agentConfigSummaryReportsStaleKeysWithoutHintText() throws Exception {
+        File config = File.createTempFile("config", ".toml");
+        try (FileWriter writer = new FileWriter(config)) {
+            writer.write("model = \"glm-5.2\"\n\n");
+            writer.write("[features.multi_agent_v2]\n");
+            writer.write("enabled = true\n");
+            writer.write("hide_spawn_agent_metadata = false\n");
+            writer.write("root_agent_usage_hint_text = \"You are the root agent, do not leak me\"\n");
+        }
+        String summary = CodexAppServerBridgeProtocol.agentConfigKeySummary(config);
+        assertTrue(summary.contains("features.multi_agent_v2.enabled=true"));
+        assertTrue(summary.contains("features.multi_agent_v2.hide_spawn_agent_metadata=false"));
+        assertTrue(summary.contains("features.multi_agent_v2.root_agent_usage_hint_text=set"));
+        assertFalse(summary.contains("do not leak me"));
+        assertFalse(summary.contains("glm-5.2"));
+        assertEquals("absent", CodexAppServerBridgeProtocol.agentConfigKeySummary(
+            new File(config.getParentFile(), "no-such-config.toml")));
+        assertTrue(config.delete());
+    }
+
+    @Test
+    public void staleStabilityBlockIsPurgedWhenThisLaunchDoesNotWantIt() throws Exception {
+        String source = "model = \"gpt-5.6-sol\"\n"
+            + "\n"
+            + "[features.multi_agent_v2]\n"
+            + "enabled = true\n"
+            + "max_concurrent_threads_per_session = 4\n"
+            + "hide_spawn_agent_metadata = false\n"
+            + "min_wait_timeout_ms = 5000\n"
+            + "default_wait_timeout_ms = 30000\n"
+            + "max_wait_timeout_ms = 120000\n"
+            + "root_agent_usage_hint_text = \"You are the root agent\"\n"
+            + "subagent_usage_hint_text = \"You are a child agent\"\n"
+            + "\n"
+            + "[model_providers.ilyop_android]\n"
+            + "name = \"Ilyop API\"\n";
+
+        String purged = CodexAppServerBridgeProtocol.purgeStaleAgentConfig(source, false);
+        assertNotNull(purged);
+        // The keys that reshape the reserved spawn_agent schema must be gone...
+        assertFalse(purged.contains("hide_spawn_agent_metadata"));
+        assertFalse(purged.contains("wait_timeout_ms"));
+        assertFalse(purged.contains("usage_hint_text"));
+        // ...while everything this launch does configure survives untouched.
+        assertTrue(purged.contains("enabled = true"));
+        assertTrue(purged.contains("max_concurrent_threads_per_session = 4"));
+        assertTrue(purged.contains("model = \"gpt-5.6-sol\""));
+        assertTrue(purged.contains("[model_providers.ilyop_android]"));
+        assertTrue(purged.contains("name = \"Ilyop API\""));
+
+        // A custom-model launch asked for the block, so it stays.
+        assertNull(CodexAppServerBridgeProtocol.purgeStaleAgentConfig(source, true));
+    }
+
+    @Test
+    public void purgeDropsMaxThreadsInAnySectionAndLeavesCleanConfigsAlone() throws Exception {
+        String withMaxThreads = "[agents]\nmax_threads = 3\n\n[features.multi_agent_v2]\nenabled = true\n";
+        // max_threads cannot coexist with an enabled multi_agent_v2 regardless of the stability block.
+        assertEquals("[agents]\n\n[features.multi_agent_v2]\nenabled = true\n",
+            CodexAppServerBridgeProtocol.purgeStaleAgentConfig(withMaxThreads, true));
+
+        // A stability key outside the feature table is somebody else's setting; leave it.
+        assertNull(CodexAppServerBridgeProtocol.purgeStaleAgentConfig(
+            "[other]\nmin_wait_timeout_ms = 1\n", false));
+        assertNull(CodexAppServerBridgeProtocol.purgeStaleAgentConfig(
+            "model = \"gpt-5.6-sol\"\n", false));
+        assertNull(CodexAppServerBridgeProtocol.purgeStaleAgentConfig("", false));
+        assertNull(CodexAppServerBridgeProtocol.purgeStaleAgentConfig((String) null, false));
+    }
+
+    @Test
+    public void purgeRewritesTheFileOnlyWhenSomethingChanged() throws Exception {
+        File config = File.createTempFile("config", ".toml");
+        try (FileWriter writer = new FileWriter(config)) {
+            writer.write("[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n");
+        }
+        assertTrue(CodexAppServerBridgeProtocol.purgeStaleAgentConfig(config, false));
+        String summary = CodexAppServerBridgeProtocol.agentConfigKeySummary(config);
+        assertEquals("features.multi_agent_v2.enabled=true", summary);
+        // Second pass has nothing left to remove.
+        assertFalse(CodexAppServerBridgeProtocol.purgeStaleAgentConfig(config, false));
+        assertFalse(CodexAppServerBridgeProtocol.purgeStaleAgentConfig(
+            new File(config.getParentFile(), "no-such-config.toml"), false));
+        assertTrue(config.delete());
+    }
+
+    @Test
     public void bridgeLogSummaryNeverIncludesPayloadOrSecrets() throws Exception {
         JSONObject message = new JSONObject().put("id", "request-1").put("result", new JSONObject()
             .put("apiKey", "secret-value").put("prompt", "private prompt"));

@@ -109,7 +109,18 @@ internal class NativeActivityReducer(
     private val openCommandIdsByTurn = HashMap<String, java.util.ArrayDeque<String>>()
     private val openCommandIdsByText = HashMap<String, java.util.ArrayDeque<String>>()
     private var commandCounter = 0L
+    /** Disambiguates anonymous (itemId-less) tool completions sharing a turn and type. */
+    private val anonymousToolCountByScope = HashMap<String, Int>()
     private var currentKey: String? = null
+    /**
+     * Monotonic revision bumped on every visible-content mutation. The last frozen snapshot is
+     * cached so high-frequency streaming deltas (reasoning/output text) that only mutate one
+     * group still resolve through a single freeze per batch, and no-op events (token usage,
+     * turn started, stale sequence) reuse the previous snapshot instance without re-freezing.
+     */
+    private var revision = 0L
+    private var lastSnapshot: NativeActivityReducerState? = null
+    private var lastSnapshotRevision = -1L
 
     fun reset() {
         groups.clear()
@@ -123,9 +134,13 @@ internal class NativeActivityReducer(
         openCommandIdsByTurn.clear()
         openCommandIdsByText.clear()
         commandCounter = 0L
+        anonymousToolCountByScope.clear()
         currentKey = null
         lastSequenceByThread.clear()
         lastTurnIdByThread.clear()
+        revision++
+        lastSnapshot = null
+        lastSnapshotRevision = -1L
     }
 
     fun accept(event: NativeProtocolEvent): NativeActivityReducerState {
@@ -143,8 +158,11 @@ internal class NativeActivityReducer(
         }
         // A completion barrier can race a final command/output notification on older servers.
         // Permit that notification to update its already-correlated row, but never allocate a
-        // fresh exploration group after the turn has been closed.
-        if (completedTurns.contains(eventTurnKey(event)) && !isKnownItemEvent(event)) return snapshot()
+        // fresh exploration group after the turn has been closed. TurnCompleted itself is exempt:
+        // a duplicate completion must still reach handleBoundary so a late failure report can
+        // upgrade items sealed COMPLETED by the first completion (failed is authoritative).
+        if (event !is NativeProtocolEvent.TurnCompleted &&
+            completedTurns.contains(eventTurnKey(event)) && !isKnownItemEvent(event)) return snapshot()
         when (event) {
             is NativeProtocolEvent.ReasoningDelta -> appendReasoning(event)
             is NativeProtocolEvent.ReasoningCompleted -> completeReasoning(event)
@@ -184,13 +202,19 @@ internal class NativeActivityReducer(
     fun onEvent(event: NativeProtocolEvent): NativeActivityReducerState = accept(event)
     fun reduce(event: NativeProtocolEvent): NativeActivityReducerState = accept(event)
 
-    fun snapshot(): NativeActivityReducerState = NativeActivityReducerState(
-        groups = groups.values.map { it.freeze() },
-        currentGroupKey = currentKey,
-        assistantSeenByTurn = assistantSeen.toSet(),
-        completedTurns = completedTurns.toSet(),
-        lastSequence = lastSequenceByThread.values.maxOrNull() ?: Long.MIN_VALUE,
-    )
+    fun snapshot(): NativeActivityReducerState {
+        if (lastSnapshot == null || lastSnapshotRevision != revision) {
+            lastSnapshot = NativeActivityReducerState(
+                groups = groups.values.map { it.freeze() },
+                currentGroupKey = currentKey,
+                assistantSeenByTurn = assistantSeen.toSet(),
+                completedTurns = completedTurns.toSet(),
+                lastSequence = lastSequenceByThread.values.maxOrNull() ?: Long.MIN_VALUE,
+            )
+            lastSnapshotRevision = revision
+        }
+        return lastSnapshot!!
+    }
 
     fun groups(): List<NativeActivityGroup> = snapshot().groups
 
@@ -309,6 +333,7 @@ internal class NativeActivityReducer(
             itemToGroup[itemCorrelationKey(event, event.itemId)] = group.key
         }
         group.reasoning.append(event.delta)
+        revision++
     }
 
     private fun completeReasoning(event: NativeProtocolEvent.ReasoningCompleted) {
@@ -335,6 +360,7 @@ internal class NativeActivityReducer(
                 else -> current
             },
         )
+        revision++
     }
 
     private fun startCommand(event: NativeProtocolEvent.CommandStarted) {
@@ -358,6 +384,7 @@ internal class NativeActivityReducer(
             group.items[id] = existing.copy(status = NativeActivityItemStatus.RUNNING)
         }
         registerOpenCommand(event, id)
+        revision++
     }
 
     private fun appendCommandOutput(event: NativeProtocolEvent.CommandOutput) {
@@ -382,6 +409,7 @@ internal class NativeActivityReducer(
             text = if (existing.text.isBlank()) preview else existing.text,
         )
         if (existingItem == null) registerOpenCommand(event, id)
+        revision++
     }
 
     private fun completeCommand(event: NativeProtocolEvent.CommandCompleted) {
@@ -409,6 +437,7 @@ internal class NativeActivityReducer(
             completedAtMs = event.timestampMs,
         )
         unregisterOpenCommand(event, id)
+        revision++
     }
 
     private fun commandTextKey(threadId: String, turnId: String?, command: String): String =
@@ -477,7 +506,15 @@ internal class NativeActivityReducer(
             isMcpToolName(event.title) -> NativeActivityItemType.MCP
             else -> NativeActivityItemType.TOOL
         }
-        val id = itemKey(event, "tool:${event.sequence}:${event.type}")
+        val id = event.itemId?.takeIf { it.isNotBlank() } ?: run {
+            // Legacy tool completions carry sequence=0 and no itemId; keying only on
+            // "tool:<sequence>:<type>" overwrote same-type tools within a turn. Disambiguate
+            // anonymous tools with a per-turn counter so each renders its own row.
+            val scope = eventTurnKey(event) + "|" + event.type.lowercase()
+            val n = (anonymousToolCountByScope[scope] ?: 0) + 1
+            anonymousToolCountByScope[scope] = n
+            "tool:${event.sequence}:${event.type}:$n"
+        }
         val group = groupForItem(event, id)
         val failed = event.status.lowercase() in setOf("failed", "error", "cancelled", "canceled")
         group.items[id] = (group.items[id] ?: NativeActivityItem(
@@ -495,6 +532,7 @@ internal class NativeActivityReducer(
             status = if (failed) NativeActivityItemStatus.FAILED else NativeActivityItemStatus.COMPLETED,
             completedAtMs = event.timestampMs,
         )
+        revision++
     }
 
     private fun updateSubagent(event: NativeProtocolEvent.SubagentUpdated) {
@@ -506,7 +544,10 @@ internal class NativeActivityReducer(
         val status = when (event.status.trim().lowercase()) {
             "working", "running", "started", "inprogress", "in_progress" -> NativeActivityItemStatus.RUNNING
             "waiting", "pending", "queued" -> NativeActivityItemStatus.WAITING
-            "failed", "error", "cancelled", "canceled", "interrupted" -> NativeActivityItemStatus.FAILED
+            // Must match NativeChatState.normalizedSubagentStatus: stopped/interrupted count as
+            // failed, done-variants as completed. The previous catch-all else->COMPLETED showed
+            // a stopped agent green in the timeline while the work panel showed failed.
+            "failed", "error", "cancelled", "canceled", "interrupted", "stopped" -> NativeActivityItemStatus.FAILED
             else -> NativeActivityItemStatus.COMPLETED
         }
         val existing = group.items[id]
@@ -524,6 +565,7 @@ internal class NativeActivityReducer(
             agentThreadId = event.agentThreadId.ifBlank { existing?.agentThreadId.orEmpty() },
             callId = event.callId.ifBlank { existing?.callId.orEmpty() },
         )
+        revision++
     }
 
     private fun assistantBoundary(event: NativeProtocolEvent) {
@@ -553,6 +595,7 @@ internal class NativeActivityReducer(
         if (event is NativeProtocolEvent.AssistantCompleted || event is NativeProtocolEvent.AssistantDelta) {
             currentKey = group?.key ?: currentKey
         }
+        revision++
     }
 
     private fun shouldIgnoreLateUncorrelatedReasoning(
@@ -597,8 +640,15 @@ internal class NativeActivityReducer(
                 group.running = false
                 group.completedAtMs = event.timestampMs
                 group.items.replaceAll { _, item ->
+                    // A late duplicate completion reporting failure is authoritative (the state
+                    // layer upgrades phase to FAILED too): items sealed COMPLETED by the first
+                    // completion must follow, otherwise the capsule stays green while the turn
+                    // shows failed.
                     if (item.status == NativeActivityItemStatus.RUNNING) item.copy(
                         status = if (event.failed) NativeActivityItemStatus.FAILED else NativeActivityItemStatus.COMPLETED,
+                        completedAtMs = event.timestampMs,
+                    ) else if (event.failed && item.status == NativeActivityItemStatus.COMPLETED) item.copy(
+                        status = NativeActivityItemStatus.FAILED,
                         completedAtMs = event.timestampMs,
                     ) else item
                 }
@@ -609,6 +659,7 @@ internal class NativeActivityReducer(
             assistantBoundarySequenceByTurn.remove(turn)
             if (currentKeyByTurn[turn] == currentKey) currentKey = null
             currentKeyByTurn.remove(turn)
+            revision++
             return
         }
         // A standalone boundary should not force a new empty group. It only marks the current
@@ -628,6 +679,7 @@ internal class NativeActivityReducer(
             group.completedAtMs = event.timestampMs
             currentKey = group.key
             currentKeyByTurn[group.turnKey] = group.key
+            revision++
         }
     }
 

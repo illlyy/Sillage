@@ -38,6 +38,8 @@ import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import org.json.JSONObject;
+
 import static com.termux.shared.termux.TermuxConstants.TERMUX_PREFIX_DIR;
 import static com.termux.shared.termux.TermuxConstants.TERMUX_PREFIX_DIR_PATH;
 import static com.termux.shared.termux.TermuxConstants.TERMUX_STAGING_PREFIX_DIR;
@@ -119,6 +121,10 @@ final class TermuxInstaller {
             public void run() {
                 try {
                     Logger.logInfo(LOG_TAG, "Installing " + TermuxConstants.TERMUX_APP_NAME + " bootstrap packages.");
+                    try {
+                        FcodeLog.event(activity, "termux_bootstrap_start", new JSONObject()
+                            .put("bootstrapReady", isBootstrapReady()));
+                    } catch (Exception ignored) {}
 
                     Error error;
                     final List<File> preservedBinaries = preserveAppManagedBinaries(activity);
@@ -253,10 +259,20 @@ final class TermuxInstaller {
                     }
 
                     Logger.logInfo(LOG_TAG, "Bootstrap packages installed successfully.");
+                    try {
+                        FcodeLog.event(activity, "termux_bootstrap_ok", new JSONObject()
+                            .put("bootstrapReady", isBootstrapReady()));
+                    } catch (Exception ignored) {}
                     deletePreservedBinaries(preservedBinaries);
                     activity.runOnUiThread(whenDone);
 
                 } catch (final Exception e) {
+                    try {
+                        FcodeLog.event(activity, "termux_bootstrap_failed", new JSONObject()
+                            .put("exceptionClass", e.getClass().getSimpleName())
+                            .put("message", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                                String.valueOf(e.getMessage()))));
+                    } catch (Exception ignored) {}
                     showBootstrapErrorDialog(activity, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
 
                 } finally {

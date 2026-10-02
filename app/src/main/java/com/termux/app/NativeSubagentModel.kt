@@ -75,20 +75,51 @@ internal fun normalizedSubagentStatus(value: String): String = when (value.trim(
 internal fun isSubagentItem(item: JSONObject): Boolean =
     item.optString("type") in setOf("collabAgentToolCall", "subAgentActivity")
 
+/** True when the item is a subagent: recognized subagent type, or an agent thread identity
+ *  on an item that carries no `type` at all. The normalized protocol path projects subagents
+ *  without a `type` field (only agentThreadId/receiverThreadIds), so a bare identity must be
+ *  accepted here too; known other types keep their strict check. */
 internal fun isSubagentCandidate(item: JSONObject): Boolean {
+    val type = item.optString("type", "").trim()
+    if (type.isEmpty() && subagentThreadId(item).isNotBlank()) return true
     if (!isSubagentItem(item)) return false
     if (subagentThreadId(item).isNotBlank()) return true
     val tool = jsonText(item, "tool", "name").lowercase()
     return tool.contains("spawn")
 }
 
+/** Counts produced by [collectAllSubagentItems] so callers can diagnose "missing subagents". */
+internal data class SubagentCollectStats(
+    val process2Messages: Int = 0,
+    val decodedPayloads: Int = 0,
+    val toolsFound: Int = 0,
+    val candidateItems: Int = 0,
+    val filteredBlankThreadId: Int = 0,
+    val outputCount: Int = 0,
+    /** Distinct `type` values of items rejected by [isSubagentCandidate], capped; "(no type)" when absent. */
+    val rejectedTypes: String = "",
+)
+
 internal fun collectAllSubagentItems(
     messages: List<NativeChatMessage>,
     liveSubagents: List<String>,
+    onStats: (SubagentCollectStats) -> Unit = {},
 ): List<JSONObject> {
     val result = ArrayList<JSONObject>()
+    var process2Messages = 0
+    var decodedPayloads = 0
+    var toolsFound = 0
+    var candidateItems = 0
+    val rejectedTypes = LinkedHashSet<String>()
     fun add(value: JSONObject) {
-        if (!isSubagentCandidate(value)) return
+        if (!isSubagentCandidate(value)) {
+            if (rejectedTypes.size < 8) {
+                val type = value.optString("type")
+                rejectedTypes.add(if (type.isBlank()) "(no type)" else type)
+            }
+            return
+        }
+        candidateItems++
         val aliases = subagentAliases(value)
         val index = result.indexOfFirst { existing ->
             subagentAliases(existing).any(aliases::contains)
@@ -98,17 +129,40 @@ internal fun collectAllSubagentItems(
     }
     messages.forEach { message ->
         if (message.role != NativeChatRole.ACTIVITY || !message.content.startsWith("PROCESS2|")) return@forEach
+        process2Messages++
         runCatching {
             val payload = JSONObject(
                 String(NativeBase64.decode(message.content.substringAfter('|')), Charsets.UTF_8),
             )
+            decodedPayloads++
             val tools = payload.optJSONArray("tools") ?: return@runCatching
             // Keep the historical contract unchanged: only object entries are accepted here.
-            for (index in 0 until tools.length()) tools.optJSONObject(index)?.let(::add)
+            for (index in 0 until tools.length()) tools.optJSONObject(index)?.let {
+                toolsFound++
+                add(it)
+            }
         }
     }
     liveSubagents.forEach { raw -> runCatching { add(JSONObject(raw)) } }
-    return result.filter { subagentThreadId(it).isNotBlank() }
+    var filteredBlankThreadId = 0
+    val output = result.filter {
+        if (subagentThreadId(it).isBlank()) {
+            filteredBlankThreadId++
+            false
+        } else {
+            true
+        }
+    }
+    onStats(SubagentCollectStats(
+        process2Messages = process2Messages,
+        decodedPayloads = decodedPayloads,
+        toolsFound = toolsFound,
+        candidateItems = candidateItems,
+        filteredBlankThreadId = filteredBlankThreadId,
+        outputCount = output.size,
+        rejectedTypes = rejectedTypes.joinToString(","),
+    ))
+    return output
 }
 
 internal fun collectSubagentItems(

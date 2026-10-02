@@ -16,6 +16,9 @@ public class TermuxApplication extends Application {
 
         // Set log level for the app
         setLogLevel();
+
+        // Start the unified file logger (session metadata + startup event)
+        FcodeLog.init(this);
     }
 
     private void setLogLevel() {

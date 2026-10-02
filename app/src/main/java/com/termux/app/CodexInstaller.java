@@ -62,6 +62,11 @@ final class CodexInstaller {
         }
 
         if (!supportsArm64()) {
+            try {
+                FcodeLog.event(activity, "codex_install_abi_check", new org.json.JSONObject()
+                    .put("supportsArm64", false)
+                    .put("abis", new org.json.JSONArray(java.util.Arrays.asList(Build.SUPPORTED_ABIS))));
+            } catch (Exception ignored) {}
             new MaterialAlertDialogBuilder(activity)
                 .setIcon(R.drawable.ic_codex_logo)
                 .setTitle("暂不支持此设备")
@@ -107,6 +112,12 @@ final class CodexInstaller {
                 });
             } catch (Exception e) {
                 Log.e(TAG, "Codex installation failed: " + e.getClass().getSimpleName());
+                try {
+                    FcodeLog.event(activity, "codex_install_failed", new org.json.JSONObject()
+                        .put("exceptionClass", e.getClass().getSimpleName())
+                        .put("message", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                            String.valueOf(e.getMessage()))));
+                } catch (Exception ignored) {}
                 activity.runOnUiThread(() -> {
                     progress.dismiss();
                     if (!canShowUi(activity)) return;
@@ -142,6 +153,10 @@ final class CodexInstaller {
             connection.setRequestProperty("User-Agent", "Codex-Mobile-Android/0.1");
             connection.setInstanceFollowRedirects(true);
             int status = connection.getResponseCode();
+            try {
+                FcodeLog.event(activity, "codex_install_http", new org.json.JSONObject()
+                    .put("status", status));
+            } catch (Exception ignored) {}
             if (status < 200 || status >= 300) throw new IOException("下载服务器返回 HTTP " + status);
             long total = connection.getContentLengthLong();
             progress.beginDownload(total);

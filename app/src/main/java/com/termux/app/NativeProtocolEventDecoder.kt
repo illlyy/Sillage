@@ -37,6 +37,11 @@ internal object NativeProtocolEventDecoder {
             )
             val common = common(body, fallbackThreadId, payload)
             val delta = text(body, "delta").ifBlank { text(payload, "delta") }
+            // Blank reasoning/plan deltas carry no content and no side channel, but downstream
+            // still flips phase and burns a snapshot cycle per event. Drop them here.
+            // NOTE: blank assistantDelta is intentionally kept: older app-server versions
+            // represent item/started as an empty AssistantDelta (see NativeActivityReducer).
+            if (delta.isBlank() && (kind == "reasoningDelta" || kind == "planDelta")) return@mapNotNull null
             when (kind) {
                 "reasoningDelta" -> NativeProtocolEvent.ReasoningDelta(
                     threadId = common.threadId, turnId = common.turnId, itemId = common.itemId,
@@ -67,12 +72,17 @@ internal object NativeProtocolEventDecoder {
             )
             if (kind !in setOf("commandOutput", "commandDelta")) return@mapNotNull null
             val common = common(body, fallbackThreadId, payload)
+            val commandDelta = text(body, "delta").ifBlank { text(payload, "delta") }
+            val outputRef = text(body, "outputRef", "output_ref").ifBlank { text(payload, "outputRef", "output_ref") }
+            // A blank delta with no payload reference is a no-op downstream; drop it before it
+            // occupies a queue slot and advances the sequence watermark.
+            if (commandDelta.isBlank() && outputRef.isBlank()) return@mapNotNull null
             NativeProtocolEvent.CommandOutput(
                 threadId = common.threadId,
                 turnId = common.turnId,
                 itemId = common.itemId,
-                delta = text(body, "delta").ifBlank { text(payload, "delta") },
-                outputRef = text(body, "outputRef", "output_ref").ifBlank { text(payload, "outputRef", "output_ref") },
+                delta = commandDelta,
+                outputRef = outputRef,
                 sequence = common.sequence,
                 timestampMs = common.timestampMs,
             )

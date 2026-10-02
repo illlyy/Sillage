@@ -1,5 +1,6 @@
 package com.termux.app;
 
+import android.content.Context;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -7,10 +8,12 @@ import org.json.JSONObject;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.SequenceInputStream;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -25,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
 
 /** Loopback HTTP/SSE proxy so the musl Codex binary can use Android's Java DNS and TLS stack. */
 final class LocalApiProxy {
@@ -33,6 +37,10 @@ final class LocalApiProxy {
     static final int UPSTREAM_FIRST_BYTE_TIMEOUT_MS = 60_000;
     static final int UPSTREAM_IDLE_TIMEOUT_MS = 300_000;
     static final int MAX_CONCURRENT_UPSTREAM_REQUESTS = 32;
+    /** Upstream rejections are small; buffer at most this much before replaying it downstream. */
+    private static final int MAX_ERROR_BODY_BYTES = 256 * 1024;
+    /** How much of a rejection body is persisted to the shareable log. */
+    private static final int MAX_LOGGED_ERROR_CHARS = 2000;
     private final String upstreamBase;
     private final String apiFormat;
     private final boolean routeThroughMihomo;
@@ -49,6 +57,17 @@ final class LocalApiProxy {
      *  as the CLI's initialization-complete signal (fresh stream-json sessions emit no
      *  session_id until the first user message, so the probe is the reliable readiness marker). */
     private volatile Runnable onHealthProbe = () -> {};
+
+    /** App context for persisted diagnostics; null in unit tests, where nothing is logged. */
+    private volatile Context diagnosticsContext;
+
+    /**
+     * Attaches the app context so upstream rejections reach the shareable FcodeLog. Without it the
+     * only record of a rejected request is logcat, which is unreachable on a user's device.
+     */
+    void setDiagnosticsContext(Context context) {
+        diagnosticsContext = context == null ? null : context.getApplicationContext();
+    }
 
     LocalApiProxy(String upstreamBase) {
         this(upstreamBase, "openai_responses", false, MihomoManager.DEFAULT_MIXED_PORT, false, Collections.emptyMap(), false);
@@ -87,6 +106,21 @@ final class LocalApiProxy {
         new Thread(this::acceptLoop, "IlyopApiProxyAccept").start();
         Log.i(TAG, "Proxy " + server.getLocalPort() + " -> " + upstreamBase + (routeThroughMihomo ? " via Mihomo 127.0.0.1:" + mihomoPort : ""));
         return server.getLocalPort();
+    }
+
+    /**
+     * Mihomo may restart with a different mixed port (preferred port occupied → persisted
+     * offset). The proxy outlives those restarts, so resolve the current port per upstream
+     * request instead of pinning the construction-time value (stale port = 502s until respawn).
+     */
+    private int resolveMihomoPort() {
+        Context context = diagnosticsContext;
+        if (context == null) return mihomoPort;
+        try {
+            return MihomoManager.get(context).mixedPort();
+        } catch (Exception ignored) {
+            return mihomoPort;
+        }
     }
 
     void stop() {
@@ -250,6 +284,18 @@ final class LocalApiProxy {
             InputStream response;
             try { response = code >= 400 ? connection.getErrorStream() : connection.getInputStream(); }
             catch (Exception e) { response = connection.getErrorStream(); }
+            if (code >= 400) {
+                // An upstream rejection is the only evidence of a bad request payload, and on
+                // someone else's device it is otherwise invisible (logcat is unreachable). Buffer
+                // the body, persist it next to everything this proxy changed about the request,
+                // then replay it downstream byte-for-byte so the CLI still sees the real error.
+                byte[] rejection = readBounded(response, MAX_ERROR_BODY_BYTES);
+                InputStream replay = new ByteArrayInputStream(rejection);
+                response = response == null ? replay : new SequenceInputStream(replay, response);
+                logUpstreamRejection(code, requestId, requestModel, adaptChat, subagentRequest,
+                    spawnToolRemoved, flattenThirdPartyNamespaces, flattenMcpNamespaces,
+                    internalEffort, wireEffort, ultraTransportEffort, toolSummary, body, rejection);
+            }
             if (adaptChat && code >= 200 && code < 300) {
                 if (response == null) throw new IllegalStateException("Chat upstream returned an empty response stream");
                 String adaptedModel = requestModel;
@@ -352,12 +398,64 @@ final class LocalApiProxy {
         }
     }
 
+    /**
+     * Reads at most {@code max} bytes, tolerating a null or already-closed stream. The caller
+     * replays what it got, so a body larger than the cap is still forwarded in full.
+     */
+    private static byte[] readBounded(InputStream input, int max) {
+        if (input == null) return new byte[0];
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8 * 1024];
+        try {
+            while (buffer.size() < max) {
+                int count = input.read(chunk, 0, Math.min(chunk.length, max - buffer.size()));
+                if (count < 0) break;
+                buffer.write(chunk, 0, count);
+            }
+        } catch (Exception ignored) {
+            // Partial evidence still beats none; forward whatever was read.
+        }
+        return buffer.toByteArray();
+    }
+
+    /**
+     * Persists an upstream rejection together with every local rewrite that produced the request.
+     * Diagnosing a "tool schema" rejection needs both halves — the upstream complaint and what
+     * this proxy actually put on the wire — and only the pair identifies which rewrite is at fault.
+     */
+    private void logUpstreamRejection(int code, String requestId, String model, boolean adaptChat,
+                                      boolean subagentRequest, boolean spawnToolRemoved,
+                                      boolean flattenedCollaboration, boolean flattenedMcp,
+                                      String coreEffort, String wireEffort, String ultraTransportEffort,
+                                      String toolSummary, byte[] sentBody, byte[] rejection) {
+        Context context = diagnosticsContext;
+        if (context == null) return;
+        try {
+            FcodeLog.event(context, "proxy_upstream_error", new JSONObject()
+                .put("status", code)
+                .put("requestId", requestId)
+                .put("model", model)
+                .put("api", adaptChat ? "chat" : "responses")
+                .put("subagentRequest", subagentRequest)
+                .put("spawnToolRemoved", spawnToolRemoved)
+                .put("flattenedCollaboration", flattenedCollaboration)
+                .put("flattenedMcp", flattenedMcp)
+                .put("coreEffort", coreEffort)
+                .put("wireEffort", wireEffort)
+                .put("ultraTransportEffort", ultraTransportEffort)
+                .put("tools", toolSummary)
+                .put("collaborationTools", collaborationToolSummary(sentBody))
+                .put("body", FcodeLog.limit(new String(rejection, StandardCharsets.UTF_8),
+                    MAX_LOGGED_ERROR_CHARS)));
+        } catch (Exception ignored) {}
+    }
+
     private HttpURLConnection openUpstreamConnection(String method, String targetPath, List<String[]> headers,
-                                                            byte[] body, String adaptation) throws Exception {
+                                                             byte[] body, String adaptation) throws Exception {
         URL target = new URL(upstreamBase + targetPath);
         Log.d(TAG, method + " " + target + (adaptation.isEmpty() ? "" : " [" + adaptation + "]"));
         HttpURLConnection connection = (HttpURLConnection) (routeThroughMihomo
-            ? target.openConnection(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", mihomoPort)))
+            ? target.openConnection(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", resolveMihomoPort())))
             : target.openConnection());
         connection.setRequestMethod(method);
         connection.setConnectTimeout(30_000);
@@ -907,6 +1005,77 @@ final class LocalApiProxy {
         } catch (Exception ignored) { return "unparsed"; }
     }
 
+    /**
+     * The reserved {@code collaboration} tools exactly as sent: per tool, its top-level keys and
+     * its parameter property names, e.g.
+     * {@code collaboration.spawn_agent{description,name,parameters,type}(model,task)}.
+     *
+     * Upstreams that reserve this namespace reject the whole request when it deviates from the
+     * canonical schema, and the message never says how. These key sets are what distinguishes
+     * "a field was added" from "a tool was dropped" from "a name was rewritten". Key names only —
+     * values are never recorded, since tool descriptions carry prompt text.
+     */
+    static String collaborationToolSummary(byte[] body) {
+        try {
+            org.json.JSONArray tools = new JSONObject(new String(body, StandardCharsets.UTF_8))
+                .optJSONArray("tools");
+            if (tools == null) return "none";
+            ArrayList<String> summaries = new ArrayList<>();
+            for (int i = 0; i < tools.length(); i++) {
+                JSONObject tool = tools.optJSONObject(i);
+                if (tool == null) continue;
+                // Chat Completions nests the descriptor under `function`; Responses does not.
+                JSONObject nested = tool.optJSONObject("function");
+                JSONObject descriptor = nested != null ? nested : tool;
+                String name = descriptor.optString("name");
+                org.json.JSONArray children = descriptor.optJSONArray("tools");
+                if (children != null) {
+                    if (!"collaboration".equalsIgnoreCase(name)) continue;
+                    for (int j = 0; j < children.length(); j++) {
+                        JSONObject child = children.optJSONObject(j);
+                        if (child == null) continue;
+                        summaries.add(describeTool(name + "." + child.optString("name"), child));
+                    }
+                } else if (isCollaborationToolName(name)) {
+                    summaries.add(describeTool(name, descriptor));
+                }
+            }
+            if (summaries.isEmpty()) return "none";
+            StringBuilder joined = new StringBuilder();
+            for (String summary : summaries) {
+                if (joined.length() > 0) joined.append(' ');
+                joined.append(summary);
+            }
+            return joined.toString();
+        } catch (Exception ignored) { return "unparsed"; }
+    }
+
+    /** True for a collaboration tool name, with or without a namespace prefix. */
+    private static boolean isCollaborationToolName(String name) {
+        if (name == null || name.isEmpty()) return false;
+        String normalized = name.trim().toLowerCase(Locale.US);
+        int dot = normalized.lastIndexOf('.');
+        if (dot >= 0) normalized = normalized.substring(dot + 1);
+        return COLLABORATION_TOOL_NAMES.contains(normalized);
+    }
+
+    /** {@code label{topLevelKeys}(parameterProperties)}; both key sets sorted for stable diffing. */
+    private static String describeTool(String label, JSONObject tool) {
+        TreeSet<String> keys = new TreeSet<>();
+        java.util.Iterator<String> iterator = tool.keys();
+        while (iterator.hasNext()) keys.add(iterator.next());
+        JSONObject schema = tool.optJSONObject("parameters");
+        if (schema == null) schema = tool.optJSONObject("input_schema");
+        JSONObject properties = schema == null ? null : schema.optJSONObject("properties");
+        TreeSet<String> propertyNames = new TreeSet<>();
+        if (properties != null) {
+            java.util.Iterator<String> propertyIterator = properties.keys();
+            while (propertyIterator.hasNext()) propertyNames.add(propertyIterator.next());
+        }
+        return label + keys.toString().replace(", ", ",").replace('[', '{').replace(']', '}')
+            + propertyNames.toString().replace(", ", ",").replace('[', '(').replace(']', ')');
+    }
+
     private String ultraTransportEffort(String model) {
         return ultraTransportEffort(model, ultraTransportEfforts);
     }
@@ -933,9 +1102,9 @@ final class LocalApiProxy {
         return Collections.unmodifiableMap(result);
     }
 
-    private static void logRoute(String requestId, String model, String coreEffort, String wireEffort,
-                                 String ultraTransportEffort, String toolSummary, String format,
-                                 boolean fallback, int fallbackStatus) {
+    private void logRoute(String requestId, String model, String coreEffort, String wireEffort,
+                          String ultraTransportEffort, String toolSummary, String format,
+                          boolean fallback, int fallbackStatus) {
         String effort = coreEffort.isEmpty() ? "none" : coreEffort;
         String outbound = wireEffort.isEmpty() ? "none" : wireEffort;
         Log.i(TAG, "id=" + requestId + " model=" + (model.isEmpty() ? "unknown" : model)
@@ -943,6 +1112,22 @@ final class LocalApiProxy {
             + (ultraTransportEffort.isEmpty() ? "" : " ultraTransport=" + ultraTransportEffort)
             + " tools=" + toolSummary + " api=" + format + " fallback=" + fallback
             + (fallback ? " status=" + fallbackStatus : ""));
+        // Persisted only in diagnostic mode: one line per request would otherwise dominate the
+        // shareable log, but when a user is reproducing a rejection this is the request half.
+        Context context = diagnosticsContext;
+        if (context == null || !FcodeLog.isLoggable(FcodeLog.LEVEL_DEBUG)) return;
+        try {
+            FcodeLog.event(context, "proxy_route", new JSONObject()
+                .put("requestId", requestId)
+                .put("model", model)
+                .put("coreEffort", effort)
+                .put("wireEffort", outbound)
+                .put("ultraTransportEffort", ultraTransportEffort)
+                .put("tools", toolSummary)
+                .put("api", format)
+                .put("fallback", fallback)
+                .put("fallbackStatus", fallbackStatus));
+        } catch (Exception ignored) {}
     }
 
     private static long nanosToMillis(long nanos) { return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(Math.max(0L, nanos)); }

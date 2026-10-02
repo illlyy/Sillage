@@ -307,7 +307,20 @@ internal fun WorkPanelDialog(
     val liveSubagentSnapshot = state.liveSubagents.toList()
     val toolDetailsSnapshot = state.toolDetails.toList()
     val agents = remember(messageSnapshot, liveSubagentSnapshot) {
-        collectAllSubagentItems(messageSnapshot, liveSubagentSnapshot)
+        var stats = SubagentCollectStats()
+        val list = collectAllSubagentItems(messageSnapshot, liveSubagentSnapshot) { stats = it }
+        // Diagnostic for "conversation shows subagents but the work panel's agents tab is empty":
+        // an empty list while live subagents exist means candidates were dropped during parsing.
+        if (list.isEmpty() && liveSubagentSnapshot.isNotEmpty()) {
+            FcodeLog.w("WorkPanel", "agents empty but " + liveSubagentSnapshot.size
+                + " live subagents present; process2=" + stats.process2Messages
+                + " decoded=" + stats.decodedPayloads
+                + " tools=" + stats.toolsFound
+                + " candidates=" + stats.candidateItems
+                + " blankThreadId=" + stats.filteredBlankThreadId
+                + " rejectedTypes=" + stats.rejectedTypes)
+        }
+        list
     }
     val changes = remember(messageSnapshot, toolDetailsSnapshot) {
         collectAllFileChangeItems(messageSnapshot, toolDetailsSnapshot)
@@ -319,7 +332,11 @@ internal fun WorkPanelDialog(
     val agentThreads = remember(agents) { agents.map(::subagentThreadId).filter { it.isNotBlank() } }
     val close: () -> Unit = { entered = false }
     LaunchedEffect(tab, agentThreads) {
-        if (tab == "agents") agentThreads.forEach(onLoadSubagentHistory)
+        if (tab == "agents") {
+            FcodeLog.d("WorkPanel", "agents tab: " + agents.size + " agents from "
+                + messageSnapshot.size + " messages + " + liveSubagentSnapshot.size + " live")
+            agentThreads.forEach(onLoadSubagentHistory)
+        }
         if ((tab == "changes" || tab == "git") && !state.gitBusy) onGitAction("refresh", "")
         if (tab == "snapshots") onSnapshotAction("refresh", "")
         if (tab == "worktrees") onWorktreeAction("refresh", "")
@@ -938,6 +955,8 @@ internal fun WorkChangesView(
     val edited = files.size - added - deleted
     val staged = gitEntries.count { it.optBoolean("staged") }
     val unstaged = gitEntries.count { it.optBoolean("unstaged") }
+    val matchingByPath = rememberChangeMatchingByPath(items, files)
+    val gitEntryByPath = remember(gitEntries) { gitEntries.associateBy { it.optString("path") } }
     val summary = buildString {
         append(nativeText(language, "\u53d8\u66f4 ${files.size} \u4e2a\u6587\u4ef6", "${files.size} changed files"))
         append(" · +$added ~${edited.coerceAtLeast(0)} -$deleted")
@@ -972,17 +991,37 @@ internal fun WorkChangesView(
             Text(state.gitError.take(4_000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 4.dp))
         }
         items(files, key = { it.path }) { file ->
-            val matching = remember(file.path, items.map { it.toString() }) {
-                items.mapNotNull { item ->
-                    val detail = item.optString("changes").ifBlank { item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) }
-                    detail.takeIf { it.isNotBlank() && (it.contains(file.path) || items.size == 1) }
-                }.distinct().joinToString("\n\n").take(80_000)
-            }
-            val gitEntry = gitEntries.firstOrNull { it.optString("path") == file.path }
-            WorkChangeFileCard(state, file, gitEntry, matching, onGitAction)
+            val gitEntry = gitEntryByPath[file.path]
+            WorkChangeFileCard(state, file, gitEntry, matchingByPath[file.path].orEmpty(), onGitAction)
         }
         item { Spacer(Modifier.height(20.dp)) }
     }
+}
+
+/** Paths -> model change summaries, computed once per items/files snapshot. */
+@Composable
+private fun rememberChangeMatchingByPath(
+    items: List<JSONObject>,
+    files: List<ChangedFileEntry>,
+): Map<String, String> = remember(items, files) {
+    val map = HashMap<String, String>(files.size)
+    if (items.size == 1) {
+        val detail = items.firstNotNullOfOrNull { item ->
+            item.optString("changes").ifBlank { item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) }
+        }.orEmpty()
+        if (detail.isNotBlank()) {
+            files.forEach { map[it.path] = detail.take(80_000) }
+        }
+    } else {
+        files.forEach { file ->
+            val matched = items.mapNotNull { item ->
+                val detail = item.optString("changes").ifBlank { item.optString(NativeLargePayloadStore.PAYLOAD_PREVIEW) }
+                detail.takeIf { it.isNotBlank() && it.contains(file.path) }
+            }.distinct().joinToString("\n\n").take(80_000)
+            map[file.path] = matched
+        }
+    }
+    map
 }
 
 @Composable

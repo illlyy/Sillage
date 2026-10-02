@@ -200,6 +200,13 @@ final class CodexAppServerBridgeHistory {
                 if (historicalCompaction != null) {
                     String compactionKey = historicalCompaction.optString("serverItemId", "");
                     if (compactionKey.isEmpty()) compactionKey = historicalCompaction.optString("id", "");
+                    // An empty key carries no identity: every legacy compaction without ids would
+                    // otherwise collapse onto key "" and all but the last divider would be lost.
+                    // Only de-duplicate when the key is non-empty.
+                    if (compactionKey.isEmpty()) {
+                        messages.put(new JSONObject().put("role", "activity").put("content", encodeHistoricalCompaction(historicalCompaction)));
+                        continue;
+                    }
                     Integer existingIndex = historicalCompactionIndices.get(compactionKey);
                     String encoded = encodeHistoricalCompaction(historicalCompaction);
                     if (existingIndex != null && existingIndex >= 0 && existingIndex < messages.length()) {

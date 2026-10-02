@@ -38,6 +38,18 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     static final String PREF_GOAL = "native_thread_goal_v1_";
     static final String PREF_GOAL_STATUS = "native_thread_goal_status_v1_";
 
+    /** Injected before the user prompt in plan mode; ExitPlanMode is the only path to present
+     *  a plan for approval, so the instruction alone enforces plan semantics on every CLI. */
+    private static final String PLAN_MODE_PREFIX =
+        "请先制定实施计划：只进行分析与调研，不要修改、创建或删除任何文件，完成后调用 ExitPlanMode 提交计划供审批。";
+    /** Read-only toolset for plan-mode turns (mirrors allowedClaudeTools(READ_ONLY)). */
+    private static final String[] PLAN_MODE_TOOLS = new String[] {
+        "Read", "Grep", "Glob",
+        "Bash(ls:*)", "Bash(cat:*)", "Bash(find:*)", "Bash(pwd:*)",
+        "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
+        "WebFetch", "WebSearch",
+    };
+
     // Readiness for a fresh stream-json session is NOT gated on session_id: the CLI emits none
     // until the first user message. When routed through the loopback proxy, the CLI's health
     // probe (HEAD /api/hello) is the readiness signal; a direct connection falls back to a boot
@@ -67,6 +79,9 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     private boolean routeThroughMihomo;
     private String resumeThreadId;
     private String modelOverride = "";
+    /** Runtime effort picker level ("", "none", "low", "medium", "high", "xhigh"); written into
+     *  settings.json so the CLI applies it without a re-spawn only when it changes. */
+    private String effortOverride = "";
     // Process working directory for the spawned CLI. A fresh conversation created from a project
     // folder runs there (so Bash/Read/Grep operate on the project); resume keeps the previous
     // home-based behavior until a project is explicitly selected.
@@ -158,7 +173,8 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             String allowedTools,
             String resumeThreadId,
             boolean routeThroughMihomo,
-            String modelOverride) {
+            String modelOverride,
+            String effortOverride) {
         this.claudeBinPath = claudeBinPath;
         this.configDir = configDir;
         this.profile = profile;
@@ -167,6 +183,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         this.resumeThreadId = resumeThreadId == null ? "" : resumeThreadId;
         this.routeThroughMihomo = routeThroughMihomo;
         this.modelOverride = modelOverride == null ? "" : modelOverride;
+        this.effortOverride = effortOverride == null ? "" : effortOverride;
         spawn();
     }
 
@@ -183,9 +200,28 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         // of hanging for the init timeout with a misleading error.
         if (!resumeThreadId.isEmpty() && !resumeTargetExists()) {
             Log.w(TAG, "Resume target missing, starting a fresh session instead of " + resumeThreadId);
+            try {
+                FcodeLog.event(appContext, "claude_resume_missing", new org.json.JSONObject()
+                    .put("resumeThreadId", CodexAppServerBridgeProtocol.shortId(resumeThreadId))
+                    .put("fellBackToFresh", true));
+            } catch (Exception ignored) {}
             resumeThreadId = "";
             resumeDegraded = true;
         }
+        try {
+            File startBinary = new File(claudeBinPath);
+            File startEntry = ClaudeInstaller.INSTANCE.nodeEntry();
+            FcodeLog.event(appContext, "claude_spawn_start", new org.json.JSONObject()
+                .put("binPath", claudeBinPath)
+                .put("entryKind", entryKind(startEntry, startBinary))
+                .put("entryPath", startEntry == null ? claudeBinPath : startEntry.getAbsolutePath())
+                .put("packageVersion", ClaudeInstaller.INSTANCE.installedVersion())
+                .put("needsMuslLoader", ClaudeMuslRuntime.INSTANCE.needsMuslLoader(startBinary))
+                .put("loaderPresent", ClaudeMuslRuntime.INSTANCE.isLoaderPresent())
+                .put("resumeThreadId", CodexAppServerBridgeProtocol.shortId(resumeThreadId))
+                .put("launchCwd", launchCwd)
+                .put("permissionMode", permissionMode));
+        } catch (Exception ignored) {}
         boolean routedThroughProxy = false;
         proxyBaseUrl = null;
         if (claudeProxy != null) {
@@ -200,6 +236,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                 if (!realBase.startsWith("http://127.0.0.1") && !realBase.startsWith("http://localhost")) {
                     LocalApiProxy proxy = new LocalApiProxy(realBase, "anthropic",
                         routeThroughMihomo, MihomoManager.get(appContext).mixedPort());
+                    proxy.setDiagnosticsContext(appContext);
                     try {
                         int port = proxy.start();
                         claudeProxy = proxy;
@@ -212,38 +249,64 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                         proxy.setOnHealthProbe(() -> mainHandler.post(ClaudeAgentBridge.this::markReady));
                     } catch (Exception e) {
                         Log.w(TAG, "Claude proxy failed to start, falling back to direct connection", e);
+                        try {
+                            FcodeLog.event(appContext, "claude_proxy_fallback", new org.json.JSONObject()
+                                .put("error", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                                    String.valueOf(e.getMessage()))));
+                        } catch (Exception ignored) {}
                         proxy.stop();
                     }
                 }
             }
         } catch (Throwable ignored) {}
         try {
-            // The official arm64 binary is dynamically linked against musl: exec it through the
-            // musl loader (`ld-musl-aarch64.so.1 <binary> ...`) when its ELF carries PT_INTERP.
-            // An npm-installed CLI is a node script (shebang): run it through node instead —
-            // bun-based musl binaries hang on Android during initialization.
+            // Two distributions, and the node one always wins when present: the official arm64
+            // binary is Bun-based and dies under Android's seccomp filter, while an npm install
+            // runs as plain JS through node. Newer npm releases no longer put the JS entry in
+            // `bin/claude` (that became a native launcher), so ask the installer to resolve the
+            // real entry instead of sniffing the bin path for a shebang.
             File binary = new File(claudeBinPath);
+            File nodeEntry = ClaudeInstaller.INSTANCE.nodeEntry();
+            String entryPath = nodeEntry != null ? nodeEntry.getAbsolutePath() : claudeBinPath;
             java.util.ArrayList<String> command = new java.util.ArrayList<>();
-            if (ClaudeAgentBridge.isNodeScript(binary)) {
+            if (nodeEntry != null) {
                 File node = new File(com.termux.shared.termux.TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "node");
                 if (!node.isFile()) {
+                    try {
+                        FcodeLog.event(appContext, "claude_spawn_failed", new org.json.JSONObject()
+                            .put("reason", "node_missing")
+                            .put("nodeFileExists", node.isFile()));
+                    } catch (Exception ignored) {}
                     throw new IllegalStateException(
                         "Claude CLI 需要 Node.js 运行时，请先在设置中安装开发工具 Node.js");
                 }
                 command.add(node.getAbsolutePath());
             } else if (ClaudeMuslRuntime.INSTANCE.needsMuslLoader(binary)) {
+                // The official arm64 binary is dynamically linked against musl: exec it through
+                // the musl loader (`ld-musl-aarch64.so.1 <binary> ...`) since its ELF carries
+                // PT_INTERP and Android's bionic has no such loader.
                 if (!ClaudeMuslRuntime.INSTANCE.isLoaderPresent()) {
                     // Bundle the loader from assets automatically; no re-download needed.
-                    ClaudeMuslRuntime.INSTANCE.installFromAssets(appContext);
+                    String muslError = ClaudeMuslRuntime.INSTANCE.installFromAssets(appContext);
+                    try {
+                        FcodeLog.event(appContext, "claude_musl_loader", new org.json.JSONObject()
+                            .put("installFromAssetsError", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                                String.valueOf(muslError))));
+                    } catch (Exception ignored) {}
                 }
                 File loader = ClaudeMuslRuntime.INSTANCE.loaderFile();
                 if (!loader.isFile()) {
+                    try {
+                        FcodeLog.event(appContext, "claude_spawn_failed", new org.json.JSONObject()
+                            .put("reason", "musl_loader_missing")
+                            .put("loaderPresent", ClaudeMuslRuntime.INSTANCE.isLoaderPresent()));
+                    } catch (Exception ignored) {}
                     throw new IllegalStateException(
                         "Claude CLI 需要 musl 运行时，请在设置中重新下载 Claude CLI");
                 }
                 command.add(loader.getAbsolutePath());
             }
-            command.add(claudeBinPath);
+            command.add(entryPath);
             command.add("--output-format");
             command.add("stream-json");
             command.add("--input-format");
@@ -302,7 +365,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             // (written by ClaudeSettingsWriter, same shape as desktop cc-switch). Nothing
             // credential-like is passed on the command line.
             if (configDir != null && !configDir.isEmpty()) {
-                ClaudeSettingsWriter.INSTANCE.write(new File(configDir), profile, proxyBaseUrl, modelOverride);
+                ClaudeSettingsWriter.INSTANCE.write(new File(configDir), profile, proxyBaseUrl, modelOverride, effortOverride);
             }
             java.util.Map<String, String> env = builder.environment();
             // Bun (the claude runtime) resolves the home dir via $HOME (uv_os_homedir) and
@@ -347,6 +410,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             lastResultFailed = false;
             activeOutboundTurnId = "";
             running = true;
+            try {
+                FcodeLog.event(appContext, "claude_spawn_ok", new org.json.JSONObject()
+                    .put("processDir", String.valueOf(processDir))
+                    .put("cwdIsDirectory", processDir != null && processDir.isDirectory())
+                    .put("routedThroughProxy", routedThroughProxy)
+                    .put("entryKind", entryKind(nodeEntry, binary))
+                    .put("entryPath", entryPath));
+            } catch (Exception ignored) {}
             sendControl("req_init", new JSONObject().put("subtype", "initialize").put("hooks", new JSONObject()));
             mainHandler.removeCallbacks(readinessFallbackRunnable);
             mainHandler.removeCallbacks(initNoticeRunnable);
@@ -361,20 +432,51 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to spawn claude", e);
+            try {
+                FcodeLog.event(appContext, "claude_spawn_failed", new org.json.JSONObject()
+                    .put("exceptionClass", e.getClass().getSimpleName())
+                    .put("message", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                        String.valueOf(e.getMessage()))));
+            } catch (Exception ignored) {}
             emit("onNativeError", "无法启动 Claude CLI: " + e.getMessage());
         }
     }
 
-    /** True when the CLI entry is a text script with a shebang (npm-installed node CLI). */
+    /**
+     * True when the file is a shebang script that runs under node — the entry an older npm layout
+     * linked into `bin/claude`. The interpreter is checked, not just the `#!`, because a stale
+     * `/bin/sh` shim left by a previous install would otherwise be handed to node and fail at
+     * startup with a syntax error instead of a legible one.
+     */
     static boolean isNodeScript(File binary) {
         if (binary == null || !binary.isFile() || binary.length() < 4) return false;
-        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(binary, "r")) {
-            int first = raf.read();
-            int second = raf.read();
-            return first == '#' && second == '!';
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                new java.io.FileInputStream(binary), java.nio.charset.StandardCharsets.UTF_8))) {
+            char[] head = new char[256];
+            int read = reader.read(head);
+            if (read < 3) return false;
+            String first = new String(head, 0, read);
+            int newline = first.indexOf('\n');
+            if (newline >= 0) first = first.substring(0, newline);
+            return first.startsWith("#!") && first.contains("node");
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Which distribution the bridge launches, for diagnostics: {@code node-package} (JS entry
+     * inside the npm package), {@code node-shebang} (older npm layout where bin/claude is the
+     * script itself), {@code musl} (official dynamic binary, run through the loader) or
+     * {@code native}. Remote installs are diagnosed from this field alone, so it must stay in
+     * sync with the launch branches above.
+     */
+    static String entryKind(File nodeEntry, File binary) {
+        if (nodeEntry != null) {
+            return binary != null && nodeEntry.getAbsolutePath().equals(binary.getAbsolutePath())
+                ? "node-shebang" : "node-package";
+        }
+        return ClaudeMuslRuntime.INSTANCE.needsMuslLoader(binary) ? "musl" : "native";
     }
 
     /**
@@ -556,16 +658,34 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             // the partial answer seals without re-entering.
             ExitReport report = decideExitReport(wasRunning, deliberate, ready,
                 turnResultSeen, lastResultFailed, !activeOutboundTurnId.isEmpty());
-            if (report == null || !report.reportError) return;
             String stderrLine = firstStderrLine();
-            String detail = stderrLine.isEmpty() ? "" : "（CLI 输出：" + stderrLine + "）";
             int exit = exitValue();
+            boolean seccomp = exit == 159
+                || stderrLine.toLowerCase().contains("bad system call")
+                || stderrLine.toLowerCase().contains("epoll_pwait2")
+                || stderrLine.toLowerCase().contains("sigsys")
+                || stderrLine.toLowerCase().contains("seccomp");
+            try {
+                FcodeLog.event(appContext, "claude_process_exit", new org.json.JSONObject()
+                    .put("exit", exit)
+                    .put("wasRunning", wasRunning)
+                    .put("stopRequested", deliberate)
+                    .put("ready", ready)
+                    .put("turnInProgress", !activeOutboundTurnId.isEmpty())
+                    .put("seccomp", seccomp)
+                    // Which distribution died matters: the seccomp exit is specific to the Bun
+                    // binary, so the same exit code from a node entry means something else.
+                    .put("entryKind", entryKind(ClaudeInstaller.INSTANCE.nodeEntry(),
+                        new File(claudeBinPath)))
+                    .put("reported", report != null && report.reportError)
+                    .put("stderrFirstLine", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                        FcodeLog.limit(stderrLine, 300))));
+            } catch (Exception ignored) {}
+            if (report == null || !report.reportError) return;
+            String detail = stderrLine.isEmpty() ? "" : "（CLI 输出：" + stderrLine + "）";
             String exitDetail = exit >= 0 ? "（退出码 " + exit + "）" : "";
             String message;
-            if (exit == 159 || stderrLine.toLowerCase().contains("bad system call")
-                    || stderrLine.toLowerCase().contains("epoll_pwait2")
-                    || stderrLine.toLowerCase().contains("sigsys")
-                    || stderrLine.toLowerCase().contains("seccomp")) {
+            if (seccomp) {
                 // The Android app sandbox seccomp filter blocks epoll_pwait2, which the bundled
                 // Bun-based CLI needs during startup. This is a system-level restriction that no
                 // flag or config can bypass. The npm-installed CLI runs through Node.js instead,
@@ -652,7 +772,10 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         } else if ("hook_callback".equals(subtype)) {
             respondControl(requestId, new JSONObject().put("continue", true));
         } else if ("mcp_message".equals(subtype)) {
-            respondControl(requestId, new JSONObject().put("error", "mcp_message not supported"));
+            // Official protocol: the CLI asks whether it may modify MCP configuration (e.g. the
+            // user ran /mcp in chat). Approval lets the CLI persist the change itself; the config
+            // files remain managed on disk and the next spawn picks them up.
+            respondControl(requestId, new JSONObject().put("approved", true));
         } else if ("interrupt".equals(subtype)) {
             respondControl(requestId, new JSONObject());
         }
@@ -728,13 +851,23 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         if (!running) reconnectForNextTurn();
         if (!running) return;
         beginOutboundTurn(UUID.randomUUID().toString());
+        boolean planMode = "plan".equals(collaborationMode);
         String finalText = goalPrefix() + text;
+        if (planMode) finalText = PLAN_MODE_PREFIX + "\n\n" + finalText;
         String skillHint = skillHintText(skillsJson);
         if (!skillHint.isEmpty()) finalText += "\n\n" + skillHint;
         try {
-            JSONObject user = new JSONObject()
-                .put("type", "user")
-                .put("message", new JSONObject().put("role", "user").put("content", buildContent(finalText, attachmentsJson)));
+            JSONObject message = new JSONObject()
+                .put("role", "user")
+                .put("content", buildContent(finalText, attachmentsJson));
+            JSONObject user = new JSONObject().put("type", "user").put("message", message);
+            if (planMode) {
+                // Per-message tool override, same syntax as --allowedTools: read-only tools only.
+                // The CLI supports per-message tools in stream-json input; on CLIs that ignore
+                // the field the explicit instruction above still enforces plan semantics, because
+                // ExitPlanMode is the only path to present a plan for approval.
+                user.put("tools", new JSONArray(PLAN_MODE_TOOLS));
+            }
             writeLine(user.toString());
         } catch (Exception e) {
             emit("onNativeError", "发送消息失败: " + e.getMessage());
@@ -746,22 +879,31 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
      * discovers skills from its skills directories and loads SKILL.md on mention, so a plain
      * reference is the version-robust path (skill content blocks depend on the installed CLI).
      */
-    private static String skillHintText(String skillsJson) {
+    static String skillHintText(String skillsJson) {
         if (skillsJson == null || skillsJson.isBlank()) return "";
         try {
             JSONArray skills = new JSONArray(skillsJson);
             if (skills.length() == 0) return "";
             StringBuilder names = new StringBuilder();
-            for (int i = 0; i < skills.length(); i++) {
+            int shown = 0;
+            for (int i = 0; i < skills.length() && shown < 10; i++) {
                 JSONObject skill = skills.optJSONObject(i);
                 if (skill == null) continue;
                 String name = skill.optString("name");
                 if (name.isBlank()) continue;
                 if (names.length() > 0) names.append("、");
                 names.append(name);
+                String description = skill.optString("description");
+                if (!description.isBlank()) {
+                    String shortDesc = description.trim();
+                    if (shortDesc.length() > 80) shortDesc = shortDesc.substring(0, 80) + "…";
+                    names.append("（").append(shortDesc).append("）");
+                }
+                shown++;
             }
             if (names.length() == 0) return "";
-            return "请使用以下技能：" + names;
+            String suffix = skills.length() > shown ? "等共" + skills.length() + "项" : "";
+            return "请使用以下技能：" + names + suffix;
         } catch (Exception e) {
             return "";
         }
@@ -1094,6 +1236,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             java.util.HashSet<String> seen = new java.util.HashSet<>();
             scanSkillDirectory(new File(configDir == null ? "" : configDir, "skills"), result, seen, 0);
             scanSkillDirectory(new File(termuxHome(), ".claude/skills"), result, seen, 0);
+            // Project-level skills: <cwd>/.claude/skills and <cwd>/skills, so a checked-in
+            // project skill no longer silently vanishes when chatting inside that project.
+            String cwd = launchCwd == null ? "" : launchCwd.trim();
+            if (!cwd.isEmpty()) {
+                scanSkillDirectory(new File(cwd, ".claude/skills"), result, seen, 0);
+                scanSkillDirectory(new File(cwd, "skills"), result, seen, 0);
+                scanSkillDirectory(new File(cwd, ".codex/skills"), result, seen, 0);
+            }
             emit("onSkills", result.toString());
         } catch (Exception e) {
             Log.w(TAG, "loadSkills failed", e);
@@ -1220,12 +1370,16 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     void respondApprovalRequest(String rawRequest, String decision) {
         String requestId = runCatching(rawRequest, "requestId");
         if (requestId.isBlank()) return;
-        boolean allow = "allow".equalsIgnoreCase(decision) || "approve".equalsIgnoreCase(decision)
-            || "accept".equalsIgnoreCase(decision) || "yes".equalsIgnoreCase(decision);
+        // UI decisions are "accept" / "acceptForSession" / "decline" / "cancel".
+        // Both accept variants must allow the tool; anything else denies it.
+        // "cancel" maps to deny at the control-protocol level (behavior allow/deny only);
+        // the turn is released by the activity clearing its WAITING latch, same as deny.
+        boolean allow = "allow".equals(mapApprovalBehavior(decision));
+        boolean cancelled = isApprovalCancelled(decision);
         try {
             JSONObject body = new JSONObject()
                 .put("behavior", allow ? "allow" : "deny");
-            if (!allow) body.put("message", "User rejected this tool call");
+            if (!allow) body.put("message", cancelled ? "User cancelled this tool call" : "User rejected this tool call");
             respondControl(requestId, body);
             pendingApprovalToolUseIds.remove(requestId);
         } catch (Exception e) {
@@ -1237,7 +1391,9 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     void respondUserInput(String rawRequest, String answersJson) {
         if (rawRequest == null || rawRequest.isBlank()) return;
         String toolUseId = runCatching(rawRequest, "toolUseId");
+        if (toolUseId.isBlank()) toolUseId = runCatching(rawRequest, "tool_use_id");
         if (toolUseId.isBlank()) toolUseId = runCatching(rawRequest, "requestId");
+        if (toolUseId.isBlank()) toolUseId = runCatching(rawRequest, "request_id");
         if (toolUseId.isBlank()) return;
         if (!running) return;
         try {
@@ -1265,6 +1421,24 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             if (params != null) return params.optString(key, "");
         } catch (Exception ignored) {}
         return "";
+    }
+
+    /**
+     * Maps UI approval decisions to the Claude control-protocol behavior.
+     * UI sends "accept" / "acceptForSession" / "decline" / "cancel".
+     * Both accept variants allow the tool; everything else denies it.
+     */
+    static String mapApprovalBehavior(String decision) {
+        String normalized = decision == null ? "" : decision.trim().toLowerCase(java.util.Locale.ROOT);
+        boolean allow = "allow".equals(normalized) || "approve".equals(normalized)
+            || "accept".equals(normalized) || "acceptforsession".equals(normalized)
+            || "yes".equals(normalized);
+        return allow ? "allow" : "deny";
+    }
+
+    static boolean isApprovalCancelled(String decision) {
+        String normalized = decision == null ? "" : decision.trim().toLowerCase(java.util.Locale.ROOT);
+        return "cancel".equals(normalized);
     }
 
     // ------------------------------------------------------------------ misc

@@ -23,20 +23,35 @@ final class ClaudeNativeRuntime {
             String allowedTools,
             String resumeThreadId,
             boolean routeThroughMihomo,
-            String modelOverride) {
+            String modelOverride,
+            String effortOverride) {
         String requestedFingerprint = String.join("\n",
             value(configurationFingerprint), value(claudeBinPath),
             value(permissionMode), value(allowedTools),
-            String.valueOf(routeThroughMihomo));
-        if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
+            String.valueOf(routeThroughMihomo), value(effortOverride));
+        // Rebuild when the configuration changed OR the previous bridge's CLI process died
+        // (e.g. seccomp exit 159). A stale bridge otherwise re-binds forever without re-spawning,
+        // so retrying the backend after a crash would never recover until the app is killed.
+        if (bridge != null && (!requestedFingerprint.equals(fingerprint) || !isRunning())) {
+            FcodeLog.d("ClaudeNativeRuntime", "Fingerprint changed or CLI process dead, rebuilding bridge");
+            shutdown();
+        }
         appContext = activity.getApplicationContext();
         lastAttachRecreatedBridge = bridge == null;
+        try {
+            FcodeLog.event(appContext, "claude_attach", new org.json.JSONObject()
+                .put("recreatedBridge", lastAttachRecreatedBridge)
+                .put("fingerprintChanged", bridge != null && !requestedFingerprint.equals(fingerprint))
+                .put("wasRunning", isRunning())
+                .put("binPath", value(claudeBinPath))
+                .put("resumeThreadId", CodexAppServerBridgeProtocol.shortId(value(resumeThreadId))));
+        } catch (Exception ignored) {}
         if (bridge == null) {
             CodexTaskStore.markInterruptedTasks(activity.getApplicationContext());
             bridge = new ClaudeAgentBridge(activity, listener);
             fingerprint = requestedFingerprint;
             bridge.start(claudeBinPath, configDir, profile, permissionMode,
-                allowedTools, resumeThreadId, routeThroughMihomo, modelOverride);
+                allowedTools, resumeThreadId, routeThroughMihomo, modelOverride, effortOverride);
         } else {
             bridge.rebind(activity, listener);
         }

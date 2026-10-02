@@ -38,6 +38,10 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Effort levels offered by the Claude backend composer picker; "none" keeps the profile default. */
+internal val CLAUDE_EFFORT_OPTIONS = listOf("none", "low", "medium", "high", "xhigh")
+internal const val CLAUDE_EFFORT_DEFAULT = "none"
+
 
 /** Immutable hand-off between background catalog preparation and main-thread runtime attach. */
 internal data class NativeBackendStartRequest(
@@ -54,7 +58,9 @@ internal data class NativeBackendStartRequest(
     internal fun CodexChatActivity.isBackendCliInstalled(): Boolean {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         return if (NativeBackendType.current(prefs) == NativeBackendType.CLAUDE) {
-            File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "claude").canExecute()
+            // An npm install may leave nothing executable at bin/claude (newer releases put a
+            // native launcher there), so ask the installer, which also accepts a Node entry.
+            ClaudeInstaller.isInstalled()
         } else {
             isCodexCliInstalled()
         }
@@ -225,6 +231,7 @@ internal data class NativeBackendStartRequest(
         generation: Int,
         preferConfiguredDefault: Boolean = false,
         modelOverride: String? = null,
+        effortOverride: String? = null,
     ) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         backendConfigurationLoaded = true
@@ -239,14 +246,16 @@ internal data class NativeBackendStartRequest(
             bridge = null
             attachedBackend = null
             chatState.ready = false
+            FcodeLog.d("NativeChatBackend", "Claude backend: no active profile, refusing to start")
             chatState.addError("没有可用的 Claude API 配置，请先返回首页在设置中创建。")
             return
         }
-        if (!claudeBin.canExecute()) {
+        if (!ClaudeInstaller.isInstalled()) {
             if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
             bridge = null
             attachedBackend = null
             chatState.ready = false
+            FcodeLog.d("NativeChatBackend", "Claude backend: no runnable CLI at " + claudeBin.absolutePath)
             chatState.addError("Claude CLI 尚未安装，请先返回首页在设置中下载。")
             return
         }
@@ -263,7 +272,14 @@ internal data class NativeBackendStartRequest(
             ?: primaryModel
         chatState.selectedModel = effectiveModel
         chatState.modelLabel = chatState.modelOptions.firstOrNull { it.id == effectiveModel }?.name ?: effectiveModel
-        chatState.selectedEffort = "none"
+        // Effective effort: an explicit picker switch wins, then the stored per-profile/model
+        // preference, then the profile default ("none" = follow settings.json).
+        val effectiveEffort = effortOverride?.takeIf { it.isNotBlank() }
+            ?: prefs.getString(effortPreferenceKey(profile.id, effectiveModel), null)
+                ?.trim()?.lowercase()
+                ?.takeIf { it in CLAUDE_EFFORT_OPTIONS }
+            ?: CLAUDE_EFFORT_DEFAULT
+        chatState.selectedEffort = effectiveEffort
         prefs.edit().putString(modelPreferenceKey(profile.id), effectiveModel).apply()
         chatState.connectionLabel = "正在连接 Claude…"
         chatState.ready = false
@@ -276,6 +292,9 @@ internal data class NativeBackendStartRequest(
             NativePermissionMode.WORKSPACE -> "acceptEdits"
             else -> "bypassPermissions"
         }
+        // Session-remembered tools (acceptForSession) widen the next spawn only; the
+        // running CLI already allowed the current request via control-response.
+        val rememberedTools = ClaudeAllowedToolsStore.load(prefs, profile.id).sorted()
         // The fingerprint drives bridge re-spawn; it must cover every field that changes the
         // spawned CLI (credentials, tiers, tuning, toggles, custom JSON) plus the active model.
         val fingerprint = listOf(profile.apiKey, profile.apiKeyField, profile.baseUrl, profile.model,
@@ -285,7 +304,10 @@ internal data class NativeBackendStartRequest(
             profile.disableNonEssentialTraffic, profile.maxEffort, profile.enableToolSearch,
             profile.disableAutoUpdater, profile.experimentalAgentTeams, profile.disableExperimentalBetas,
             profile.includeCoAuthoredBy, profile.extraSettingsJson, profile.extraEnv,
-            claudePermissionMode, effectiveModel).joinToString("\n")
+            claudePermissionMode, effectiveModel, effectiveEffort,
+            prefs.getLong("native_claude_mcp_revision_v1", 0L),
+            ClaudeMcpConfigStore.fileFingerprint(),
+            rememberedTools.joinToString(",")).joinToString("\n")
         val configDir = File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".claude").absolutePath
         val routeThroughMihomo = prefs.getBoolean("mihomo_route_api", false)
         val retainedRuntime = ClaudeNativeRuntime.exists()
@@ -304,8 +326,15 @@ internal data class NativeBackendStartRequest(
             retainedThread.orEmpty(),
             routeThroughMihomo,
             effectiveModel,
+            effectiveEffort,
         )
         attachedBackend = NativeBackendType.CLAUDE
+        FcodeLog.event(this, "claude_backend_attached", org.json.JSONObject()
+            .put("profileId", profile.id.take(8))
+            .put("model", effectiveModel)
+            .put("permissionMode", claudePermissionMode)
+            .put("routeThroughMihomo", routeThroughMihomo)
+            .put("retainedThread", !retainedThread.isNullOrBlank()))
         if (!retainedThread.isNullOrBlank()) {
             // The bridge restarts internally when the target differs from its current session;
             // this call always re-wires the UI state (loading route, history snapshot).
@@ -329,8 +358,8 @@ internal data class NativeBackendStartRequest(
         byId[primary] = NativeModelOption(
             id = primary,
             name = primary,
-            efforts = listOf("none"),
-            defaultEffort = "none",
+            efforts = CLAUDE_EFFORT_OPTIONS,
+            defaultEffort = CLAUDE_EFFORT_DEFAULT,
         )
         fun tier(label: String, configured: String) {
             val resolved = configured.ifBlank { primary }
@@ -338,8 +367,8 @@ internal data class NativeBackendStartRequest(
                 byId[resolved] = NativeModelOption(
                     id = resolved,
                     name = "$label · $resolved",
-                    efforts = listOf("none"),
-                    defaultEffort = "none",
+                    efforts = CLAUDE_EFFORT_OPTIONS,
+                    defaultEffort = CLAUDE_EFFORT_DEFAULT,
                 )
             }
         }
@@ -360,11 +389,27 @@ internal data class NativeBackendStartRequest(
         startClaudeBackend(++backendStartGeneration, modelOverride = model)
     }
 
+    /** Applies a Claude effort switch that was deferred because a turn was running. */
+    internal fun CodexChatActivity.applyPendingClaudeEffortSwitch() {
+        if (pendingClaudeEffortSwitch.isBlank()) return
+        val effort = pendingClaudeEffortSwitch
+        pendingClaudeEffortSwitch = ""
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        if (NativeBackendType.current(prefs) != NativeBackendType.CLAUDE) return
+        startClaudeBackend(++backendStartGeneration, effortOverride = effort)
+    }
+
     /** Claude tool allow-list for non-bypass permission modes; read-only gets a minimal set. */
-    internal fun CodexChatActivity.allowedClaudeTools(permissionMode: String): String = when (permissionMode) {
-        NativePermissionMode.READ_ONLY -> "Read,Grep,Glob,Bash(ls:*),Bash(cat:*),Bash(find:*),Bash(pwd:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),WebFetch,WebSearch"
-        NativePermissionMode.WORKSPACE -> "Read,Grep,Glob,WebFetch,WebSearch,Bash(ls:*),Bash(pwd:*),Bash(mkdir:*),Bash(cp:*),Bash(mv:*),Bash(rm:*),Bash(echo:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git branch:*),Bash(git checkout:*),Bash(git stash:*)"
-        else -> ""
+    internal fun CodexChatActivity.allowedClaudeTools(permissionMode: String): String {
+        val base = when (permissionMode) {
+            NativePermissionMode.READ_ONLY -> "Read,Grep,Glob,Bash(ls:*),Bash(cat:*),Bash(find:*),Bash(pwd:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),WebFetch,WebSearch"
+            NativePermissionMode.WORKSPACE -> "Read,Grep,Glob,WebFetch,WebSearch,Bash(ls:*),Bash(pwd:*),Bash(mkdir:*),Bash(cp:*),Bash(mv:*),Bash(rm:*),Bash(echo:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git branch:*),Bash(git checkout:*),Bash(git stash:*)"
+            else -> ""
+        }
+        if (base.isBlank()) return ""
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        val remembered = ClaudeAllowedToolsStore.load(prefs, activeProfileId)
+        return ClaudeAllowedToolsStore.merge(base, remembered)
     }
 
     internal fun CodexChatActivity.reloadProviderConfigurationIfChanged() {
@@ -501,6 +546,7 @@ internal data class NativeBackendStartRequest(
                 .put("effort", normalized))
             return
         }
+        val changed = !chatState.selectedEffort.equals(normalized, ignoreCase = true)
         chatState.selectedEffort = normalized
         if (activeProfileId.isNotBlank()) {
             getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
@@ -512,6 +558,15 @@ internal data class NativeBackendStartRequest(
             .put("profileId", activeProfileId)
             .put("model", option.id)
             .put("effort", normalized))
+        // Claude: the CLI's effort level is fixed at spawn (settings.json env), so a picker
+        // change must re-spawn the bridge with the new level. Busy turns defer the switch.
+        if (changed && NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE) {
+            if (chatState.busy) {
+                pendingClaudeEffortSwitch = normalized
+            } else {
+                startClaudeBackend(++backendStartGeneration, effortOverride = normalized)
+            }
+        }
     }
 
     internal fun CodexChatActivity.cacheAttachment(uri: Uri, image: Boolean) {

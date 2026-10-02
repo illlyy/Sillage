@@ -57,4 +57,20 @@ class NativeGitWorkflowTest {
         val result = JSONObject(NativeGitWorkflow.parse("/repo", "## main\n M \"docs/my file.md\""))
         assertEquals("docs/my file.md", result.getJSONArray("entries").getJSONObject(0).getString("path"))
     }
+
+    @Test
+    fun decodesOctalUtf8Paths() {
+        // "ä" in UTF-8 is 0xC3 0xA4 -> octal \303\244 as git quotes it.
+        val result = JSONObject(NativeGitWorkflow.parse("/repo", "## main\n M \"docs/\\303\\244.md\""))
+        assertEquals("docs/ä.md", result.getJSONArray("entries").getJSONObject(0).getString("path"))
+    }
+
+    @Test
+    fun marksConflictStates() {
+        val result = JSONObject(NativeGitWorkflow.parse("/repo", "## main\nUU conflict.txt\nAA added.txt\nDD deleted.txt"))
+        val entries = result.getJSONArray("entries")
+        assertEquals("conflict", entries.getJSONObject(0).getString("operation"))
+        assertEquals("conflict", entries.getJSONObject(1).getString("operation"))
+        assertEquals("conflict", entries.getJSONObject(2).getString("operation"))
+    }
 }

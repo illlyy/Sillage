@@ -53,13 +53,16 @@ object NativeDrawerProjectStore {
         var folder = File(root, name)
         var suffix = 2
         while (folder.exists()) folder = File(root, "$name $suffix").also { suffix++ }
-        require(folder.mkdirs()) { "Unable to create project folder" }
+        val mkdirsResult = folder.mkdirs()
+        require(mkdirsResult) { "Unable to create project folder" }
         val path = folder.canonicalPath
         update(context) { aliases, registered, hidden, _ ->
             aliases.put(path, name)
             registered.add(path)
             hidden.remove(path)
         }
+        FcodeLog.d("ProjectStore", "create name=$name path=$path rootExists=" + root.isDirectory
+            + " mkdirs=" + mkdirsResult + " count=" + registered(context).size)
         NativeDrawerProject(path, name)
     }
 
@@ -73,6 +76,8 @@ object NativeDrawerProjectStore {
         val folder = File(folderPath)
         require(folder.isDirectory && folder.canRead()) { "Selected folder is not accessible" }
         val path = folder.canonicalPath
+        FcodeLog.d("ProjectStore", "register path=$path requestedName=$requestedName isDirectory="
+            + folder.isDirectory + " canRead=" + folder.canRead() + " treeUriBlank=" + treeUri.isBlank())
         val name = requestedName.trim().ifBlank { displayName(path) }
         require(name.none { it == '/' || it == '\\' || it == '\u0000' }) {
             "Project name cannot contain path separators"
@@ -100,9 +105,11 @@ object NativeDrawerProjectStore {
             registered.add(path)
             hidden.remove(path)
         }
+        FcodeLog.d("ProjectStore", "rename path=$path name=$name")
     }
 
     fun remove(context: Context, path: String) = synchronized(lock) {
+        FcodeLog.d("ProjectStore", "remove path=$path")
         update(context) { aliases, registered, hidden, treeUris ->
             aliases.remove(path)
             registered.remove(path)

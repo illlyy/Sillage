@@ -516,17 +516,46 @@ final class CodexAppServerBridge extends NativeBackendBridge {
             try {
                 if (!isServerGenerationActive(generation)) return;
                 File binary = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "codex");
+                try {
+                    FcodeLog.event(appContext, "codex_spawn_start", new org.json.JSONObject()
+                        .put("binaryExists", binary.exists())
+                        .put("binaryExecutable", binary.canExecute())
+                        .put("modelSet", model != null && !model.trim().isEmpty())
+                        .put("model", model == null ? "" : model.trim())
+                        .put("apiFormat", String.valueOf(apiFormat))
+                        .put("routeThroughMihomo", routeThroughMihomo)
+                        .put("multiAgentV2", multiAgentV2)
+                        .put("preventRecursiveSubagents", preventRecursiveSubagents)
+                        // config.toml is global and is rewritten by the Termux/WebUI path, so a
+                        // key written for one profile keeps applying to every later session.
+                        // Snapshot the agent keys to catch a stale one skewing the tool schema.
+                        .put("agentConfigKeys", CodexAppServerBridgeProtocol.agentConfigKeySummary(
+                            new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "config.toml"))));
+                } catch (Exception ignored) {}
                 if (!binary.canExecute()) throw new IllegalStateException("Codex CLI is not installed");
                 File home = TermuxConstants.TERMUX_HOME_DIR;
                 File codexHome = new File(home, ".codex");
                 home.mkdirs();
                 codexHome.mkdirs();
-                CodexAppServerBridgeProtocol.purgeStaleAgentsMaxThreads(new File(codexHome, "config.toml"));
+                // The stability block is written only for custom-model V2 profiles, but config.toml
+                // is global and only the WebUI path rewrites it. Purge it when this launch does not
+                // want it, so a stale spawn_agent schema cannot reach an upstream that reserves it.
+                boolean purged = CodexAppServerBridgeProtocol.purgeStaleAgentConfig(
+                    new File(codexHome, "config.toml"), preventRecursiveSubagents);
+                if (purged) {
+                    try {
+                        FcodeLog.event(appContext, "codex_stale_agent_config_purged", new org.json.JSONObject()
+                            .put("keptStabilityBlock", preventRecursiveSubagents)
+                            .put("agentConfigKeys", CodexAppServerBridgeProtocol.agentConfigKeySummary(
+                                new File(codexHome, "config.toml"))));
+                    } catch (Exception ignored) {}
+                }
                 MihomoManager mihomo = MihomoManager.get(appContext);
                 if (routeThroughMihomo) mihomo.start();
                 if (!isServerGenerationActive(generation)) return;
                 localProxy = new LocalApiProxy(baseUrl, apiFormat, routeThroughMihomo, mihomo.mixedPort(),
                     forwardReasoningContext, transportEfforts, preventRecursiveSubagents);
+                localProxy.setDiagnosticsContext(appContext);
                 int proxyPort = localProxy.start();
                 synchronized (this) {
                     if (!isServerGenerationActive(generation)) {
@@ -602,10 +631,21 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                 new Thread(() -> readStdout(processForThreads, generation), "CodexAppServerOut").start();
                 new Thread(() -> readStderr(processForThreads, generation), "CodexAppServerErr").start();
                 new Thread(() -> monitorProcess(processForThreads, generation), "CodexAppServerWatch").start();
+                try {
+                    FcodeLog.event(appContext, "codex_spawn_ok", new org.json.JSONObject()
+                        .put("cwd", String.valueOf(home))
+                        .put("cwdIsDirectory", home != null && home.isDirectory()));
+                } catch (Exception ignored) {}
                 sendInitialize(generation);
             } catch (Exception e) {
                 boolean current = isServerGenerationActive(generation);
                 if (current) {
+                    try {
+                        FcodeLog.event(appContext, "codex_spawn_failed", new org.json.JSONObject()
+                            .put("exceptionClass", e.getClass().getSimpleName())
+                            .put("message", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                                String.valueOf(e.getMessage()))));
+                    } catch (Exception ignored) {}
                     cleanupFailedBootstrap(generation, localProxy, activeProcess);
                     emit("onNativeError", e.getClass().getSimpleName() + ": " + e.getMessage());
                 } else {
@@ -1232,8 +1272,15 @@ final class CodexAppServerBridge extends NativeBackendBridge {
         JSONObject params = new JSONObject();
         CodexAppServerBridgeProtocol.applyNativeMcpConfig(params);
         String mode = configuredPermissionMode();
-        String cwd = requestedCwd == null || requestedCwd.trim().isEmpty() ? configuredCwd() : requestedCwd.trim();
-        if (!new File(cwd).isDirectory()) cwd = configuredCwd();
+        String configured = configuredCwd();
+        String cwd = requestedCwd == null || requestedCwd.trim().isEmpty() ? configured : requestedCwd.trim();
+        boolean usedFallback = !new File(cwd).isDirectory();
+        if (usedFallback) cwd = configured;
+        FcodeLog.d("CodexAppServerBridge", "sendThreadStart requested=" + String.valueOf(requestedCwd)
+            + " configured=" + configured
+            + " cwdIsDirectory=" + new File(cwd).isDirectory()
+            + " usedFallback=" + usedFallback
+            + " cwdSent=" + cwd);
         NativePermissionMode.applyThreadParams(params, mode, cwd);
         Log.i(TAG, "THREAD_PERMISSIONS mode=" + mode + " approval="
             + NativePermissionMode.approvalPolicy(mode) + " sandbox=" + NativePermissionMode.sandbox(mode));
@@ -1329,6 +1376,16 @@ final class CodexAppServerBridge extends NativeBackendBridge {
             }
             if (unexpected) {
                 android.util.Log.w(TAG, "app-server exited with code " + exitCode);
+                java.util.List<String> tail = FcodeLog.stderrTail();
+                try {
+                    FcodeLog.event(appContext, "codex_process_exit", new org.json.JSONObject()
+                        .put("exit", exitCode)
+                        .put("unexpected", true)
+                        .put("stderrTailLines", tail.size())
+                        .put("stderrTailLast", tail.isEmpty() ? ""
+                            : CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                                FcodeLog.limit(tail.get(tail.size() - 1), 300))));
+                } catch (Exception ignored) {}
                 if (webView == null) {
                     CodexTaskStore.markInterruptedTasks(appContext);
                     // A crash during a turn that used a custom model/effort is often app-server
@@ -1346,15 +1403,6 @@ final class CodexAppServerBridge extends NativeBackendBridge {
             Thread.currentThread().interrupt();
         }
     }
-
-    /**
-     * agents.max_threads is now supplied only via command-line overrides (agentConfigOverrides),
-     * which set it solely when multi_agent_v2 is disabled. Strip any stale max_threads left in
-     * config.toml by earlier builds so it can never coexist with an enabled multi_agent_v2, even
-     * though the command line would otherwise be overridden by this on-disk value.
-     */
-
-
 
     private void readStdout(Process activeProcess, int generation) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(activeProcess.getInputStream()))) {
@@ -1390,7 +1438,7 @@ final class CodexAppServerBridge extends NativeBackendBridge {
             while ((line = reader.readLine()) != null) {
                 if (!isCurrentServerProcess(activeProcess, generation)) return;
                 String safeLine = CodexAppServerBridgeProtocol.redactSensitiveLogLine(line);
-                android.util.Log.e(TAG, "STDERR " + safeLine);
+                FcodeLog.stderrLine(TAG, safeLine);
                 emit("onLog", safeLine);
             }
         } catch (Exception ignored) {}
@@ -1761,6 +1809,16 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                 NativeChatDiagnostics.record(appContext, "subagent_capsule", new JSONObject()
                     .put("method", method).put("type", liveType)
                     .put("thread", CodexAppServerBridgeProtocol.shortId(params.optString("threadId", ""))));
+                try {
+                    FcodeLog.event(appContext, "subagent_live", new JSONObject()
+                        .put("method", method)
+                        .put("type", liveType)
+                        .put("thread", CodexAppServerBridgeProtocol.shortId(params.optString("threadId", "")))
+                        .put("agentThreadId", CodexAppServerBridgeProtocol.shortId(
+                            liveItem == null ? "" : liveItem.optString("agentThreadId", "")))
+                        .put("receiverCount", liveReceivers == null ? 0 : liveReceivers.length())
+                        .put("status", presentationItem.optString("status", "")));
+                } catch (Exception ignored) {}
             }
         }
         if (primaryEvent && "item/plan/delta".equals(method) && params != null) {

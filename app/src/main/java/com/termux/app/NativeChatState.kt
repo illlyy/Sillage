@@ -346,6 +346,13 @@ internal class NativeChatState {
     val selectedSkills = mutableStateListOf<NativeSkill>()
     val toolDetails = mutableStateListOf<String>()
     val liveSubagents = mutableStateListOf<String>()
+    /**
+     * Bumped whenever live subagent data (liveSubagents rows or sealed PROCESS2 history rows)
+     * changes. Streaming text deltas do not bump it, letting subagent collectors skip their
+     * O(messages) re-collection on every stream batch.
+     */
+    var subagentDataRevision by mutableIntStateOf(0)
+        private set
     val subagentHistoryRefs = mutableStateMapOf<String, String>()
     val subagentHistoryMessageCounts = mutableStateMapOf<String, Int>()
     val subagentStatuses = mutableStateMapOf<String, String>()
@@ -365,6 +372,17 @@ internal class NativeChatState {
     private var historicalActivityGroups: List<NativeActivityGroup> = emptyList()
     private var historicalCompactions: List<NativeCompactionItem> = emptyList()
     private var localProtocolSequence = 0L
+    /**
+     * Last published projection inputs. Streaming batches publish far more often than the
+     * underlying data changes; when every input still refers to the same cached instances the
+     * whole snapshot is skipped so subscribers do not recompose on no-op events.
+     */
+    private var lastPublishedActivities: List<NativeActivityGroup>? = null
+    private var lastPublishedLiveActivities: List<NativeActivityGroup>? = null
+    private var lastPublishedCompactions: List<NativeCompactionItem>? = null
+    private var lastPublishedSubagents: List<String>? = null
+    private var lastHistoricalActivities: List<NativeActivityGroup>? = null
+    private var lastMergedActivities: List<NativeActivityGroup>? = null
     private var parsedAssistantText = ""
     /** Remains active even while a tag-only prefix has not produced visible assistant text. */
     private var assistantParserActive = false
@@ -498,42 +516,69 @@ internal class NativeChatState {
 
     private fun publishDomainSnapshot() {
         val liveActivities = activityReducer.groups()
-        val activities = historicalActivityGroups + liveActivities
         val compactions = NativeHistoryAdapter.mergeCompactionTimeline(
             historicalCompactions + compactionReducer.items(currentThreadId.takeIf { it.isNotBlank() }),
         )
-        activityGroups.clear()
-        activityGroups.addAll(liveActivities)
-        compactionItems.clear()
-        compactionItems.addAll(compactions)
-        val assistantMessages = messages.filter { it.role == NativeChatRole.ASSISTANT }
-            .map { NativeConversationTextMessage(it.id, it.content, it.streaming, currentTurnId.takeIf { id -> id.isNotBlank() }) }
-        val userMessages = messages.filter { it.role == NativeChatRole.USER }
-            .map { NativeConversationTextMessage(it.id, it.content, it.streaming, null) }
-        val plans = messages.asSequence()
-            .filter { it.role == NativeChatRole.ACTIVITY && it.content.startsWith(NATIVE_PROPOSED_PLAN_PREFIX) }
-            .map { NativePlanRenderItem(it.id, decodeNativeProposedPlan(it.content), it.streaming, dedicated = true) }
-            .toList()
-        val subagents = liveSubagents.mapNotNull { raw ->
-            runCatching {
-                val item = JSONObject(raw)
-                NativeSubagentVisualFactory.create(
-                    agentThreadId = item.optString("agentThreadId", item.optString("agent_thread_id")),
-                    callId = item.optString("callId", item.optString("call_id", item.optString("id"))),
-                    name = item.optString("agentName", item.optString("agentNickname", item.optString("name"))),
-                    status = item.optString("status", "waiting"),
-                )
-            }.getOrNull()
+        // Input reference/content gating: the activity reducer reuses the last frozen instance
+        // unless its content changed, so an identity check is a reliable change signal. The
+        // subagent snapshot is a cheap O(k) copy (k = live subagents, usually < 10) compared to
+        // the per-event JSON re-parse it replaces. Compactions are compared by content because
+        // mergeCompactionTimeline always allocates a fresh list.
+        // The live list must be compared against the last *live* instance, not the last
+        // merged list: `historical + live` always allocates, so comparing live against merged
+        // could never hit and every streaming batch rebuilt + republished (dead gate).
+        val activities = if (historicalActivityGroups === lastHistoricalActivities && liveActivities === lastPublishedLiveActivities) {
+            lastMergedActivities ?: (historicalActivityGroups + liveActivities)
+        } else {
+            (historicalActivityGroups + liveActivities).also {
+                lastMergedActivities = it
+                lastHistoricalActivities = historicalActivityGroups
+                lastPublishedLiveActivities = liveActivities
+            }
         }
+        val activitiesChanged = activities !== lastPublishedActivities
+        val compactionsChanged = compactions != lastPublishedCompactions
+        val subagentSnapshot = liveSubagents.toList()
+        val subagentsChanged = subagentSnapshot != lastPublishedSubagents
+        lastPublishedActivities = activities
+        lastPublishedCompactions = compactions
+        lastPublishedSubagents = subagentSnapshot
+        if (!activitiesChanged && !compactionsChanged && !subagentsChanged) return
+        if (activitiesChanged) {
+            activityGroups.clear()
+            activityGroups.addAll(liveActivities)
+        }
+        if (compactionsChanged) {
+            compactionItems.clear()
+            compactionItems.addAll(compactions)
+        }
+        val previous = conversationRenderModel
+        // Text projections (plans/assistantMessages/userMessages/errors) have no renderer
+        // consumers; they are rebuilt in full by the history preparation paths, so reusing the
+        // previous values here avoids three O(messages) passes on every streaming batch.
         conversationRenderModel = NativeConversationRenderModel(
             threadId = currentThreadId,
             activities = activities,
             compactions = compactions,
-            plans = plans,
-            subagents = NativeSubagentVisualFactory.mergeAll(subagents),
-            assistantMessages = assistantMessages,
-            userMessages = userMessages,
-            errors = messages.filter { it.role == NativeChatRole.ERROR }.map { it.content },
+            plans = previous.plans,
+            subagents = if (subagentsChanged) {
+                NativeSubagentVisualFactory.mergeAll(
+                    liveSubagents.mapNotNull { raw ->
+                        runCatching {
+                            val item = JSONObject(raw)
+                            NativeSubagentVisualFactory.create(
+                                agentThreadId = item.optString("agentThreadId", item.optString("agent_thread_id")),
+                                callId = item.optString("callId", item.optString("call_id", item.optString("id"))),
+                                name = item.optString("agentName", item.optString("agentNickname", item.optString("name"))),
+                                status = item.optString("status", "waiting"),
+                            )
+                        }.getOrNull()
+                    },
+                )
+            } else previous.subagents,
+            assistantMessages = previous.assistantMessages,
+            userMessages = previous.userMessages,
+            errors = previous.errors,
             lastSequence = localProtocolSequence,
         )
     }
@@ -688,8 +733,12 @@ internal class NativeChatState {
                 )
                 is NativeProtocolEvent.SubagentUpdated -> {
                     beginReasoningAfterAnswerIfNeeded()
+                    // The type discriminator is required by the subagent collectors
+                    // (collectAllSubagentItems/isSubagentCandidate); without it these
+                    // projections are dropped from the work panel and history chips.
                     updateSubagent(
-                        JSONObject().put("agentThreadId", event.agentThreadId)
+                        JSONObject().put("type", "subAgentActivity")
+                            .put("agentThreadId", event.agentThreadId)
                             .put("callId", event.callId).put("agentName", event.name).put("status", event.status)
                             .put("id", event.itemId ?: JSONObject.NULL).toString(),
                     )
@@ -897,6 +946,7 @@ internal class NativeChatState {
         clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         subagentHistoryRefs.clear()
         subagentHistoryMessageCounts.clear()
         subagentStatuses.clear()
@@ -980,6 +1030,7 @@ internal class NativeChatState {
         clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         planStreamParser.reset()
         dedicatedPlanParser.reset()
         parsedAssistantText = ""
@@ -1015,6 +1066,7 @@ internal class NativeChatState {
         clearLiveAssistantBuffer()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         activeProposedPlanItemId = ""
         activeProposedPlanDedicated = false
         activePlanScopeKey = ""
@@ -1197,6 +1249,7 @@ internal class NativeChatState {
             revealStartedAt = System.currentTimeMillis(),
             enterExpanded = enterExpanded,
         ))
+        subagentDataRevision++
     }
 
     fun beginReasoningAfterAnswerIfNeeded() {
@@ -1213,6 +1266,7 @@ internal class NativeChatState {
         clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         assistantBodySeenInPhase = false
         if (!turnTerminationBarrier.isTerminated(currentThreadId, currentTurnId)) {
             processingLabel = "\u6b63\u5728\u601d\u8003"
@@ -1235,6 +1289,7 @@ internal class NativeChatState {
         clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         assistantBodySeenInPhase = false
         phaseStartedAt = System.currentTimeMillis()
         phaseMessageStartIndex = messages.size
@@ -1502,6 +1557,7 @@ internal class NativeChatState {
         clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         assistantBodySeenInPhase = true
         phaseStartedAt = System.currentTimeMillis()
         phaseMessageStartIndex = messages.size
@@ -1810,6 +1866,7 @@ internal class NativeChatState {
         clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         val tools = payload.optJSONArray("tools") ?: JSONArray()
         for (index in 0 until tools.length()) {
             val item = tools.optJSONObject(index)
@@ -1855,6 +1912,7 @@ internal class NativeChatState {
                 }
                 "collabagenttoolcall", "subagentactivity", "subagent", "subagenttoolcall" -> {
                     liveSubagents.add(item.toString())
+                    subagentDataRevision++
                     activityReducer.accept(
                         NativeProtocolEvent.SubagentUpdated(
                             currentThreadId,
@@ -2084,6 +2142,7 @@ internal class NativeChatState {
             existing
         } else incoming
         if (index >= 0) liveSubagents[index] = merged.toString() else liveSubagents.add(merged.toString())
+        subagentDataRevision++
         val thread = subagentAliases(merged).firstOrNull { it.matches(SUBAGENT_THREAD_ID_REGEX) }
             ?: merged.optString("agentThreadId", "").takeUnless { it.equals("null", true) }.orEmpty()
         val status = normalizedSubagentStatus(merged.optString("status", ""))
@@ -2111,6 +2170,7 @@ internal class NativeChatState {
         clearLiveCommandBuffers()
         toolDetails.clear()
         liveSubagents.clear()
+        subagentDataRevision++
         assistantBodySeenInPhase = false
         phaseMessageStartIndex = messages.size
         // A turn can contain commentary, a proposed plan and a final answer. Close every

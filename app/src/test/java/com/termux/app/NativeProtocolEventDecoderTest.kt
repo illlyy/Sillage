@@ -58,6 +58,32 @@ class NativeProtocolEventDecoderTest {
     }
 
     @Test
+    fun blankReasoningAndPlanDeltasAreDropped() {
+        val events = NativeProtocolEventDecoder.decodeDeltas(
+            """
+            {"kind":"reasoningDelta","threadId":"t","turnId":"u","itemId":"r","sequence":1,"delta":""}
+            {"kind":"planDelta","threadId":"t","turnId":"u","itemId":"p","sequence":2}
+            {"kind":"assistantDelta","threadId":"t","turnId":"u","itemId":"a","sequence":3,"delta":""}
+            {"kind":"assistantDelta","threadId":"t","turnId":"u","itemId":"b","sequence":4,"delta":"hi"}
+            """.trimIndent(),
+        )
+        // Blank assistantDelta survives: older app-server uses it as item/started.
+        assertEquals(listOf("a", "b"), events.map { it.itemId })
+    }
+
+    @Test
+    fun blankCommandOutputWithoutRefIsDropped() {
+        val dropped = NativeProtocolEventDecoder.decodeCommandOutputs(
+            """{"kind":"commandOutput","threadId":"t","turnId":"u","itemId":"c","sequence":1,"delta":""}""",
+        )
+        assertTrue(dropped.isEmpty())
+        val kept = NativeProtocolEventDecoder.decodeCommandOutputs(
+            """{"kind":"commandOutput","threadId":"t","turnId":"u","itemId":"c","sequence":1,"delta":"","outputRef":"large-payload-ref"}""",
+        )
+        assertEquals(1, kept.size)
+    }
+
+    @Test
     fun tokenUsageKeepsServerThresholdAndReliability() {
         val event = NativeProtocolEventDecoder.decodeLifecycle(
             """

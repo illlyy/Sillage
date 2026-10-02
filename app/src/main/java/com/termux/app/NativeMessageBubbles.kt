@@ -1145,6 +1145,26 @@ internal fun StableLiveTextChunk(text: String, reasoning: Boolean) {
     )
 }
 
+private val TAIL_FADE_LTR_STOPS = arrayOf(
+    0f to Color.Transparent,
+    0.42f to Color.Black.copy(alpha = 0.08f),
+    0.68f to Color.Black.copy(alpha = 0.38f),
+    1f to Color.Black,
+)
+
+private val TAIL_FADE_RTL_STOPS = arrayOf(
+    0f to Color.Black,
+    0.32f to Color.Black.copy(alpha = 0.38f),
+    0.58f to Color.Black.copy(alpha = 0.08f),
+    1f to Color.Transparent,
+)
+
+private val TAIL_FADE_VERTICAL_STOPS = arrayOf(
+    0f to Color.Black.copy(alpha = 0.42f),
+    0.48f to Color.Black.copy(alpha = 0.82f),
+    1f to Color.Black,
+)
+
 @Composable
 internal fun FadingTailText(text: String, tailStart: Int, generation: Int, reasoning: Boolean) {
     if (!LocalStreamAnimationsEnabled.current || LocalInteractiveScrollInProgress.current) {
@@ -1216,12 +1236,7 @@ internal fun FadingTailText(text: String, tailStart: Int, generation: Int, reaso
                         )
                         drawRect(
                             brush = Brush.horizontalGradient(
-                                colorStops = arrayOf(
-                                    0f to Color.Transparent,
-                                    0.42f to Color.Black.copy(alpha = 0.08f),
-                                    0.68f to Color.Black.copy(alpha = 0.38f),
-                                    1f to Color.Black,
-                                ),
+                                colorStops = TAIL_FADE_LTR_STOPS,
                                 startX = featherStart,
                                 endX = featherEnd,
                             ),
@@ -1238,12 +1253,7 @@ internal fun FadingTailText(text: String, tailStart: Int, generation: Int, reaso
                         )
                         drawRect(
                             brush = Brush.horizontalGradient(
-                                colorStops = arrayOf(
-                                    0f to Color.Black,
-                                    0.32f to Color.Black.copy(alpha = 0.38f),
-                                    0.58f to Color.Black.copy(alpha = 0.08f),
-                                    1f to Color.Transparent,
-                                ),
+                                colorStops = TAIL_FADE_RTL_STOPS,
                                 startX = featherStart,
                                 endX = featherEnd,
                             ),
@@ -1256,11 +1266,7 @@ internal fun FadingTailText(text: String, tailStart: Int, generation: Int, reaso
                         val fadeHeight = verticalFeather.coerceAtMost(size.height - lineBottom)
                         if (fadeHeight > 0f) drawRect(
                             brush = Brush.verticalGradient(
-                                colorStops = arrayOf(
-                                    0f to Color.Black.copy(alpha = 0.42f),
-                                    0.48f to Color.Black.copy(alpha = 0.82f),
-                                    1f to Color.Black,
-                                ),
+                                colorStops = TAIL_FADE_VERTICAL_STOPS,
                                 startY = lineBottom,
                                 endY = lineBottom + fadeHeight,
                             ),
@@ -1350,10 +1356,10 @@ internal fun ActiveProcessingPanel(
     onAutomaticCollapse: () -> Unit,
 ) {
     val openSubagentDrawer = LocalOpenSubagentDrawer.current
-    val messageSnapshot = state.messages.toList()
-    val liveSubagentSnapshot = state.liveSubagents.toList()
-    val subagentCandidates = remember(messageSnapshot, liveSubagentSnapshot) {
-        collectAllSubagentItems(messageSnapshot, liveSubagentSnapshot)
+    // Subagent candidates only depend on live subagent data (liveSubagents + sealed PROCESS2
+    // rows); streaming text deltas must not re-collect the whole conversation per batch.
+    val subagentCandidates = remember(state.subagentDataRevision) {
+        collectAllSubagentItems(state.messages.toList(), state.liveSubagents.toList())
     }
     // Normalized protocol events own the live group. The compatibility adapter covers the tiny
     // interval (or an old callback) before that event is reduced, while still producing the same
@@ -1435,10 +1441,12 @@ internal fun ReasoningCapsuleExpand(visible: Boolean, content: @Composable () ->
 }
 
 @Composable
-internal fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
+internal fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?, retrying: Boolean = isRetryingErrorMessage(text)) {
     val language = LocalNativeLanguage.current
     val displayText = remember(text) { NativeUiRenderSafety.errorSummary(text) }
-    val retrying = text.startsWith("正在重试") || text.startsWith("目标自动重试")
+    val truncated = displayText.length < text.trim().length
+    var expanded by androidx.compose.runtime.remember(text) { androidx.compose.runtime.mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
     Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.errorContainer) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1452,11 +1460,25 @@ internal fun RikkaErrorMessage(text: String, onRetry: (() -> Unit)?) {
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            Spacer(Modifier.height(4.dp)); SelectionContainer { Text(displayText, style = MaterialTheme.typography.bodySmall) }
-            if (!retrying && onRetry != null) TextButton(onClick = onRetry, modifier = Modifier.align(Alignment.End)) {
-                Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text(nativeText(language, "\u91cd\u8bd5", "Retry"))
+            Spacer(Modifier.height(4.dp)); SelectionContainer { Text(if (expanded) text.trim() else displayText, style = MaterialTheme.typography.bodySmall) }
+            Row(modifier = Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+                if (truncated) TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) nativeText(language, "\u6536\u8d77", "Collapse") else nativeText(language, "\u5c55\u5f00\u5168\u6587", "Show full"))
+                }
+                TextButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(text.trim())) }) {
+                    Icon(HugeIcons.Copy01, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text(nativeText(language, "\u590d\u5236", "Copy"))
+                }
+                if (!retrying && onRetry != null) TextButton(onClick = onRetry, modifier = Modifier.align(Alignment.CenterVertically)) {
+                    Icon(HugeIcons.Refresh03, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text(nativeText(language, "\u91cd\u8bd5", "Retry"))
+                }
             }
         }
     }
+}
+
+/** Explicit retry-state predicate so callers need not string-match UI copy. */
+internal fun isRetryingErrorMessage(text: String): Boolean {
+    val trimmed = text.trimStart()
+    return trimmed.startsWith("正在重试") || trimmed.startsWith("目标自动重试") || trimmed.startsWith("Retrying")
 }
 

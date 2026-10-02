@@ -527,8 +527,8 @@ internal fun NativeChatScreen(
     val conversationTopContentPadding = 16.dp + if (progressiveTopBar) topBarContentPadding else 0.dp
     val inputBottomPadding = with(density) { inputHeightPx.toDp() } + navigationBarBottomPadding + 8.dp
     val floatingInsetModifier = if (imeVisible) Modifier.imePadding() else Modifier
-    val showScrollToBottom by remember(listState) { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
-    val canExportConversation by remember(state.messages) {
+    val showScrollToBottom by remember { derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward } }
+    val canExportConversation by remember {
         derivedStateOf { state.messages.any { it.role == NativeChatRole.USER || it.role == NativeChatRole.ASSISTANT } }
     }
     var showModelPicker by remember { mutableStateOf(false) }

@@ -11,6 +11,7 @@ object NativeApprovalProtocol {
         "item/permissions/requestApproval",
         "execCommandApproval",
         "applyPatchApproval",
+        "toolApproval",
     )
 
     @JvmStatic

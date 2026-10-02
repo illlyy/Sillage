@@ -219,6 +219,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
     /** Claude-only: a model-picker switch requested mid-turn; applied when the turn completes. */
     internal var pendingClaudeModelSwitch = ""
 
+    /** Claude-only: an effort-picker switch requested mid-turn; applied when the turn completes. */
+    internal var pendingClaudeEffortSwitch = ""
+
     internal var runtimeStartAttempted = false
 
     internal var pendingCachedHistoryThreadId: String? = null
@@ -958,6 +961,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 stopFrameDiagnostics()
                 applyPendingProviderConfiguration()
                 applyPendingClaudeModelSwitch()
+                applyPendingClaudeEffortSwitch()
             }
             "onLog" -> Unit
         }
@@ -1048,6 +1052,7 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         refreshConversations()
         if (!hasPendingContinuation) applyPendingProviderConfiguration()
         if (!hasPendingContinuation) applyPendingClaudeModelSwitch()
+        if (!hasPendingContinuation) applyPendingClaudeEffortSwitch()
         val hasQueuedFollowUp = chatState.queuedFollowUps.isNotEmpty()
         if (hasQueuedFollowUp) {
             // Keep the completion barrier observable for one frame, then start exactly one
@@ -1186,7 +1191,10 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
 
     private fun persistLifecycleHandoffBeforeDetach() {
         val threadId = currentThreadId?.takeIf { it.isNotBlank() } ?: return
-        if (!CodexNativeRuntime.exists() || Looper.myLooper() != Looper.getMainLooper()) return
+        // Either backend runtime keeps the turn alive across rotation; the handoff must be
+        // persisted for both. Checking only the Codex singleton silently dropped the live
+        // tail on every Claude-backend rotation.
+        if ((!CodexNativeRuntime.exists() && !ClaudeNativeRuntime.exists()) || Looper.myLooper() != Looper.getMainLooper()) return
         drainPendingNativeUiEvents()
         val handoff = chatState.lifecycleHandoffSnapshot()
         if (handoff.threadId != threadId) return

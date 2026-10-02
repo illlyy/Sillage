@@ -49,8 +49,10 @@ internal object ClaudeSettingsWriter {
      * Builds the sorted env block for a profile (tier fields fall back to the primary model).
      * [modelOverride] carries the chat model picker's runtime selection and, when set, wins over
      * both the profile primary and any `ANTHROPIC_MODEL` the user placed in [ClaudeProfile.extraEnv].
+     * [effortOverride] carries the composer's effort picker; blank or "none" keeps the profile
+     * default (max effort toggle), any concrete level wins over it.
      */
-    fun buildEnv(profile: ClaudeProfile, baseUrlOverride: String? = null, modelOverride: String? = null): Map<String, String> {
+    fun buildEnv(profile: ClaudeProfile, baseUrlOverride: String? = null, modelOverride: String? = null, effortOverride: String? = null): Map<String, String> {
         val env = TreeMap<String, String>()
         val primary = profile.model.ifBlank { ClaudeProfile.DEFAULT_MODEL }
         if (profile.apiKey.isNotBlank()) env[profile.apiKeyField] = profile.apiKey
@@ -83,6 +85,9 @@ internal object ClaudeSettingsWriter {
         }
         // Runtime chat selection is applied last so it is authoritative for ANTHROPIC_MODEL.
         modelOverride?.takeIf { it.isNotBlank() }?.let { env[ENV_MODEL] = it }
+        // Runtime effort picker overrides the profile max-effort toggle ("max") when a concrete
+        // level is chosen; "none" means keep the profile default.
+        effortOverride?.takeIf { it.isNotBlank() && it != "none" }?.let { env[ENV_MAX_EFFORT] = it }
         return env
     }
 
@@ -91,9 +96,9 @@ internal object ClaudeSettingsWriter {
      * keys from [ClaudeProfile.extraSettingsJson] and [ClaudeProfile.includeCoAuthoredBy].
      * Never throws — invalid custom JSON is skipped defensively so spawn cannot crash.
      */
-    fun buildSettingsJson(profile: ClaudeProfile, baseUrlOverride: String? = null, modelOverride: String? = null): String {
+    fun buildSettingsJson(profile: ClaudeProfile, baseUrlOverride: String? = null, modelOverride: String? = null, effortOverride: String? = null): String {
         val env = JSONObject()
-        buildEnv(profile, baseUrlOverride, modelOverride).forEach { (key, value) -> env.put(key, value) }
+        buildEnv(profile, baseUrlOverride, modelOverride, effortOverride).forEach { (key, value) -> env.put(key, value) }
         val root = JSONObject().put("env", env)
         parseCustomSettings(profile.extraSettingsJson)?.let { custom ->
             custom.keys().forEach { key ->
@@ -111,7 +116,7 @@ internal object ClaudeSettingsWriter {
      * Atomically writes the settings file for the active profile. Returns the written file,
      * or null when the profile is blank (nothing to write).
      */
-    fun write(configDir: File, profile: ClaudeProfile?, baseUrlOverride: String? = null, modelOverride: String? = null): File? {
+    fun write(configDir: File, profile: ClaudeProfile?, baseUrlOverride: String? = null, modelOverride: String? = null, effortOverride: String? = null): File? {
         val settingsFile = File(configDir, "settings.json")
         if (profile == null || profile.apiKey.isBlank()) {
             if (settingsFile.exists()) settingsFile.delete()
@@ -119,7 +124,7 @@ internal object ClaudeSettingsWriter {
         }
         if (!configDir.isDirectory && !configDir.mkdirs()) return null
         val temp = File(configDir, "settings.json.tmp")
-        temp.writeText(buildSettingsJson(profile, baseUrlOverride, modelOverride), Charsets.UTF_8)
+        temp.writeText(buildSettingsJson(profile, baseUrlOverride, modelOverride, effortOverride), Charsets.UTF_8)
         if (!temp.renameTo(settingsFile)) {
             // rename may fail on some file systems; fall back to direct write
             settingsFile.writeText(temp.readText(Charsets.UTF_8), Charsets.UTF_8)

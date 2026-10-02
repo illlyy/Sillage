@@ -51,6 +51,7 @@ final class CodexTaskStore {
 
     static synchronized void markRunning(Context context, String threadId, String title) {
         if (threadId == null || threadId.isEmpty()) return;
+        FcodeLog.d("CodexTaskStore", "markRunning thread=" + shortId(threadId) + " title=" + cleanTitle(title, threadId));
         update(context, threadId, cleanTitle(title, threadId), RUNNING);
     }
 
@@ -64,6 +65,7 @@ final class CodexTaskStore {
 
     static synchronized void delete(Context context, String threadId) {
         if (threadId == null || threadId.isEmpty()) return;
+        FcodeLog.d("CodexTaskStore", "delete thread=" + shortId(threadId));
         List<Task> tasks = read(context);
         tasks.removeIf(task -> threadId.equals(task.threadId));
         write(context, tasks);
@@ -74,6 +76,9 @@ final class CodexTaskStore {
         if (threadId == null || threadId.isEmpty()) return;
         List<Task> tasks = read(context);
         Task previous = find(tasks, threadId);
+        FcodeLog.d("CodexTaskStore", "assignProject thread=" + shortId(threadId)
+            + " project=" + projectPath
+            + " previous=" + (previous == null ? "none" : (previous.projectAssignmentKnown ? previous.projectPath : "unknown")));
         String normalized = normalizeProjectPath(projectPath);
         String title = previous == null ? fallbackTitle(threadId) : previous.title;
         String state = previous == null ? RUNNING : previous.state;
@@ -192,5 +197,10 @@ final class CodexTaskStore {
         if (projectPath == null || projectPath.trim().isEmpty()) return "";
         try { return new File(projectPath.trim()).getCanonicalPath(); }
         catch (Exception ignored) { return new File(projectPath.trim()).getAbsolutePath(); }
+    }
+
+    private static String shortId(String threadId) {
+        if (threadId == null) return "null";
+        return threadId.length() <= 8 ? threadId : threadId.substring(0, 8);
     }
 }

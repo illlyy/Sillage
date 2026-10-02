@@ -98,6 +98,10 @@ internal object NativeWorkspaceSnapshotStore {
         NativeWorkspaceSnapshotCodec.decode(context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getString(key(threadId), "[]"))
 
     fun add(context: Context, item: NativeWorkspaceSnapshot): List<NativeWorkspaceSnapshot> {
+        // Reject blank id/commit so a broken caller cannot evict good snapshots via take(MAX).
+        if (item.id.isBlank() || item.commit.isBlank() || item.threadId.isBlank()) {
+            return load(context, item.threadId)
+        }
         val updated = (listOf(item) + load(context, item.threadId).filterNot { it.id == item.id }).take(MAX_ITEMS)
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit()
             .putString(key(item.threadId), NativeWorkspaceSnapshotCodec.encode(updated))

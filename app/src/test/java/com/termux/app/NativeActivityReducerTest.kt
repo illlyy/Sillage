@@ -219,4 +219,33 @@ class NativeActivityReducerTest {
         assertEquals(1, reducer.groups().size)
         assertEquals("thinking", reducer.groups().single().reasoning)
     }
+
+    @Test
+    fun lateFailedCompletionUpgradesSealedItems() {
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.CommandStarted("t", "turn", "c1", "one", sequence = 1))
+        reducer.accept(NativeProtocolEvent.TurnCompleted("t", "turn", sequence = 2))
+        assertEquals(NativeActivityItemStatus.COMPLETED, reducer.groups().single().commands.single().status)
+        // A duplicate completion reporting failure is authoritative: sealed items follow.
+        reducer.accept(NativeProtocolEvent.TurnCompleted("t", "turn", failed = true, sequence = 3))
+        assertEquals(NativeActivityItemStatus.FAILED, reducer.groups().single().commands.single().status)
+    }
+
+    @Test
+    fun anonymousSameTypeToolsDoNotOverwriteEachOther() {
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", type = "read", title = "a.txt", sequence = 0))
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", type = "read", title = "b.txt", sequence = 0))
+        val tools = reducer.groups().single().items.filter { it.type == NativeActivityItemType.TOOL }
+        assertEquals(2, tools.size)
+        assertEquals(setOf("a.txt", "b.txt"), tools.map { it.title }.toSet())
+    }
+
+    @Test
+    fun stoppedSubagentMapsToFailedLikeStateLayer() {
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.SubagentUpdated("t", "turn", agentThreadId = "agent-1", name = "Task", status = "stopped", sequence = 1))
+        val item = reducer.groups().single().items.single { it.type == NativeActivityItemType.SUBAGENT }
+        assertEquals(NativeActivityItemStatus.FAILED, item.status)
+    }
 }

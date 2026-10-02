@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Share paths for the log diagnostics page. The Termux home directory (xhome/) is deliberately
+     NOT exposed here: it contains ~/.codex/config.toml and ~/.claude/settings.json with secrets.
+     Home-dir files are copied line-by-line through the redactor inside the diagnostics zip. -->
+<paths>
+    <files-path name="fcode_logs" path="fcode-logs/" />
+    <files-path name="codex_diagnostics" path="codex-diagnostics/" />
+    <cache-path name="fcode_diag_cache" path="fcode-diagnostics/" />
+</paths>

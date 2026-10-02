@@ -101,6 +101,7 @@ import me.rerere.hugeicons.stroke.Settings03
 import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tick02
+import me.rerere.hugeicons.stroke.TransactionHistory
 
 
 private data class SettingsEnvironmentSnapshot(
@@ -137,6 +138,7 @@ internal fun SettingsRootPage(
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
     onDeveloper: () -> Unit,
+    onLogs: () -> Unit,
     environmentRevision: Int,
     prefs: SharedPreferences,
     onAbout: () -> Unit,
@@ -247,6 +249,14 @@ internal fun SettingsRootPage(
                     else -> tr(lang, "已关闭 · 配置手势、提醒与后台保持", "Off · configure gestures, reminders and keep-alive")
                 }
                 NavigationSettingsRow(HugeIcons.Sparkles, tr(lang, "悬浮窗与后台", "Floating window & background"), overlaySummary, onOverlay)
+            }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.TransactionHistory,
+                    tr(lang, "日志与诊断", "Logs & diagnostics"),
+                    tr(lang, "查看、分享或清空本地运行日志", "View, share or clear local runtime logs"),
+                    onLogs,
+                )
             }
             item {
                 NavigationSettingsRow(

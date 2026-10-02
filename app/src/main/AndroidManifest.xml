@@ -193,6 +193,18 @@
             android:grantUriPermissions="true"
             android:permission="${TERMUX_PACKAGE_NAME}.permission.RUN_COMMAND" />
 
+        <!-- Log/share provider for the Logs & diagnostics settings page (filesDir fcode-logs/,
+             codex-diagnostics/ and the cacheDir diagnostics zip only; never xhome/). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${TERMUX_PACKAGE_NAME}.logprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/log_file_paths" />
+        </provider>
+
         <receiver android:name=".app.TermuxOpenReceiver" android:exported="false" />
 
         <receiver android:name=".shared.activities.ReportActivity$ReportActivityBroadcastReceiver" android:exported="false" />

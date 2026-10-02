@@ -165,7 +165,19 @@ import org.json.JSONObject
     }
 
     internal fun CodexChatActivity.requestIdentity(raw: String): String = runCatching {
-        JSONObject(raw).opt("requestId")?.toString().orEmpty()
+        val root = JSONObject(raw)
+        // Codex wire shape: top-level "requestId". Claude decoder shape:
+        // {"params": {"requestId"/"toolUseId"}}. Prefer the stable tool_use id so
+        // CLI version drift cannot strand the WAITING latch.
+        root.opt("requestId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
+            ?: root.opt("toolUseId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
+            ?: root.opt("tool_use_id")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
+            ?: root.optJSONObject("params")?.let { params ->
+                params.opt("requestId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
+                    ?: params.opt("toolUseId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
+                    ?: params.opt("tool_use_id")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
+                    ?: ""
+            }.orEmpty()
     }.getOrDefault("")
 
     internal fun CodexChatActivity.storePendingUserInput(raw: String) {
@@ -205,11 +217,12 @@ import org.json.JSONObject
             val stored = getSharedPreferences("codex_mobile", MODE_PRIVATE)
                 .getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
             if (requestIdentity(stored) != requestId || System.currentTimeMillis() < deadline) return@postDelayed
-            bridge?.respondUserInput(stored, "{}")
-            clearPendingUserInput(threadId, requestId)
+            // Never auto-answer on behalf of the user: a "{}" injection could authorize a
+            // dangerous step the user never saw. Keep the WAITING latch and re-surface the
+            // pending question via notification so a backgrounded turn cannot silently proceed.
+            syncPendingNotification(threadId)
             if (currentThreadId == threadId && chatState.phase == NativeTurnPhase.WAITING) {
-                chatState.phase = NativeTurnPhase.TOOL_RUNNING
-                chatState.processingLabel = nativeText(nativeLanguage, "\u6b63\u5728\u7ee7\u7eed\u6267\u884c", "Continuing")
+                chatState.processingLabel = nativeText(nativeLanguage, "仍在等待你的回答", "Still waiting for your answer")
             }
         }, (deadline - System.currentTimeMillis()).coerceAtLeast(0L))
     }
@@ -294,6 +307,15 @@ import org.json.JSONObject
 
     internal fun CodexChatActivity.answerApproval(rawRequest: String, decision: String) {
         if (rawRequest.isBlank()) return
+        // Claude session memory: acceptForSession both allows now (control-response) and
+        // widens the next spawn via the remembered allow-list (fingerprint-gated).
+        if (decision == "acceptForSession") {
+            val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+            if (NativeBackendType.current(prefs) == NativeBackendType.CLAUDE && activeProfileId.isNotBlank()) {
+                val pattern = ClaudeAllowedToolsStore.extractPatternFromApprovalRaw(rawRequest)
+                if (pattern.isNotBlank()) ClaudeAllowedToolsStore.add(prefs, activeProfileId, pattern)
+            }
+        }
         bridge?.respondApprovalRequest(rawRequest, decision)
         approvalThreadId(rawRequest)?.let { clearPendingApproval(it, rawRequest) }
         if (chatState.phase == NativeTurnPhase.WAITING) {
@@ -306,6 +328,12 @@ import org.json.JSONObject
         val raw = chatState.pendingApprovalRequest
         if (raw.isNotBlank()) bridge?.respondApprovalRequest(raw, "cancel")
         approvalThreadId(raw)?.let { clearPendingApproval(it, raw) }
+        // Mirror answerApproval: the WAITING latch belongs to the answered request. Without this
+        // a cancelled turn that never sends turn/completed would park the phase forever.
+        if (chatState.phase == NativeTurnPhase.WAITING) {
+            chatState.phase = NativeTurnPhase.TOOL_RUNNING
+            chatState.processingLabel = nativeText(nativeLanguage, "正在继续执行", "Continuing")
+        }
     }
 
     internal fun CodexChatActivity.approvalThreadId(raw: String): String? = runCatching {

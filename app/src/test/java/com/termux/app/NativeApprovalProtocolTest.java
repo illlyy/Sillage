@@ -8,6 +8,12 @@ import org.junit.Test;
 
 public class NativeApprovalProtocolTest {
     @Test
+    public void recognizesToolApprovalAsApprovalMethod() {
+        assertTrue(NativeApprovalProtocol.isApprovalMethod("toolApproval"));
+        assertTrue(NativeApprovalProtocol.isApprovalMethod("execCommandApproval"));
+        assertTrue(NativeApprovalProtocol.isApprovalMethod("item/commandExecution/requestApproval"));
+    }
+    @Test
     public void mapsCurrentAndLegacyDecisions() throws Exception {
         assertEquals("acceptForSession", NativeApprovalProtocol.result(
             "item/commandExecution/requestApproval", null, "acceptForSession").getString("decision"));

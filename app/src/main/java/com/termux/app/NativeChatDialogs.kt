@@ -337,10 +337,21 @@ internal fun MessageSearchDialog(
 ) {
     var query by remember { mutableStateOf("") }
     val language = LocalNativeLanguage.current
-    val normalizedQuery = query.trim()
-    val results = if (normalizedQuery.isBlank()) emptyList() else messages.filter { message ->
-        message.role != NativeChatRole.ACTIVITY && message.content.contains(normalizedQuery, ignoreCase = true)
+    // Debounce the query so fast typing does not re-filter on every keystroke, and key
+    // results on message count (not the live list) so streaming deltas cannot re-trigger
+    // an O(n*m) scan dozens of times per second while the dialog is open.
+    var debouncedQuery by remember { mutableStateOf("") }
+    LaunchedEffect(query) {
+        kotlinx.coroutines.delay(200L)
+        debouncedQuery = query.trim()
     }
+    val messageCount = messages.size
+    val results = remember(debouncedQuery, messageCount) {
+        if (debouncedQuery.isBlank()) emptyList() else messages.filter { message ->
+            message.role != NativeChatRole.ACTIVITY && message.content.contains(debouncedQuery, ignoreCase = true)
+        }
+    }
+    val normalizedQuery = debouncedQuery
     FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(nativeText(language, "\u641c\u7d22\u5f53\u524d\u5bf9\u8bdd", "Search conversation")) },

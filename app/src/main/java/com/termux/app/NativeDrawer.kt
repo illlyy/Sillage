@@ -382,6 +382,12 @@ internal fun RikkaDrawerV2(
             }
         }
     }
+    remember(registeredProjects, drawerClassification) {
+        FcodeLog.d("NativeDrawer", "render registered=" + registeredProjects.size
+            + " visible=" + drawerClassification.visibleProjects.size
+            + " standalone=" + drawerClassification.standaloneTasks.size)
+        Unit
+    }
     val standaloneTasks = drawerClassification.standaloneTasks
     val tasksByProject = drawerClassification.tasksByProject
     val openTask: (NativeConversation) -> Unit = remember(context, onResumeConversation) {
@@ -1040,7 +1046,12 @@ internal fun ConversationSearchDialog(
     var searching by remember { mutableStateOf(false) }
     var searchProgress by remember { mutableStateOf(0 to 0) }
     val language = LocalNativeLanguage.current
-    val titleResults = conversations.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+    val titleResults = remember(query, conversations) {
+        conversations.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+    }
+    val fullTextConversations = remember(conversations) {
+        conversations.associateBy { it.threadId }
+    }
     val engine = remember(sessionsRoot) {
         NativeConversationSearchEngine(sessionsRoot = { sessionsRoot })
     }
@@ -1127,7 +1138,7 @@ internal fun ConversationSearchDialog(
                         }
                     } else {
                         items(fullTextHits.distinctBy { it.threadId }, key = { it.threadId + it.lineNumber }) { hit ->
-                            val conversation = conversations.firstOrNull { it.threadId == hit.threadId }
+                            val conversation = fullTextConversations[hit.threadId]
                             NavigationDrawerItem(
                                 label = {
                                     Column {

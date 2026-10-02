@@ -381,6 +381,7 @@ internal class ClaudeEventDecoder(
             }
             "ExitPlanMode" -> {
                 val plan = input.optString("plan")
+                if (plan.isBlank()) return
                 emit("onPlanStarted", JSONObject().put("id", id).toString())
                 emit("onPlanDelta", JSONObject()
                     .put("itemId", id)

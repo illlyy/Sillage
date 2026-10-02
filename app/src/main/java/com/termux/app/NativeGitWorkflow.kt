@@ -10,15 +10,37 @@ internal object NativeGitWorkflow {
         if (trimmed.length < 2 || !trimmed.startsWith('"') || !trimmed.endsWith('"')) return trimmed
         val source = trimmed.substring(1, trimmed.length - 1)
         val result = StringBuilder()
+        val octalBytes = java.io.ByteArrayOutputStream()
+        fun flushOctal() {
+            if (octalBytes.size() > 0) {
+                result.append(octalBytes.toByteArray().toString(Charsets.UTF_8))
+                octalBytes.reset()
+            }
+        }
         var index = 0
         while (index < source.length) {
             val char = source[index]
             if (char != '\\' || index + 1 >= source.length) {
+                flushOctal()
                 result.append(char)
                 index++
                 continue
             }
-            val escaped = source[index + 1]
+            val next = source[index + 1]
+            // Git quotes non-ASCII paths as octal UTF-8 bytes: "\303\244" -> ä.
+            if (next in '0'..'7' && index + 3 < source.length + 1) {
+                var end = index + 1
+                while (end < source.length && end < index + 4 && source[end] in '0'..'7') end++
+                val octal = source.substring(index + 1, end)
+                val byte = runCatching { octal.toInt(8) }.getOrNull()
+                if (byte != null && byte in 0..255) {
+                    octalBytes.write(byte)
+                    index = end
+                    continue
+                }
+            }
+            flushOctal()
+            val escaped = next
             result.append(when (escaped) {
                 'n' -> '\n'
                 'r' -> '\r'
@@ -27,6 +49,7 @@ internal object NativeGitWorkflow {
             })
             index += 2
         }
+        flushOctal()
         return result.toString()
     }
 
@@ -87,6 +110,7 @@ internal object NativeGitWorkflow {
             val unstaged = worktreeStatus != ' ' || (indexStatus == '?' && worktreeStatus == '?')
             val statusChars = "$indexStatus$worktreeStatus"
             val operation = when {
+                'U' in statusChars || statusChars in setOf("AA", "DD", "AU", "UA", "DU", "UD") -> "conflict"
                 'D' in statusChars -> "delete"
                 'A' in statusChars || statusChars == "??" -> "add"
                 'R' in statusChars -> "rename"

@@ -152,25 +152,123 @@ final class CodexAppServerBridgeProtocol {
         config.put("mcp_servers", servers);
     }
 
-    static void purgeStaleAgentsMaxThreads(File configFile) {
-        try {
-            if (!configFile.isFile()) return;
-            java.util.List<String> result = new java.util.ArrayList<>();
-            boolean removed = false;
-            try (java.io.BufferedReader reader = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(new java.io.FileInputStream(configFile), java.nio.charset.StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.trim().startsWith("max_threads")) { removed = true; continue; }
-                    result.add(line);
+    /** Agent-related config.toml keys this app writes, and the stale one it must be able to spot. */
+    private static final java.util.Set<String> AGENT_CONFIG_KEYS =
+        new java.util.HashSet<>(java.util.Arrays.asList(
+            "enabled", "max_concurrent_threads_per_session", "hide_spawn_agent_metadata",
+            "min_wait_timeout_ms", "default_wait_timeout_ms", "max_wait_timeout_ms",
+            "root_agent_usage_hint_text", "subagent_usage_hint_text", "max_threads"));
+
+    /**
+     * Compact, sorted summary of the agent-related keys in a config.toml, e.g.
+     * {@code features.multi_agent_v2.enabled=true,features.multi_agent_v2.hide_spawn_agent_metadata=false}.
+     *
+     * config.toml is a single global file rewritten by the Termux/WebUI path, so a key written
+     * while one profile was active keeps applying to every later session — including sessions on
+     * models that reject a non-canonical spawn_agent schema. This summary is how such a leftover
+     * is spotted from an exported log. Hint texts are prompt text, so only their presence is
+     * recorded. Pure so it is unit-testable.
+     */
+    static String agentConfigKeySummary(File configFile) {
+        if (configFile == null || !configFile.isFile()) return "absent";
+        java.util.TreeSet<String> entries = new java.util.TreeSet<>();
+        String section = "";
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                new java.io.FileInputStream(configFile), java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                    section = trimmed.substring(1, trimmed.length() - 1).trim();
+                    continue;
                 }
-            }
-            if (removed) {
-                try (java.io.FileOutputStream output = new java.io.FileOutputStream(configFile)) {
-                    for (String line : result) output.write((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                }
+                int equals = trimmed.indexOf('=');
+                if (equals <= 0) continue;
+                String key = trimmed.substring(0, equals).trim();
+                if (!AGENT_CONFIG_KEYS.contains(key)) continue;
+                String value = trimmed.substring(equals + 1).trim();
+                if (key.endsWith("_hint_text")) value = "set";
+                else if (value.length() > 24) value = value.substring(0, 24);
+                entries.add((section.isEmpty() ? key : section + "." + key) + "=" + value);
             }
         } catch (Exception ignored) {
+            return "unreadable";
+        }
+        return entries.isEmpty() ? "none" : String.join(",", entries);
+    }
+
+    /**
+     * Keys under {@code [features.multi_agent_v2]} that only the custom-model stability block
+     * writes (see {@code CodexProviderStore.Profile.appendAgentConfig}). They reshape the
+     * spawn_agent tool schema and its wait timeouts to suit weaker third-party models.
+     */
+    private static final java.util.Set<String> STABILITY_ONLY_KEYS =
+        new java.util.HashSet<>(java.util.Arrays.asList(
+            "hide_spawn_agent_metadata", "min_wait_timeout_ms", "default_wait_timeout_ms",
+            "max_wait_timeout_ms", "root_agent_usage_hint_text", "subagent_usage_hint_text"));
+
+    /**
+     * Strips agent keys this launch is not asking for; returns the content to write, or null when
+     * nothing changed. Pure so the purge rule is unit-testable.
+     *
+     * config.toml is global and only the WebUI path rewrites it, so the stability block written
+     * while a custom-model profile was active keeps applying after a switch to an official model.
+     * An upstream that reserves {@code collaboration.spawn_agent} rejects the entire request when
+     * the tool schema deviates from its canonical shape, and the message never says which field is
+     * at fault. Purging beats overriding: Codex then applies its own defaults rather than a value
+     * this app would have to guess.
+     *
+     * {@code max_threads} goes unconditionally — official Codex rejects it whenever multi_agent_v2
+     * is enabled, and {@link #agentConfigOverrides} supplies it on the command line when it is
+     * wanted. It is matched in any section because earlier builds wrote it in more than one.
+     */
+    static String purgeStaleAgentConfig(String source, boolean keepStabilityBlock) {
+        if (source == null || source.isEmpty()) return null;
+        StringBuilder result = new StringBuilder();
+        boolean removed = false;
+        String section = "";
+        for (String line : source.split("\n", -1)) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                section = trimmed.substring(1, trimmed.length() - 1).trim();
+            } else if (trimmed.startsWith("max_threads")) {
+                removed = true;
+                continue;
+            } else if (!keepStabilityBlock && "features.multi_agent_v2".equals(section)) {
+                int equals = trimmed.indexOf('=');
+                if (equals > 0 && STABILITY_ONLY_KEYS.contains(trimmed.substring(0, equals).trim())) {
+                    removed = true;
+                    continue;
+                }
+            }
+            if (result.length() > 0) result.append('\n');
+            result.append(line);
+        }
+        return removed ? result.toString() : null;
+    }
+
+    /** Applies {@link #purgeStaleAgentConfig} in place; true when the file was rewritten. */
+    static boolean purgeStaleAgentConfig(File configFile, boolean keepStabilityBlock) {
+        try {
+            if (!configFile.isFile()) return false;
+            StringBuilder source = new StringBuilder();
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(configFile),
+                        java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (source.length() > 0) source.append('\n');
+                    source.append(line);
+                }
+            }
+            String purged = purgeStaleAgentConfig(source.toString(), keepStabilityBlock);
+            if (purged == null) return false;
+            try (java.io.FileOutputStream output = new java.io.FileOutputStream(configFile)) {
+                output.write(purged.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            return true;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 

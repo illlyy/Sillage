@@ -97,7 +97,6 @@ import org.json.JSONObject;
 public final class CodexHomeActivity extends Activity {
     static final String ACTION_OPEN_WEBUI = "com.ilyop.codex.OPEN_WEBUI";
     static final String ACTION_OPEN_TERMUX = "com.ilyop.codex.OPEN_TERMUX";
-    static final String ACTION_OPEN_SETTINGS = "com.ilyop.codex.OPEN_SETTINGS";
     static final String EXTRA_RETURN_TO_NATIVE = "com.ilyop.codex.RETURN_TO_NATIVE";
     private static final String STATE_RETURN_TO_NATIVE = "return_to_native_after_external_tool";
     private static final String STATE_FINISH_AFTER_TERMINAL = "finish_after_external_terminal";
@@ -333,8 +332,6 @@ public final class CodexHomeActivity extends Activity {
             startWebUi();
         } else if (ACTION_OPEN_TERMUX.equals(action)) {
             openInternalTerminal();
-        } else if (ACTION_OPEN_SETTINGS.equals(action)) {
-            showSettings();
         } else if (CodexShareActivity.ACTION_SHARE_TO_CURRENT_UI.equals(action)
             || CodexShareActivity.ACTION_SHARE_TO_NEW_UI.equals(action)) {
             startWebUi();
@@ -4812,6 +4809,7 @@ public final class CodexHomeActivity extends Activity {
         try {
             if (terminalApiProxy != null) terminalApiProxy.stop();
             LocalApiProxy local = new LocalApiProxy(url, activeApiFormat(), route, mihomoManager.mixedPort(), shouldForwardReasoningContext(), activeUltraTransportEfforts(), activePreventRecursiveSubagents());
+            local.setDiagnosticsContext(getApplicationContext());
             terminalApiProxy = local;
             int port = local.start();
             writeTerminalProxyConfig(port, key, selectedModel, activeApiFormat());

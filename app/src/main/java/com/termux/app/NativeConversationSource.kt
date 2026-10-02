@@ -54,6 +54,9 @@ internal object CodexConversationSource : NativeConversationSource {
                 .toList()
             val resolvedProjects = if (missingProjectIds.isEmpty()) emptyMap()
                 else CodexAppServerBridge.resolveConversationProjects(missingProjectIds)
+            var resolvedCount = 0
+            var assignedCount = 0
+            var mismatchCount = 0
             snapshot.asSequence().filterNot { it.projectAssignmentKnown }.forEach { task ->
                 val migration = resolveNativeConversationProjectMigration(
                     cachedResolvedPath = activity.conversationProjectCache[task.threadId],
@@ -61,10 +64,18 @@ internal object CodexConversationSource : NativeConversationSource {
                     registeredProjectPaths = registeredProjectPaths,
                 )
                 migration.resolvedPath?.let { activity.conversationProjectCache[task.threadId] = it }
+                if (migration.resolvedPath != null) resolvedCount++
                 migration.registeredProjectPath?.let { project ->
                     CodexTaskStore.assignProject(activity, task.threadId, project)
+                    assignedCount++
                 }
+                if (migration.resolvedPath != null && migration.registeredProjectPath == null) mismatchCount++
             }
+            FcodeLog.d("NativeConversationSource", "refresh missing=" + missingProjectIds.size
+                + " resolved=" + resolvedCount
+                + " assigned=" + assignedCount
+                + " registeredPaths=" + registeredProjectPaths.size
+                + " mismatch=" + mismatchCount)
             val enriched = snapshot.mapNotNull { task ->
                 var title = activity.conversationTitleCache[task.threadId] ?: task.title
                 val fallbackTitle = title.startsWith("Codex 任务")

@@ -18,8 +18,13 @@ import java.util.Locale
 import java.util.zip.GZIPInputStream
 
 /**
- * Downloads and installs the official Claude Code CLI (musl arm64 static binary) into the
- * app-private Termux bin directory, mirroring CodexInstaller's GitHub Releases flow.
+ * Installs the official Claude Code CLI into the app-private Termux prefix.
+ *
+ * Two distributions, picked by what the device has: with Node.js present the CLI is installed from
+ * npm and run as a JS entry through Node; without it the official musl arm64 binary is downloaded
+ * from GitHub Releases (SHA-256 checked), mirroring CodexInstaller's flow. Node is strongly
+ * preferred — the official binary is Bun-based and Android's seccomp filter blocks a syscall it
+ * needs during startup (exit 159).
  */
 internal object ClaudeInstaller {
     private const val TAG = "ClaudeInstaller"
@@ -30,6 +35,25 @@ internal object ClaudeInstaller {
 
     const val BINARY_NAME = "claude"
 
+    /** npm package carrying the Node.js distribution of the CLI. */
+    const val NPM_PACKAGE = "@anthropic-ai/claude-code"
+
+    /**
+     * Preferred npm spec — the newest published release. Anthropic's 2.1.x line puts a native
+     * launcher at `bin/claude` whose platform optionalDependencies omit Android, so an install is
+     * only usable when the package still carries a plain JS entry that Node can execute directly.
+     * [installViaNpm] verifies that after installing and retries with [FALLBACK_NPM_SPEC] when the
+     * newest release leaves nothing runnable behind, so the device is never left with a stub.
+     */
+    private const val PREFERRED_NPM_SPEC = "$NPM_PACKAGE@latest"
+
+    /**
+     * Last release shipping a plain `cli.js` (a ~14 MB bundle with a `node` shebang); 2.1.113
+     * switched `bin.claude` to `bin/claude.exe` and moved the CLI into per-platform packages.
+     * The safety net when the newest release leaves no Node-runnable entry behind.
+     */
+    private const val FALLBACK_NPM_SPEC = "$NPM_PACKAGE@2.1.112"
+
     interface Progress {
         fun onStage(stage: String, detail: String)
         fun onDownloadProgress(downloaded: Long, total: Long, percent: Int)
@@ -38,16 +62,135 @@ internal object ClaudeInstaller {
 
     fun installUrl(): String = RELEASE_BASE + VERSION + "/" + ARCHIVE
 
-    fun isInstalled(): Boolean =
-        File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME).canExecute()
+    /** Directory npm uses for the global package install. */
+    fun packageDir(): File =
+        File(TermuxConstants.TERMUX_LIB_PREFIX_DIR_PATH, "node_modules/$NPM_PACKAGE")
 
-    /** Removes the Claude CLI binary (keeps profiles and transcripts). */
+    private fun binEntry(): File = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
+
+    /** The JS file Node should execute, or null when no Node-runnable install exists. */
+    fun nodeEntry(): File? = resolveNodeEntry(packageDir(), binEntry())
+
+    /**
+     * Resolves the Node entry of an npm install, newest packaging first:
+     * 1. `cli.js` in the package root — the bundled CLI in every JS-entry release.
+     * 2. Whatever `package.json` declares (`bin.claude` / `bin` string / `main`), for releases
+     *    that rename or move the bundle.
+     * 3. `bin/claude` itself when it is a shebang script — an older 2.0.x install, where npm
+     *    linked the JS entry directly into `bin`.
+     *
+     * A native-launcher release matches none of these, which is exactly how the installer tells a
+     * usable install from a stub. Takes both paths as parameters so it is unit-testable off-device.
+     */
+    fun resolveNodeEntry(packageDir: File, binEntry: File): File? {
+        val cli = File(packageDir, "cli.js")
+        if (cli.isFile) return cli
+        val declared = declaredEntry(packageDir)
+        if (declared != null) return declared
+        if (ClaudeAgentBridge.isNodeScript(binEntry)) return binEntry
+        return null
+    }
+
+    /** Extensions Node loads as a script. */
+    private val NODE_SCRIPT_EXTENSIONS = setOf("js", "cjs", "mjs")
+
+    /**
+     * True when Node can execute [file]: a JS extension, or a `node` shebang for the extensionless
+     * entries some packages declare.
+     *
+     * Existence alone is not enough. Since 2.1.113 the manifest declares
+     * `bin.claude = "bin/claude.exe"`, and that Windows launcher ships in the tarball on *every*
+     * platform, so an existence check accepts it and every launch then dies with
+     * `ERR_UNKNOWN_FILE_EXTENSION`. Worse, it makes [resolveNodeEntry] return non-null, which
+     * silently defeats the [FALLBACK_NPM_SPEC] retry in [installViaNpm].
+     */
+    private fun isNodeRunnable(file: File): Boolean =
+        file.isFile && (file.extension.lowercase() in NODE_SCRIPT_EXTENSIONS
+            || ClaudeAgentBridge.isNodeScript(file))
+
+    /** `bin.claude` / `bin` / `main` from package.json, resolved inside [packageDir]. */
+    private fun declaredEntry(packageDir: File): File? {
+        val manifest = File(packageDir, "package.json")
+        if (!manifest.isFile) return null
+        val json = runCatching { org.json.JSONObject(manifest.readText(Charsets.UTF_8)) }.getOrNull() ?: return null
+        val candidates = ArrayList<String>(3)
+        when (val bin = json.opt("bin")) {
+            is org.json.JSONObject -> {
+                bin.optString(BINARY_NAME).takeIf { it.isNotBlank() }?.let(candidates::add)
+                // A single-binary package may name the key after the package instead of the command.
+                bin.keys().forEach { key -> bin.optString(key).takeIf { it.isNotBlank() }?.let(candidates::add) }
+            }
+            is String -> if (bin.isNotBlank()) candidates.add(bin)
+        }
+        json.optString("main").takeIf { it.isNotBlank() }?.let(candidates::add)
+        for (candidate in candidates) {
+            val resolved = runCatching { File(packageDir, candidate).canonicalFile }.getOrNull() ?: continue
+            // Never follow a manifest outside its own package directory.
+            val root = runCatching { packageDir.canonicalFile }.getOrNull() ?: continue
+            if (!resolved.path.startsWith(root.path)) continue
+            if (isNodeRunnable(resolved)) return resolved
+        }
+        return null
+    }
+
+    /** Installed npm package version, for diagnostics; empty when it cannot be read. */
+    fun installedVersion(): String {
+        val manifest = File(packageDir(), "package.json")
+        if (!manifest.isFile) return ""
+        return runCatching {
+            org.json.JSONObject(manifest.readText(Charsets.UTF_8)).optString("version")
+        }.getOrDefault("")
+    }
+
+    /**
+     * The installed package's `bin` field verbatim, for diagnostics; empty when unreadable.
+     *
+     * A packaging change upstream is what breaks entry resolution, and this is the one field that
+     * names it — `{"claude":"cli.js"}` is runnable, `{"claude":"bin/claude.exe"}` is not.
+     */
+    fun declaredBinSpec(): String {
+        val manifest = File(packageDir(), "package.json")
+        if (!manifest.isFile) return ""
+        return runCatching {
+            org.json.JSONObject(manifest.readText(Charsets.UTF_8)).opt("bin")?.toString().orEmpty()
+        }.getOrDefault("")
+    }
+
+    fun isInstalled(): Boolean = nodeEntry() != null || isDeviceExecutable(binEntry())
+
+    /**
+     * True when [file] is an ELF image this device can exec — what the official binary install
+     * leaves at `bin/claude`.
+     *
+     * The execute bit alone does not distinguish it: npm links `bin/claude` to the package's
+     * `bin/claude.exe` on 2.1.113+ and marks it executable, so an `canExecute()` test reports a
+     * Windows launcher as a working install and suppresses the reinstall prompt that would repair
+     * it. Internal so [ClaudeInstallerTest] can cover the launcher case.
+     */
+    internal fun isDeviceExecutable(file: File): Boolean {
+        if (!file.isFile || !file.canExecute() || file.length() < 4) return false
+        return runCatching {
+            file.inputStream().use { input ->
+                val magic = ByteArray(4)
+                input.read(magic) == 4 && magic[0] == 0x7F.toByte() && magic[1] == 'E'.code.toByte()
+                    && magic[2] == 'L'.code.toByte() && magic[3] == 'F'.code.toByte()
+            }
+        }.getOrDefault(false)
+    }
+
+    /** Removes the Claude CLI (binary and npm package); keeps profiles and transcripts. */
     fun uninstall(): Boolean {
-        val binary = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
-        return !binary.exists() || binary.delete()
+        val binary = binEntry()
+        val binaryGone = !binary.exists() || binary.delete()
+        val packageGone = packageDir().let { !it.exists() || it.deleteRecursively() }
+        return binaryGone && packageGone
     }
 
     fun installAsync(context: Context, progress: Progress) {
+        FcodeLog.event(context, "claude_install_start", org.json.JSONObject()
+            .put("nodePresent", File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "node").isFile())
+            .put("binaryExists", isInstalled())
+            .put("installedVersion", installedVersion()))
         Thread({
             var success = false
             var error: String? = null
@@ -64,7 +207,14 @@ internal object ClaudeInstaller {
                 success = true
             } catch (t: Throwable) {
                 error = t.message ?: t.javaClass.simpleName
+                FcodeLog.event(context, "claude_install_failed", org.json.JSONObject()
+                    .put("exceptionClass", t.javaClass.simpleName)
+                    .put("message", CodexAppServerBridgeProtocol.redactSensitiveLogLine(
+                        error ?: "")))
             }
+            FcodeLog.event(context, "claude_install_complete", org.json.JSONObject()
+                .put("success", success)
+                .put("error", error?.let { CodexAppServerBridgeProtocol.redactSensitiveLogLine(it) }.orEmpty()))
             progress.onComplete(success, error)
         }, "ClaudeInstaller").start()
     }
@@ -74,10 +224,43 @@ internal object ClaudeInstaller {
         val npm = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "npm")
         if (!npm.isFile()) throw IOException("未找到 npm，请先安装 Node.js 开发工具")
         progress.onStage("npm", "正在通过 npm 安装 Claude Code（首次约 2-3 分钟）…")
+        var spec = PREFERRED_NPM_SPEC
+        var output = runNpmInstall(context, npm, spec)
+        // An install only counts when it left something Node can execute. Since 2.1.113 the
+        // package is a launcher whose per-platform binaries have no Android build, and npm exits 0
+        // after leaving only `bin/claude.exe` behind, so fall back to the last plain-JS release
+        // instead of shipping the user a CLI that cannot start.
+        if (nodeEntry() == null) {
+            FcodeLog.event(context, "claude_install_npm_no_entry", org.json.JSONObject()
+                .put("spec", spec)
+                .put("packageVersion", installedVersion())
+                .put("declaredBin", declaredBinSpec()))
+            progress.onStage("npm", "最新版没有 Node 入口，正在回退到 $FALLBACK_NPM_SPEC …")
+            spec = FALLBACK_NPM_SPEC
+            output = runNpmInstall(context, npm, spec)
+        }
+        val entry = nodeEntry()
+            ?: throw IOException("npm 安装完成但没有可用的 node 入口（疑似 native stub）：${output.take(300)}")
+        val nodeInfo = nodeEnvSummary(node)
+        FcodeLog.event(context, "claude_install_npm_ok", org.json.JSONObject()
+            .put("spec", spec)
+            .put("packageVersion", installedVersion())
+            .put("entry", entry.absolutePath)
+            .put("entryIsBinLink", entry.absolutePath == binEntry().absolutePath)
+            .put("declaredBin", declaredBinSpec())
+            .put("nodePlatform", nodeInfo.first)
+            .put("nodeVersion", nodeInfo.second)
+            .put("outputTail", CodexAppServerBridgeProtocol.redactSensitiveLogLine(output.take(1200))))
+    }
+
+    /** Runs one `npm install -g <spec>` and returns its combined output. Throws on a non-zero exit. */
+    private fun runNpmInstall(context: Context, npm: File, spec: String): String {
         val home = File(TermuxConstants.TERMUX_HOME_DIR_PATH)
+        // --omit=optional: the package's per-platform binaries have no Android build, and the
+        // bridge runs the JS entry through Node anyway, so resolving them is pure waste.
         val command = listOf(
-            npm.absolutePath, "install", "-g", "@anthropic-ai/claude-code",
-            "--no-fund", "--no-audit", "--loglevel=error",
+            npm.absolutePath, "install", "-g", spec,
+            "--no-fund", "--no-audit", "--omit=optional", "--loglevel=error",
         )
         val process = ProcessBuilder(command)
             .directory(home)
@@ -85,23 +268,48 @@ internal object ClaudeInstaller {
                 environment()["HOME"] = home.absolutePath
                 environment()["TMPDIR"] = File(home, ".tmp").absolutePath
                 environment()["npm_config_cache"] = File(home, ".npm").absolutePath
+                // npm resolves its interpreter and lifecycle scripts through PATH (shebang
+                // `#!/usr/bin/env node`). The app process PATH only lists Android system dirs,
+                // so without the Termux bin directory npm fails with `env: 'node': No such
+                // file or directory` (exit 127).
+                environment()["PATH"] = TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin"
             }
             .redirectErrorStream(true)
             .start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
         val exit = process.waitFor()
+        // Always capture the npm output tail: native-wrapper releases print a postinstall
+        // warning yet still exit 0, leaving a non-functional stub behind.
+        val safeTail = CodexAppServerBridgeProtocol.redactSensitiveLogLine(output.take(1200))
         if (exit != 0) {
+            FcodeLog.event(context, "claude_install_npm_failed", org.json.JSONObject()
+                .put("spec", spec)
+                .put("exit", exit)
+                .put("outputTail", safeTail))
             throw IOException("npm 安装失败（exit $exit）：${output.take(600)}")
         }
-        val claude = File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, BINARY_NAME)
-        if (!claude.isFile()) throw IOException("npm 安装完成但未找到 claude 入口：${output.take(300)}")
+        return output
+    }
+
+    /** `process.platform` and `process.version` as reported by the device Node, for diagnostics. */
+    private fun nodeEnvSummary(node: File): Pair<String, String> {
+        val report = runCatching {
+            val probe = ProcessBuilder(node.absolutePath, "-p", "process.platform + ' ' + process.version").start()
+            probe.inputStream.bufferedReader().use { it.readText().trim() }
+        }.getOrDefault("")
+        val parts = report.split(" ")
+        return if (parts.size >= 2) parts[0] to parts[1] else report to ""
     }
 
     private fun installOfficialBinary(context: Context, progress: Progress) {
         val archive = File(TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH, ARCHIVE)
         progress.onStage("下载", "正在下载 Claude CLI ($VERSION)…")
         val digest = download(context, archive, progress)
-        if (!digest.equals(EXPECTED_SHA256, ignoreCase = true)) {
+        val shaMatch = digest.equals(EXPECTED_SHA256, ignoreCase = true)
+        FcodeLog.event(context, "claude_install_download", org.json.JSONObject()
+            .put("version", VERSION)
+            .put("sha256Match", shaMatch))
+        if (!shaMatch) {
             throw IOException("SHA-256 校验失败（期望 $EXPECTED_SHA256，实际 $digest）")
         }
         progress.onStage("解压", "正在解压可执行文件…")
@@ -143,6 +351,9 @@ internal object ClaudeInstaller {
             val status = connection.responseCode
             if (status < 200 || status >= 300) throw IOException("下载服务器返回 HTTP $status")
             val total = connection.contentLengthLong
+            FcodeLog.event(context, "claude_install_http", org.json.JSONObject()
+                .put("status", status)
+                .put("totalBytes", total))
             val digest = MessageDigest.getInstance("SHA-256")
             var received = 0L
             val buffer = ByteArray(128 * 1024)

@@ -13,7 +13,7 @@ internal enum class SettingsPage {
     ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND, TYPOGRAPHY,
     MCP, MCP_EDITOR, SKILLS,
     OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, CLAUDE_EDITOR, WEB_UI, PROXY,
-    DEVELOPER, ABOUT,
+    DEVELOPER, LOGS, ABOUT,
 }
 
 internal val SettingsPage.navigationDepth: Int
@@ -22,7 +22,7 @@ internal val SettingsPage.navigationDepth: Int
         SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
         SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
-        SettingsPage.ABOUT -> 1
+        SettingsPage.LOGS, SettingsPage.ABOUT -> 1
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE,
         SettingsPage.MODEL_EDITOR, SettingsPage.MCP_EDITOR, SettingsPage.CLAUDE_EDITOR -> 2
         SettingsPage.CHAT_BACKGROUND -> 3
@@ -38,7 +38,7 @@ internal val SettingsPage.previousPage: SettingsPage?
         SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
         SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
-        SettingsPage.ABOUT -> SettingsPage.ROOT
+        SettingsPage.LOGS, SettingsPage.ABOUT -> SettingsPage.ROOT
     }
 
 @Stable

@@ -33,8 +33,14 @@ final class CodexNativeRuntime {
             value(configurationFingerprint), value(baseUrl), value(apiKey), value(model), value(apiFormat),
             String.valueOf(routeThroughMihomo), String.valueOf(forwardReasoningContext),
             String.valueOf(ultraSubagentLimit), String.valueOf(normalSubagentLimit),
-            String.valueOf(transportEfforts), String.valueOf(multiAgentV2), String.valueOf(preventRecursiveSubagents));
-        if (bridge != null && !requestedFingerprint.equals(fingerprint)) shutdown();
+            stableMapString(transportEfforts), String.valueOf(multiAgentV2), String.valueOf(preventRecursiveSubagents));
+        // Rebuild when the configuration changed OR the previous bridge's app-server process died
+        // (monitorProcess cleared process/writer). A stale bridge otherwise re-binds forever
+        // without re-spawning, so retrying the backend after a crash would never recover.
+        if (bridge != null && (!requestedFingerprint.equals(fingerprint) || !isRunning())) {
+            FcodeLog.d("CodexNativeRuntime", "Fingerprint changed or app-server process dead, rebuilding bridge");
+            shutdown();
+        }
         appContext = activity.getApplicationContext();
         lastAttachRecreatedBridge = bridge == null;
         if (bridge == null) {
@@ -86,4 +92,22 @@ final class CodexNativeRuntime {
     }
 
     private static String value(String value) { return value == null ? "" : value; }
+
+    /**
+     * Order-stable rendering of the transport-efforts map. Map.toString follows iteration
+     * order, so a semantically identical map built in a different order would flap the
+     * fingerprint and kill a live turn with a needless respawn.
+     */
+    private static String stableMapString(Map<String, String> map) {
+        if (map == null || map.isEmpty()) return "{}";
+        java.util.TreeMap<String, String> sorted = new java.util.TreeMap<>(map);
+        StringBuilder out = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : sorted.entrySet()) {
+            if (!first) out.append(", ");
+            first = false;
+            out.append(entry.getKey()).append('=').append(entry.getValue());
+        }
+        return out.append('}').toString();
+    }
 }

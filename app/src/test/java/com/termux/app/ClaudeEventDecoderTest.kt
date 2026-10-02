@@ -112,6 +112,17 @@ class ClaudeEventDecoderTest {
     }
 
     @Test
+    fun `blank exit plan mode emits nothing`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_empty","name":"ExitPlanMode","input":{}}]}}"""),
+            "s1",
+        )
+        assertTrue(events.none { it.first == "onPlanStarted" || it.first == "onPlanDelta" || it.first == "onPlanComplete" })
+    }
+
+    @Test
     fun `result maps to onTurnComplete with failure flag`() {
         val events = mutableListOf<Pair<String, String>>()
         val decoder = decoder(events)

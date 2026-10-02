@@ -335,10 +335,16 @@ import org.json.JSONObject
         chatState.currentThreadId = ""
         chatState.conversationAnimationKey = "new-${UUID.randomUUID()}"
         chatState.resetConversation()
-        chatState.projectPath = requestedProjectPath
-            .takeIf { it.isNotBlank() && File(it).isDirectory }
-            ?.let { runCatching { File(it).canonicalPath }.getOrDefault(it) }
+        val requestedDirectory = requestedProjectPath.takeIf { it.isNotBlank() && File(it).isDirectory }
+        val canonicalResult = requestedDirectory?.let { dir -> runCatching { File(dir).canonicalPath } }
+        chatState.projectPath = requestedDirectory
+            ?.let { dir -> runCatching { File(dir).canonicalPath }.getOrDefault(dir) }
             .orEmpty()
+        FcodeLog.d("NativeChatHistoryHandler", "newConversationAtProject requested=" + requestedProjectPath
+            + " isDirectory=" + (requestedDirectory != null)
+            + " canonicalOk=" + (canonicalResult?.isSuccess == true)
+            + " resolved=" + chatState.projectPath
+            + " fallbackToDefault=" + chatState.projectPath.isEmpty())
         chatState.conversationTitle = "新对话"
         chatState.ready = false
         chatState.connectionLabel = "正在创建新对话…"

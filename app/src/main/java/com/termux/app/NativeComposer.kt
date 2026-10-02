@@ -136,6 +136,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -1189,8 +1190,16 @@ internal fun ComposerActionButton(
     liquidGlassTint: Color = Color.Transparent,
     followUpAction: NativeFollowUpSubmitAction = NativeFollowUpSubmitAction.STEER,
 ) {
-    val inputText = textState.text.toString()
-    val action = nativeComposerAction(inputText, hasAttachments, enabled, loading)
+    // Observe only blank-ness, not the full text: the action depends solely on
+    // hasDraft (isNotBlank || hasAttachments), so an IME edit that preserves blank-ness
+    // must not recompose the button surface. The full text is read only inside the
+    // click handler (source of truth at gesture completion).
+    val hasText by remember(textState) {
+        snapshotFlow { textState.text.toString().isNotBlank() }
+    }.collectAsState(initial = textState.text.toString().isNotBlank())
+    val action = if (loading && !(hasText || hasAttachments)) NativeComposerAction.STOP
+        else if (enabled && (hasText || hasAttachments)) NativeComposerAction.SEND
+        else NativeComposerAction.DISABLED
     val stopMode = action == NativeComposerAction.STOP
     val canActivate = action != NativeComposerAction.DISABLED
     val latestEnabled by rememberUpdatedState(enabled)

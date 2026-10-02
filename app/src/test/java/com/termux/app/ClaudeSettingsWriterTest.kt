@@ -245,6 +245,36 @@ class ClaudeSettingsWriterTest {
     }
 
     @Test
+    fun `effortOverride writes CLAUDE_CODE_EFFORT_LEVEL`() {
+        val env = ClaudeSettingsWriter.buildEnv(profile(model = "m"), effortOverride = "high")
+        assertEquals("high", env["CLAUDE_CODE_EFFORT_LEVEL"])
+    }
+
+    @Test
+    fun `effortOverride none keeps the profile default`() {
+        val env = ClaudeSettingsWriter.buildEnv(
+            profile(model = "m", maxEffort = true),
+            effortOverride = "none",
+        )
+        assertEquals("max", env["CLAUDE_CODE_EFFORT_LEVEL"])
+    }
+
+    @Test
+    fun `effortOverride wins over the profile max-effort toggle`() {
+        val env = ClaudeSettingsWriter.buildEnv(
+            profile(model = "m", maxEffort = true),
+            effortOverride = "low",
+        )
+        assertEquals("low", env["CLAUDE_CODE_EFFORT_LEVEL"])
+    }
+
+    @Test
+    fun `blank effortOverride leaves the level untouched`() {
+        val env = ClaudeSettingsWriter.buildEnv(profile(model = "m", maxEffort = false), effortOverride = "")
+        assertFalse(env.containsKey("CLAUDE_CODE_EFFORT_LEVEL"))
+    }
+
+    @Test
     fun `legacy profile json loads new fields with defaults`() {
         val legacy = JSONObject()
             .put("id", "old")

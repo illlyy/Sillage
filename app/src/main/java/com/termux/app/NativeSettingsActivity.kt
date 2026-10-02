@@ -330,6 +330,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onLanguage = { dialog = "language" },
                             onTypography = { navigator.navigate(SettingsPage.TYPOGRAPHY) },
                             onDeveloper = { navigator.navigate(SettingsPage.DEVELOPER) },
+                            onLogs = { navigator.navigate(SettingsPage.LOGS) },
                             environmentRevision = resumeRevision,
                             prefs = prefs,
                             onAbout = { navigator.navigate(SettingsPage.ABOUT) },
@@ -547,6 +548,7 @@ class NativeSettingsActivity : ComponentActivity() {
                             onClearCache = { resetWebUiPreferences(lang) },
                         )
                         SettingsPage.DEVELOPER -> DeveloperSettingsPage(lang, navigateBack)
+                        SettingsPage.LOGS -> LogsSettingsPage(lang, navigateBack)
                         SettingsPage.ABOUT -> AboutSettingsPage(
                             lang = lang,
                             onBack = navigateBack,
