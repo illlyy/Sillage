@@ -281,6 +281,11 @@ final class LocalApiProxy {
             }
 
             String contentType = connection.getHeaderField("Content-Type");
+            // Relay the encoding too. When the runtime decoded gzip on our behalf it also strips
+            // the header, so this is normally absent and stays a no-op; it matters only if an
+            // upstream body still arrives encoded, where forwarding the bytes without the header
+            // would hand the client compressed data labelled as plain text.
+            String contentEncoding = connection.getHeaderField("Content-Encoding");
             InputStream response;
             try { response = code >= 400 ? connection.getErrorStream() : connection.getInputStream(); }
             catch (Exception e) { response = connection.getErrorStream(); }
@@ -341,6 +346,7 @@ final class LocalApiProxy {
                 OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
                 writeAscii(clientOut, "HTTP/1.1 " + code + " " + reason(code) + "\r\n");
                 if (contentType != null) writeAscii(clientOut, "Content-Type: " + contentType + "\r\n");
+                if (contentEncoding != null) writeAscii(clientOut, "Content-Encoding: " + contentEncoding + "\r\n");
                 writeAscii(clientOut, "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
                 if (response != null) {
                     try {
@@ -464,6 +470,13 @@ final class LocalApiProxy {
         for (String[] header : headers) {
             String lower = header[0].toLowerCase(Locale.US);
             if (lower.equals("host") || lower.equals("connection") || lower.equals("content-length") || lower.equals("transfer-encoding")) continue;
+            // Never forward the caller's Accept-Encoding. HttpURLConnection only decodes gzip when
+            // it negotiated the encoding itself; setting the header explicitly disables that, and
+            // the relay below cannot re-declare a Content-Encoding, so upstream-compressed bodies
+            // reached the CLI as raw bytes rendered as text (observed: "API Error: 400 <gzip>"
+            // displayed as the answer). Dropping the header lets the runtime negotiate gzip and
+            // hand this proxy identity bytes on every path — error bodies and SSE alike.
+            if (lower.equals("accept-encoding")) continue;
             connection.setRequestProperty(header[0], header[1]);
         }
         if (body.length > 0) {

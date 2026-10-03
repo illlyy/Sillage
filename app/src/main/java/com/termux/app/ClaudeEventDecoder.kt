@@ -40,6 +40,15 @@ internal class ClaudeEventDecoder(
     /** True once text streamed via content_block deltas, so the assistant-message fallback never duplicates. */
     private var textStreamedThisTurn = false
 
+    /**
+     * True once this turn's upstream API failure reached the error card. Claude Code reports a
+     * failed request as a *synthetic assistant message* (`isApiErrorMessage`) carrying the raw
+     * upstream body, and a `result` line usually follows with the same failure. Without this flag
+     * the error would surface twice, and before the proxy fix the body arrived gzip-compressed and
+     * was rendered as the reply.
+     */
+    private var apiErrorSurfacedThisTurn = false
+
     /** content block index of the active thinking block, -1 when none */
     private var activeThinkingIndex = -1
 
@@ -80,6 +89,7 @@ internal class ClaudeEventDecoder(
         surfacedSystemThinking = false
         thinkingSurfacedThisTurn = false
         textStreamedThisTurn = false
+        apiErrorSurfacedThisTurn = false
         activeThinkingIndex = -1
         thinkingSource = 0
         textBuffer = null
@@ -255,6 +265,13 @@ internal class ClaudeEventDecoder(
     private fun decodeAssistant(line: JSONObject) {
         val message = line.optJSONObject("message") ?: return
         val content = message.optJSONArray("content") ?: return
+        // A failed upstream call is delivered as a synthetic assistant message whose text is the
+        // raw API error body. It is not an answer: routing it through the error card keeps the
+        // reply bubble clean and lets the host translate/notify like any other backend failure.
+        if (line.optBoolean("isApiErrorMessage", false) || line.optInt("apiErrorStatus", 0) > 0) {
+            surfaceApiError(line, content)
+            return
+        }
         val parentAgent = line.optString("parent_tool_use_id", "").ifBlank { "" }
         for (i in 0 until content.length()) {
             val block = content.optJSONObject(i) ?: continue
@@ -289,6 +306,51 @@ internal class ClaudeEventDecoder(
             }
         }
     }
+
+    /**
+     * Surfaces a synthetic API-error assistant message on the error channel instead of the answer
+     * channel. The body is sanitized because an encoding fault upstream of this decoder can leave
+     * raw non-text bytes in it — observed as an undecoded gzip error body rendered as the reply.
+     */
+    private fun surfaceApiError(line: JSONObject, content: JSONArray) {
+        if (apiErrorSurfacedThisTurn) return
+        val raw = buildString {
+            for (i in 0 until content.length()) {
+                val block = content.optJSONObject(i) ?: continue
+                if (block.optString("type") != "text") continue
+                val text = block.optString("text")
+                if (text.isEmpty()) continue
+                if (isNotEmpty()) append('\n')
+                append(text)
+            }
+        }.ifBlank { line.optString("error") }.ifBlank { "unknown" }
+        apiErrorSurfacedThisTurn = true
+        emit("onNativeError", sanitizeApiErrorText(raw))
+    }
+
+    /**
+     * Keeps an error card readable: runs of control characters (what undecodable bytes turn into)
+     * collapse to a single replacement marker and the result is capped, so a transport fault can
+     * neither flood the chat nor hide the part of the message that is still legible.
+     */
+    private fun sanitizeApiErrorText(text: String): String {
+        val cleaned = StringBuilder(text.length)
+        var inReplacementRun = false
+        for (ch in text) {
+            if (isPrintableApiErrorChar(ch)) {
+                inReplacementRun = false
+                cleaned.append(ch)
+                continue
+            }
+            if (!inReplacementRun) cleaned.append('\uFFFD')
+            inReplacementRun = true
+        }
+        return cleaned.toString().trim().take(MAX_API_ERROR_CHARS)
+    }
+
+    private fun isPrintableApiErrorChar(ch: Char): Boolean =
+        ch == '\n' || ch == '\r' || ch == '\t' ||
+            (ch >= ' ' && ch != '\u007F' && ch !in '\u0080'..'\u009F')
 
     /** Concatenates `thinking` text blocks from an assistant content array. */
     private fun contentThinkingText(content: JSONArray): String {
@@ -460,7 +522,7 @@ internal class ClaudeEventDecoder(
             .put("details", JSONObject())
             .put("failed", failed)
             .toString())
-        if (failed) {
+        if (failed && !apiErrorSurfacedThisTurn) {
             val error = line.optString("result").ifBlank { line.optString("subtype") }
             if (error.isNotBlank()) emit("onNativeError", error)
         }
@@ -478,10 +540,16 @@ internal class ClaudeEventDecoder(
         surfacedSystemThinking = false
         thinkingSurfacedThisTurn = false
         textStreamedThisTurn = false
+        apiErrorSurfacedThisTurn = false
         activeThinkingIndex = -1
         thinkingSource = 0
         textBuffer = null
         subagentCapsules.clear()
         subagentNames.clear()
+    }
+
+    private companion object {
+        /** Caps what an error card can hold so a transport fault cannot flood the chat. */
+        const val MAX_API_ERROR_CHARS = 1200
     }
 }

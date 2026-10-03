@@ -89,7 +89,15 @@ import org.json.JSONObject
      */
     internal fun CodexChatActivity.switchBackend(to: NativeBackendType) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
-        if (NativeBackendType.current(prefs) == to) return
+        // Idempotency must be judged by the backend that is actually attached, never by the
+        // persisted preference. The settings page writes the preference before this runs, so
+        // `pref == to` is precisely the case that still needs the full teardown + spawn — guarding
+        // on the preference made the onResume mismatch path a no-op and left the old CLI process
+        // running behind the newly selected backend.
+        if (attachedBackend == to && bridge != null) {
+            NativeBackendType.set(prefs, to)
+            return
+        }
         if (chatState.busy) stopCurrentTurn()
         NativeBackendType.set(prefs, to)
         chatState.backend = to

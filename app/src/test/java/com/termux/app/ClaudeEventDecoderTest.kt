@@ -360,4 +360,83 @@ class ClaudeEventDecoderTest {
         )
         assertTrue(events.none { it.first == "onReasoningDelta" && it.second == "system thought" })
     }
+
+    /**
+     * Observed on device: an upstream 400 arrives as a synthetic assistant message, so it used to
+     * stream into the reply bubble as if the model had answered with an error dump.
+     */
+    @Test
+    fun `api error assistant message surfaces on the error channel not the answer`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.beginTurn("turn-1")
+        decoder.decode(
+            line(
+                """{"type":"assistant","session_id":"s1","isApiErrorMessage":true,"apiErrorStatus":400,""" +
+                    """"error":"unknown","message":{"model":"<synthetic>","role":"assistant","type":"message",""" +
+                    """"content":[{"type":"text","text":"API Error: 400 {\"error\":{\"code\":\"InvalidSubscription\"}}"}]}}""",
+            ),
+            "s1",
+        )
+        assertTrue(events.none { it.first == "onDelta" })
+        val error = events.first { it.first == "onNativeError" }
+        assertTrue(error.second.contains("InvalidSubscription"))
+    }
+
+    /**
+     * A gzip error body relayed without its Content-Encoding decodes to a long run of control
+     * bytes. The card must collapse that run rather than mirror the garble.
+     */
+    @Test
+    fun `undecodable bytes in an api error stay readable`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.beginTurn("turn-1")
+        decoder.decode(
+            line(
+                """{"type":"assistant","session_id":"s1","isApiErrorMessage":true,"apiErrorStatus":400,""" +
+                    """"message":{"role":"assistant","content":[{"type":"text","text":""" +
+                    """"API Error: 400 \u001f\u008b\u0008\u0000\u0000\u0000AAAA\u0001\u0002BBBB"}]}}""",
+            ),
+            "s1",
+        )
+        val text = events.first { it.first == "onNativeError" }.second
+        assertTrue(text.startsWith("API Error: 400"))
+        assertTrue(text.contains('\uFFFD'))
+        assertTrue(text.none { it.code < 0x20 && it != '\n' })
+    }
+
+    @Test
+    fun `failed result does not repeat a surfaced api error`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.beginTurn("turn-1")
+        decoder.decode(
+            line(
+                """{"type":"assistant","session_id":"s1","isApiErrorMessage":true,"apiErrorStatus":400,""" +
+                    """"message":{"role":"assistant","content":[{"type":"text","text":"API Error: 400 bad request"}]}}""",
+            ),
+            "s1",
+        )
+        decoder.decode(
+            line("""{"type":"result","session_id":"s1","subtype":"error_during_execution","is_error":true,"result":"API Error: 400 bad request"}"""),
+            "s1",
+        )
+        assertEquals(1, events.count { it.first == "onNativeError" })
+        assertEquals(true, JSONObject(events.first { it.first == "onTurnComplete" }.second).optBoolean("failed"))
+    }
+
+    @Test
+    fun `api error surfaces again on the next turn`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        val apiError =
+            """{"type":"assistant","session_id":"s1","isApiErrorMessage":true,"apiErrorStatus":400,""" +
+                """"message":{"role":"assistant","content":[{"type":"text","text":"API Error: 400 boom"}]}}"""
+        decoder.beginTurn("turn-1")
+        decoder.decode(line(apiError), "s1")
+        decoder.beginTurn("turn-2")
+        decoder.decode(line(apiError), "s1")
+        assertEquals(2, events.count { it.first == "onNativeError" })
+    }
 }
