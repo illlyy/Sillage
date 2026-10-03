@@ -34,14 +34,14 @@ import org.json.JSONObject
 
 /** Inline preview of one or more model-produced images; multiple images in a turn are grouped. */
 @Composable
-internal fun ImageGroupCard(items: List<JSONObject>) {
+internal fun ImageGroupCard(items: List<JSONObject>, projectPath: String = "") {
     val language = LocalNativeLanguage.current
     val imagesKey = items.map { it.toString() }
-    val images = remember(imagesKey) {
+    val images = remember(imagesKey, projectPath) {
         items.mapNotNull { item ->
             listOf("path", "imagePath", "url", "file")
                 .firstNotNullOfOrNull { key -> item.optString(key).takeIf(String::isNotBlank) }
-        }.distinct()
+        }.map { raw -> resolveFilePath(raw, projectPath) ?: raw }.distinct()
     }
     if (images.isEmpty()) return
     var previewPath by remember { mutableStateOf<String?>(null) }

@@ -2247,6 +2247,35 @@ internal class NativeChatState {
 
     fun hasRetryStatus(): Boolean = retryStatusMessageId.isNotBlank()
 
+    /**
+     * Approval cards live in the message flow rather than in a floating banner, so they cannot be
+     * occluded by the top app bar and cannot swallow input for the rest of the screen. Keyed by the
+     * request identity so a re-delivered request updates its card instead of stacking a second one.
+     */
+    fun approvalMessageId(requestId: String): String = "approval:${requestId.ifBlank { "current" }}"
+
+    fun upsertApprovalMessage(raw: String, requestId: String) {
+        if (raw.isBlank()) return
+        val messageId = approvalMessageId(requestId)
+        val message = NativeChatMessage(
+            id = messageId,
+            role = NativeChatRole.ACTIVITY,
+            content = encodeNativeApproval(raw, ""),
+        )
+        val existingIndex = messages.indexOfFirst { it.id == messageId }
+        if (existingIndex >= 0) messages[existingIndex] = message else addTurnMessageBeforeTerminalErrors(message)
+        revision++
+    }
+
+    /** Stamps the decision onto the card so it stops offering buttons that no longer do anything. */
+    fun resolveApprovalMessage(raw: String, requestId: String, decision: String) {
+        val messageId = approvalMessageId(requestId)
+        val existingIndex = messages.indexOfFirst { it.id == messageId }
+        if (existingIndex < 0) return
+        messages[existingIndex] = messages[existingIndex].copy(content = encodeNativeApproval(raw, decision))
+        revision++
+    }
+
     fun retryStatusAttempts(): Int = retryStatusAttempts
 
     /** Update one stable retry card instead of appending a new error for every provider retry. */

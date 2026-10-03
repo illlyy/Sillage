@@ -763,18 +763,35 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
             }
             "onToolComplete" -> {
                 if (!protocolToolSeen) {
-                    chatState.addToolDetail(value)
                     val item = runCatching { JSONObject(value) }.getOrNull()
+                    val toolName = item?.optString("tool").orEmpty()
+                    // Claude payloads name the tool in `tool` and its argument in `subject`; the
+                    // decoder cannot localize (no language context), so the label is built here.
+                    // Codex-authored payloads keep the legacy name/query fallback.
+                    val fallbackTitle = item?.let { payloadItem ->
+                        payloadItem.optString("tool", payloadItem.optString("name", payloadItem.optString("query")))
+                    }.orEmpty()
+                    val title = if (toolName.isNotBlank()) {
+                        NativeClaudeToolMapping.toolTitle(toolName, item?.optString("subject").orEmpty(), nativeLanguage)
+                    } else {
+                        fallbackTitle
+                    }
+                    // Persist the localized title next to the payload: history replay rebuilds the
+                    // row from this JSON and the adapter has no language context of its own.
+                    chatState.addToolDetail(
+                        item?.let { runCatching { JSONObject(value).put("title", title).toString() }.getOrNull() } ?: value,
+                    )
                     chatState.acceptProtocolEvent(
                         NativeProtocolEvent.ToolCompleted(
                             threadId = currentThreadId.orEmpty(),
                             turnId = chatState.currentTurnId.takeIf { it.isNotBlank() },
                             itemId = item?.optString("id")?.takeIf { it.isNotBlank() },
                             type = item?.optString("type", "tool").orEmpty(),
-                            title = item?.optString("tool", item.optString("name", item.optString("query"))).orEmpty(),
+                            title = title,
                             payloadRef = item?.optString(NativeLargePayloadStore.PAYLOAD_REF).orEmpty(),
                             status = item?.optString("status", "completed").orEmpty(),
                             payload = value,
+                            preview = item?.optString("preview").orEmpty(),
                         ),
                     )
                 }
@@ -889,6 +906,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
             "onUserInputResolved" -> handleUserInputResolved(value)
             "onApprovalRequest" -> {
                 storePendingApproval(value)
+                // The inline card is the only place the decision can be made, so it must exist
+                // before the phase flips to WAITING.
+                chatState.upsertApprovalMessage(value, requestIdentity(value))
                 chatState.phase = NativeTurnPhase.WAITING
                 chatState.processingLabel = nativeText(nativeLanguage, "\u7b49\u5f85\u6743\u9650\u786e\u8ba4", "Waiting for approval")
             }

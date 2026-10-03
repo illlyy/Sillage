@@ -96,6 +96,10 @@ internal sealed interface NativeProtocolEvent {
         val payloadRef: String = "",
         val status: String = "completed",
         val payload: String = "",
+        /** Bounded text a renderer can show without loading [payloadRef]: the unified diff for a
+         *  file change, the image path for a view, the result preview otherwise. Empty means the
+         *  row falls back to its title only. */
+        val preview: String = "",
         override val sequence: Long = 0L,
         override val timestampMs: Long = System.currentTimeMillis(),
     ) : NativeProtocolEvent

@@ -154,7 +154,16 @@ import org.json.JSONObject
     internal fun CodexChatActivity.setGoal(objective: String) {
         val value = objective.trim()
         val threadId = currentThreadId
-        if (value.isEmpty() || !chatState.ready || threadId.isNullOrBlank()) return
+        if (value.isEmpty() || !chatState.ready) return
+        if (threadId.isNullOrBlank()) {
+            // A goal is stored per thread. With no thread yet (a fresh conversation that has not
+            // sent a message) this used to return silently: the dialog closed, nothing was saved
+            // and nothing said why.
+            chatState.addNotice(
+                nativeText(nativeLanguage, "先在这个对话里发一条消息，再设置目标", "Send a message in this conversation first, then set the goal"),
+            )
+            return
+        }
         chatState.activeGoalObjective = value
         getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
             .putString(goalPreferenceKey(threadId), value).putString(goalStatusPreferenceKey(threadId), "active").apply()
@@ -164,21 +173,9 @@ import org.json.JSONObject
         syncNativeContinuationHint()
     }
 
-    internal fun CodexChatActivity.requestIdentity(raw: String): String = runCatching {
-        val root = JSONObject(raw)
-        // Codex wire shape: top-level "requestId". Claude decoder shape:
-        // {"params": {"requestId"/"toolUseId"}}. Prefer the stable tool_use id so
-        // CLI version drift cannot strand the WAITING latch.
-        root.opt("requestId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
-            ?: root.opt("toolUseId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
-            ?: root.opt("tool_use_id")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
-            ?: root.optJSONObject("params")?.let { params ->
-                params.opt("requestId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
-                    ?: params.opt("toolUseId")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
-                    ?: params.opt("tool_use_id")?.toString().orEmpty().takeIf { it.isNotBlank() && it != "null" }
-                    ?: ""
-            }.orEmpty()
-    }.getOrDefault("")
+    /** Stable identity of an approval request; single implementation lives next to the card that
+     *  also needs it to tell a pending card from a resolved one. */
+    internal fun CodexChatActivity.requestIdentity(raw: String): String = nativeApprovalRequestId(raw)
 
     internal fun CodexChatActivity.storePendingUserInput(raw: String) {
         val payload = runCatching { JSONObject(raw) }.getOrNull() ?: return
@@ -317,6 +314,9 @@ import org.json.JSONObject
             }
         }
         bridge?.respondApprovalRequest(rawRequest, decision)
+        // Seal the inline card before the round trip: its own state decides whether the buttons
+        // still render, so a stale card cannot be pressed twice.
+        chatState.resolveApprovalMessage(rawRequest, requestIdentity(rawRequest), decision)
         approvalThreadId(rawRequest)?.let { clearPendingApproval(it, rawRequest) }
         if (chatState.phase == NativeTurnPhase.WAITING) {
             chatState.phase = NativeTurnPhase.TOOL_RUNNING
@@ -326,7 +326,10 @@ import org.json.JSONObject
 
     internal fun CodexChatActivity.cancelPendingApproval() {
         val raw = chatState.pendingApprovalRequest
-        if (raw.isNotBlank()) bridge?.respondApprovalRequest(raw, "cancel")
+        if (raw.isNotBlank()) {
+            chatState.resolveApprovalMessage(raw, requestIdentity(raw), "cancel")
+            bridge?.respondApprovalRequest(raw, "cancel")
+        }
         approvalThreadId(raw)?.let { clearPendingApproval(it, raw) }
         // Mirror answerApproval: the WAITING latch belongs to the answered request. Without this
         // a cancelled turn that never sends turn/completed would park the phase forever.

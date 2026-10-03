@@ -78,10 +78,15 @@ internal class ClaudeEventDecoder(
     private var activeTurnId = ""
     private var epoch = 0L
 
+    /** Classified `onToolComplete` payload per tool-use id, so the trailing tool_result can keep
+     *  the same type/preview instead of downgrading the row back to a generic tool call. */
+    private val toolPayloads = HashMap<String, JSONObject>()
+
     fun reset(threadId: String) {
         pendingToolInputs.clear()
         commandItemIds.clear()
         toolDetailIds.clear()
+        toolPayloads.clear()
         surfacedToolUses.clear()
         surfacedToolResults.clear()
         thinkingBuffer = null
@@ -395,13 +400,22 @@ internal class ClaudeEventDecoder(
                     .toString())
             }
             toolDetailIds.remove(toolUseId)?.let { detailId ->
-                emit("onToolComplete", JSONObject()
+                val base = toolPayloads.remove(detailId) ?: JSONObject()
                     .put("id", detailId)
-                    .put("type", "tool")
-                    .put("tool", detailId)
-                    .put("status", if (isError) "failed" else "completed")
-                    .put("payload", outputText)
-                    .toString())
+                    .put("type", NativeClaudeToolMapping.TYPE_TOOL)
+                base.put("status", if (isError) "failed" else "completed")
+                // Only the plain-tool case adopts the result text as its preview. A file change
+                // keeps the diff it was already showing, and an image keeps its path — replacing
+                // either with the raw tool_result would drop the content the card renders (an
+                // image result is a base64 payload).
+                val type = base.optString("type")
+                if ((type == NativeClaudeToolMapping.TYPE_TOOL || type == NativeClaudeToolMapping.TYPE_WEB_SEARCH) &&
+                    outputText.isNotBlank()
+                ) {
+                    base.put("preview", outputText.take(MAX_TOOL_PREVIEW_CHARS))
+                }
+                base.put("payload", outputText)
+                emit("onToolComplete", base.toString())
             }
             subagentCapsules.remove(toolUseId)?.let { agentThreadId ->
                 emit("onSubagentEvent", JSONObject()
@@ -418,8 +432,8 @@ internal class ClaudeEventDecoder(
     private fun surfaceToolUse(id: String, toolName: String, input: JSONObject) {
         if (surfacedToolUses.contains(id)) return
         surfacedToolUses.add(id)
-        when (toolName) {
-            "Bash", "Shell", "bash" -> {
+        when {
+            toolName == "Bash" || toolName == "Shell" || toolName == "bash" -> {
                 val command = input.optString("command", input.optString("cmd"))
                 commandItemIds[id] = command
                 emit("onCommandStarted", JSONObject()
@@ -429,7 +443,7 @@ internal class ClaudeEventDecoder(
                     .put("status", "inProgress")
                     .toString())
             }
-            "AskUserQuestion" -> {
+            toolName == "AskUserQuestion" -> {
                 val questions = input.optJSONArray("questions") ?: JSONArray()
                 val first = questions.optJSONObject(0) ?: JSONObject()
                 emit("onUserInputRequest", JSONObject()
@@ -441,7 +455,7 @@ internal class ClaudeEventDecoder(
                         .put("questions", questions))
                     .toString())
             }
-            "ExitPlanMode" -> {
+            toolName == "ExitPlanMode" -> {
                 val plan = input.optString("plan")
                 if (plan.isBlank()) return
                 emit("onPlanStarted", JSONObject().put("id", id).toString())
@@ -450,15 +464,18 @@ internal class ClaudeEventDecoder(
                     .put("delta", plan).toString())
                 emit("onPlanComplete", JSONObject().put("item", JSONObject().put("id", id).put("text", plan)).toString())
             }
-            "Task", "Task_simple", "subagent_tool_use", "subagent" -> {
+            NativeClaudeToolMapping.isSubagentTool(toolName, input) -> {
                 // Surface delegated subagent work as a live capsule (working -> done). The capsule
-                // is keyed by the Task tool-use id; loadSubagentHistory resolves the transcript.
+                // is keyed by the delegated-work tool-use id; loadSubagentHistory resolves the
+                // transcript. The name drifts (Task -> Agent in Claude Code 2.x), so the check is
+                // shape-assisted.
                 val agentThreadId = input.optString("agentThreadId")
                     .ifBlank { input.optString("agent_thread_id") }
                     .ifBlank { id }
                 val name = input.optString("agentName")
                     .ifBlank { input.optString("agentNickname") }
                     .ifBlank { input.optString("name") }
+                    .ifBlank { input.optString("subagent_type") }
                     .ifBlank { "Task" }
                 subagentCapsules[id] = agentThreadId
                 subagentNames[id] = name
@@ -470,17 +487,50 @@ internal class ClaudeEventDecoder(
                     .put("type", "subAgentActivity")
                     .toString())
             }
-            else -> {
-                val detailId = id
-                toolDetailIds[id] = detailId
-                emit("onToolComplete", JSONObject()
-                    .put("id", detailId)
-                    .put("type", "tool")
-                    .put("tool", toolName)
-                    .put("status", "inProgress")
-                    .toString())
-            }
+            else -> surfaceGenericTool(id, toolName, input)
         }
+    }
+
+    /**
+     * Every remaining tool (Read/Edit/Write/Glob/Grep/WebFetch/...) used to emit a single
+     * `type="tool"` event carrying only the raw name, so the timeline showed a bare `call_...` id
+     * with no subject, no diff and no hint that an image had been read.
+     *
+     * The tool is classified into the vocabulary the shared timeline already renders, and given a
+     * bounded [preview] so the live card can draw the diff / thumbnail without a payload read.
+     */
+    private fun surfaceGenericTool(id: String, toolName: String, input: JSONObject) {
+        toolDetailIds[id] = id
+        val type = NativeClaudeToolMapping.activityType(toolName, input)
+        val payload = JSONObject()
+            .put("id", id)
+            .put("type", type)
+            .put("tool", toolName)
+            .put("subject", NativeClaudeToolMapping.toolSubject(toolName, input))
+            .put("status", "inProgress")
+        when (type) {
+            NativeClaudeToolMapping.TYPE_FILE_CHANGE -> {
+                val item = NativeClaudeToolMapping.fileChangeItem(toolName, input, id)
+                val changes = item?.optJSONArray("changes")
+                if (changes != null) {
+                    // Keep `changes` so history replay can rebuild the per-file diff card, and
+                    // derive the renderable diff for the live card from the same parser.
+                    payload.put("changes", changes)
+                    val diff = runCatching {
+                        NativeFileChangeParser.parse(JSONObject().put("changes", changes))
+                            .joinToString("\n") { it.unifiedDiff }
+                    }.getOrDefault("")
+                    if (diff.isNotBlank()) payload.put("preview", diff.take(MAX_TOOL_PREVIEW_CHARS))
+                }
+            }
+            NativeClaudeToolMapping.TYPE_IMAGE -> {
+                val path = NativeClaudeToolMapping.imageItem(input, id)?.optString("path").orEmpty()
+                if (path.isNotBlank()) payload.put("preview", path)
+            }
+            else -> Unit
+        }
+        toolPayloads[id] = payload
+        emit("onToolComplete", payload.toString())
     }
 
     /** tool_use_id -> tool name, captured from content_block_start events */
@@ -551,5 +601,9 @@ internal class ClaudeEventDecoder(
     private companion object {
         /** Caps what an error card can hold so a transport fault cannot flood the chat. */
         const val MAX_API_ERROR_CHARS = 1200
+
+        /** Caps a tool preview held in the activity group: enough for a real diff or result, small
+         *  enough that a pathological output cannot bloat the conversation state. */
+        const val MAX_TOOL_PREVIEW_CHARS = 12000
     }
 }

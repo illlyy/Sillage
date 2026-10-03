@@ -42,9 +42,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
      *  a plan for approval, so the instruction alone enforces plan semantics on every CLI. */
     private static final String PLAN_MODE_PREFIX =
         "请先制定实施计划：只进行分析与调研，不要修改、创建或删除任何文件，完成后调用 ExitPlanMode 提交计划供审批。";
-    /** Read-only toolset for plan-mode turns (mirrors allowedClaudeTools(READ_ONLY)). */
+    /** Read-only toolset for plan-mode turns (mirrors allowedClaudeTools(READ_ONLY)).
+     *
+     *  ExitPlanMode must be listed: [PLAN_MODE_PREFIX] instructs the model to call it, and the
+     *  previous list omitted it, so the instruction contradicted the whitelist. (In practice this
+     *  CLI ignores the per-message `tools` field and the model called it anyway, which is why the
+     *  omission went unnoticed — do not treat this list as a security boundary.) */
     private static final String[] PLAN_MODE_TOOLS = new String[] {
-        "Read", "Grep", "Glob",
+        "Read", "Grep", "Glob", "ExitPlanMode",
         "Bash(ls:*)", "Bash(cat:*)", "Bash(find:*)", "Bash(pwd:*)",
         "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
         "WebFetch", "WebSearch",

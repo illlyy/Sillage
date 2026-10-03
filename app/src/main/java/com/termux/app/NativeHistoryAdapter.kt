@@ -138,6 +138,7 @@ internal object NativeHistoryAdapter {
                 "commandexecution" -> NativeActivityItemType.COMMAND
                 "filechange" -> NativeActivityItemType.FILE_CHANGE
                 "websearch" -> NativeActivityItemType.WEB_SEARCH
+                "image", "imageview", "view_image" -> NativeActivityItemType.IMAGE
                 "collabagenttoolcall", "subagentactivity", "subagent", "subagenttoolcall" -> NativeActivityItemType.SUBAGENT
                 else -> NativeActivityItemType.TOOL
             }
@@ -160,9 +161,17 @@ internal object NativeHistoryAdapter {
                     NativeActivityItemType.COMMAND -> item.optString("command")
                     NativeActivityItemType.WEB_SEARCH -> item.optString("query")
                     NativeActivityItemType.SUBAGENT -> item.optString("agentName", item.optString("agentNickname"))
-                    else -> item.optString("tool", item.optString("name", item.optString("type")))
+                    // The host stores the localized label it already built ("读取文件 · probe.txt") so
+                    // replay does not have to re-derive it from the raw tool name.
+                    else -> item.optString("title")
+                        .ifBlank { item.optString("tool", item.optString("name", item.optString("type"))) }
                 },
-                text = item.optString("detail"),
+                text = item.optString("detail").ifBlank {
+                    // `preview` carries the renderable content: the image path for a view, the result
+                    // for a plain tool. File changes keep an empty body because FileDiffCard already
+                    // renders the aggregated diff and a second copy would be redundant.
+                    if (type == NativeActivityItemType.FILE_CHANGE) "" else item.optString("preview")
+                },
                 outputRef = item.optString(NativeCommandOutputStore.OUTPUT_REF, item.optString(NativeLargePayloadStore.PAYLOAD_REF)),
                 outputPreview = item.optString(
                     NativeCommandOutputStore.OUTPUT_PREVIEW,

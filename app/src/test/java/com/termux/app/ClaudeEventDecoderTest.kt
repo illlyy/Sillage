@@ -439,4 +439,136 @@ class ClaudeEventDecoderTest {
         decoder.decode(line(apiError), "s1")
         assertEquals(2, events.count { it.first == "onNativeError" })
     }
+
+    /**
+     * Claude Code 2.x renamed the delegated-work tool from `Task` to `Agent`. The decoder only knew
+     * the old names, so subagent capsules silently stopped appearing even though the subagent ran.
+     */
+    @Test
+    fun `agent tool maps to a subagent event`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"subagent_type":"Explore","description":"find X"}}]}}"""),
+            "s1",
+        )
+        val subagent = events.first { it.first == "onSubagentEvent" }
+        val payload = JSONObject(subagent.second)
+        assertEquals("toolu_agent", payload.optString("callId"))
+        assertEquals("working", payload.optString("status"))
+        assertEquals("Explore", payload.optString("name"))
+    }
+
+    @Test
+    fun `an unknown subagent tool name is recognised by its input shape`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_x","name":"SomeFutureName","input":{"subagent_type":"general-purpose"}}]}}"""),
+            "s1",
+        )
+        assertTrue(events.any { it.first == "onSubagentEvent" })
+    }
+
+    /** Reading an image must reach the image card, not a generic tool row. */
+    @Test
+    fun `reading an image emits an image item carrying the path`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_img","name":"Read","input":{"file_path":"probe.png"}}]}}"""),
+            "s1",
+        )
+        val item = events.first { it.first == "onToolComplete" }
+        val payload = JSONObject(item.second)
+        assertEquals("image", payload.optString("type"))
+        assertEquals("probe.png", payload.optString("preview"))
+        assertEquals("Read", payload.optString("tool"))
+    }
+
+    /** An edit must reach the diff card: type `fileChange` plus a renderable diff preview. */
+    @Test
+    fun `editing a file emits a file change with a diff preview`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_edit","name":"Edit","input":{"file_path":"Main.kt","old_string":"val a = 1","new_string":"val a = 2"}}]}}"""),
+            "s1",
+        )
+        val payload = JSONObject(events.first { it.first == "onToolComplete" }.second)
+        assertEquals("fileChange", payload.optString("type"))
+        val preview = payload.optString("preview")
+        assertTrue(preview.contains("-val a = 1"))
+        assertTrue(preview.contains("+val a = 2"))
+        assertEquals("Main.kt", payload.optString("subject"))
+    }
+
+    /**
+     * The trailing tool_result must not downgrade the row back to a generic tool call, and must not
+     * replace the diff with the raw result (for an image that result is a base64 blob).
+     */
+    @Test
+    fun `a tool result keeps the classification and the diff`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_edit","name":"Edit","input":{"file_path":"Main.kt","old_string":"a","new_string":"b"}}]}}"""),
+            "s1",
+        )
+        events.clear()
+        decoder.decode(
+            line("""{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_edit","content":"Applied 1 edit","is_error":false}]}}"""),
+            "s1",
+        )
+        val payload = JSONObject(events.first { it.first == "onToolComplete" }.second)
+        assertEquals("fileChange", payload.optString("type"))
+        assertEquals("completed", payload.optString("status"))
+        assertTrue(payload.optString("preview").contains("-a"))
+    }
+
+    @Test
+    fun `a plain tool keeps its name and subject`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_g","name":"Grep","input":{"pattern":"fun main"}}]}}"""),
+            "s1",
+        )
+        val payload = JSONObject(events.first { it.first == "onToolComplete" }.second)
+        assertEquals("tool", payload.optString("type"))
+        assertEquals("Grep", payload.optString("tool"))
+        assertEquals("fun main", payload.optString("subject"))
+    }
+
+    /** A plain tool does adopt its result as the preview, so the row shows real output. */
+    @Test
+    fun `a plain tool adopts the result text as its preview`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_g2","name":"Glob","input":{"pattern":"*.kt"}}]}}"""),
+            "s1",
+        )
+        events.clear()
+        decoder.decode(
+            line("""{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_g2","content":"Main.kt\nApp.kt","is_error":false}]}}"""),
+            "s1",
+        )
+        val payload = JSONObject(events.first { it.first == "onToolComplete" }.second)
+        assertEquals("tool", payload.optString("type"))
+        assertTrue(payload.optString("preview").contains("Main.kt"))
+    }
+
+    @Test
+    fun `web fetch maps to the web search type`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.decode(
+            line("""{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_w","name":"WebFetch","input":{"url":"https://x.dev"}}]}}"""),
+            "s1",
+        )
+        val payload = JSONObject(events.first { it.first == "onToolComplete" }.second)
+        assertEquals("webSearch", payload.optString("type"))
+        assertEquals("https://x.dev", payload.optString("subject"))
+    }
 }

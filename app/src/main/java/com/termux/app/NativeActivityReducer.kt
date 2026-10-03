@@ -11,6 +11,7 @@ internal enum class NativeActivityItemType {
     TOOL,
     MCP,
     SUBAGENT,
+    IMAGE,
 }
 
 internal enum class NativeActivityItemStatus {
@@ -503,6 +504,7 @@ internal class NativeActivityReducer(
             event.type.lowercase() in setOf("filechange", "file_change", "patch", "apply_patch") -> NativeActivityItemType.FILE_CHANGE
             event.type.lowercase() in setOf("websearch", "web_search", "search") -> NativeActivityItemType.WEB_SEARCH
             event.type.lowercase() in setOf("subagent", "subagentactivity", "collabagenttoolcall") -> NativeActivityItemType.SUBAGENT
+            event.type.lowercase() in setOf("image", "imageview", "view_image") -> NativeActivityItemType.IMAGE
             isMcpToolName(event.title) -> NativeActivityItemType.MCP
             else -> NativeActivityItemType.TOOL
         }
@@ -528,6 +530,9 @@ internal class NativeActivityReducer(
         )).copy(
             type = type,
             title = event.title.ifBlank { event.type },
+            // A later completion may arrive without a preview (e.g. the tool result for an edit is
+            // just "ok"); never let it erase the diff the first event carried.
+            text = event.preview.ifBlank { group.items[id]?.text.orEmpty() },
             outputRef = event.payloadRef,
             status = if (failed) NativeActivityItemStatus.FAILED else NativeActivityItemStatus.COMPLETED,
             completedAtMs = event.timestampMs,

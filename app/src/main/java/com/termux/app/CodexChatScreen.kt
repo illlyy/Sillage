@@ -282,6 +282,10 @@ val LocalFixedStreamingViewportEnabled = staticCompositionLocalOf { true }
 internal val LocalInteractiveScrollInProgress = staticCompositionLocalOf { false }
 internal val LocalTextSelectionActivityChanged = staticCompositionLocalOf<(Boolean) -> Unit> { { } }
 internal val LocalOpenSubagentDrawer = staticCompositionLocalOf<(JSONObject) -> Unit> { { } }
+/** Answers an approval from its inline message-flow card: (rawRequest, decision). The card passes
+ *  its own stored request, so answering an older card cannot be misrouted to the current one. */
+internal val LocalAnswerApproval = staticCompositionLocalOf<(String, String) -> Unit> { { _, _ -> } }
+internal val LocalOpenApprovalDetails = staticCompositionLocalOf<() -> Unit> { { } }
 /** Pause the auto-follow motor while a reasoning/command card expand or collapse animates, so the
  * viewport never fights the user by chasing the bottom mid-gesture. No-op outside the chat screen. */
 internal val LocalPauseFollowDuringAnimation = staticCompositionLocalOf<() -> Unit> { { } }
@@ -697,6 +701,8 @@ internal fun NativeChatScreen(
 
     androidx.compose.runtime.CompositionLocalProvider(
         LocalOpenSubagentDrawer provides openSubagentDrawer,
+        LocalAnswerApproval provides onAnswerApproval,
+        LocalOpenApprovalDetails provides { showApprovalDetails = true },
         LocalTextSelectionActivityChanged provides onTextSelectionActivityChanged,
         LocalPauseFollowDuringAnimation provides pauseFollowForReasoning,
     ) {
@@ -1081,13 +1087,11 @@ internal fun NativeChatScreen(
                             onToggle = { showUserInputDrawer = !showUserInputDrawer },
                         )
                     }
-                    if (state.pendingApprovalRequest.isNotBlank()) {
-                        FcodeApprovalBanner(
-                            raw = state.pendingApprovalRequest,
-                            onDecision = { decision -> onAnswerApproval(state.pendingApprovalRequest, decision) },
-                            onOpenDetails = { showApprovalDetails = true },
-                        )
-                    }
+                    // Approval used to render here as a floating banner. It was a sibling of the
+                    // composer but painted underneath the top app bar, so its Deny button sat in
+                    // the occluded strip and could not be tapped; a wedged request then froze the
+                    // whole chat surface. It now renders as a card inside the message flow — see
+                    // NativeApprovalCard and RikkaActivityMessage.
                     if (state.activeGoalObjective.isNotBlank()) {
                         NativeGoalBanner(
                             objective = state.activeGoalObjective,

@@ -13,7 +13,7 @@ internal enum class NativeToolContentType { TEXT, DIFF, FILE_LIST, JSON }
 /** Derived presentation status; [RUNNING] also covers waiting items. */
 internal enum class NativeToolStatus { RUNNING, COMPLETED, DENIED, ERROR }
 
-internal enum class NativeToolCategory { COMMAND, FILE, SEARCH, WEB, MCP, SUBAGENT, UNKNOWN }
+internal enum class NativeToolCategory { COMMAND, FILE, SEARCH, WEB, MCP, SUBAGENT, IMAGE, UNKNOWN }
 
 internal data class NativeToolDisplayConfig(
     val displayType: NativeToolDisplayType = NativeToolDisplayType.ONE_LINE,
@@ -117,6 +117,15 @@ internal object NativeToolConfigs {
             category = NativeToolCategory.MCP,
             hideResultOnSuccess = true,
         )
+        // Images render as a thumbnail card rather than a text row, so the "hide result" flag does
+        // not apply: the thumbnail IS the result.
+        NativeActivityItemType.IMAGE -> NativeToolDisplayConfig(
+            displayType = NativeToolDisplayType.ONE_LINE,
+            contentType = NativeToolContentType.TEXT,
+            labelZh = "查看图片",
+            labelEn = "View image",
+            category = NativeToolCategory.IMAGE,
+        )
         NativeActivityItemType.TOOL -> DEFAULT
     }
 
@@ -134,6 +143,7 @@ internal object NativeToolConfigs {
             hideResultOnSuccess = true,
         )
         "collabAgentToolCall", "subAgentActivity" -> of(NativeActivityItemType.SUBAGENT)
+        "imageView", "view_image", "image" -> of(NativeActivityItemType.IMAGE)
         else -> NativeToolDisplayConfig(
             displayType = NativeToolDisplayType.COLLAPSIBLE,
             contentType = NativeToolContentType.JSON,

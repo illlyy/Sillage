@@ -36,6 +36,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowDown01
 import me.rerere.hugeicons.stroke.Code
 import me.rerere.hugeicons.stroke.Files02
+import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Sparkles
 
@@ -43,6 +44,7 @@ private fun NativeToolCategory.icon(): ImageVector = when (this) {
     NativeToolCategory.FILE -> HugeIcons.Files02
     NativeToolCategory.SEARCH, NativeToolCategory.WEB -> HugeIcons.Search01
     NativeToolCategory.COMMAND -> HugeIcons.Code
+    NativeToolCategory.IMAGE -> HugeIcons.Image02
     else -> HugeIcons.Sparkles
 }
 

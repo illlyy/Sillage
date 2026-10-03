@@ -417,7 +417,7 @@ internal fun GoalEditorDialog(initialValue: String, enabled: Boolean, onDismiss:
         title = { Text(if (initialValue.isBlank()) nativeText(language, "\u8bbe\u7f6e\u6d3b\u8dc3\u76ee\u6807", "Set active goal") else nativeText(language, "\u7f16\u8f91\u6d3b\u8dc3\u76ee\u6807", "Edit active goal")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(nativeText(language, "Codex \u4f1a\u5728\u540e\u7eed\u5bf9\u8bdd\u4e2d\u6301\u7eed\u8ddf\u8e2a\u8fd9\u4e2a\u76ee\u6807\u3002", "Codex will keep tracking this goal in later turns."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(nativeText(language, "助手会在后续对话中持续跟踪这个目标。", "The assistant will keep tracking this goal in later turns."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(
                     value = value,
                     onValueChange = { value = it },
@@ -425,7 +425,7 @@ internal fun GoalEditorDialog(initialValue: String, enabled: Boolean, onDismiss:
                     minLines = 3,
                     maxLines = 7,
                     shape = RoundedCornerShape(18.dp),
-                    placeholder = { Text(nativeText(language, "\u63cf\u8ff0\u5e0c\u671b Codex \u6301\u7eed\u8ddf\u8fdb\u7684\u76ee\u6807", "Describe what Codex should keep working toward")) },
+                    placeholder = { Text(nativeText(language, "描述希望助手持续跟进的目标", "Describe what the assistant should keep working toward")) },
                 )
             }
         },

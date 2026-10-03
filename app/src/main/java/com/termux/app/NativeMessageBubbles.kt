@@ -1370,6 +1370,7 @@ internal fun ActiveProcessingPanel(
         NativeActivityGroupRenderer(
             group = domainGroup,
             subagents = state.conversationRenderModel.subagents,
+            projectPath = state.projectPath,
             onSubagentClick = { visual ->
                 val anchor = subagentDrawerAnchor(visual, subagentCandidates)
                 openSubagentDrawer(anchor)

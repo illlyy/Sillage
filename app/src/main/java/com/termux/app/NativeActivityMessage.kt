@@ -55,8 +55,29 @@ internal fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatS
         }
         return
     }
-    if (text.startsWith(NATIVE_COMPACTION_PREFIX)) {
-        NativeCompactionDivider(
+    if (isNativeApprovalActivity(text)) {
+        // Approval lives in the message flow now (see NativeApprovalCard). Rendering it here means
+        // it can never be painted under the top app bar, and it scrolls away with the turn instead
+        // of holding the screen hostage.
+        val answer = LocalAnswerApproval.current
+        val openDetails = LocalOpenApprovalDetails.current
+        val decoded = remember(text) { decodeNativeApproval(text) }
+        if (decoded != null) {
+            val (raw, decision) = decoded
+            val requestId = remember(raw) { nativeApprovalRequestId(raw) }
+            val pending = state.pendingApprovalRequest.isNotBlank() &&
+                nativeApprovalRequestId(state.pendingApprovalRequest) == requestId
+            FcodeApprovalCard(
+                raw = raw,
+                decision = decision,
+                pending = pending,
+                onDecision = { value -> answer(raw, value) },
+                onOpenDetails = openDetails,
+            )
+        }
+        return
+    }
+    if (text.startsWith(NATIVE_COMPACTION_PREFIX)) {        NativeCompactionDivider(
             item = NativeHistoryAdapter.decodeCompaction(text, state.currentThreadId),
             messageId = message.id,
         )
@@ -98,6 +119,7 @@ internal fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatS
         }
         NativeActivityGroupRenderer(
             group = group,
+            projectPath = state.projectPath,
             enterExpanded = message.enterExpanded,
             onAutoCollapsed = { state.markActivityAutoCollapsed(message.id) },
             onSubagentClick = { visual ->
@@ -172,7 +194,7 @@ internal fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatS
         val historicalImageItems = if (tools == null) emptyList() else (0 until tools.length()).mapNotNull { toolIndex ->
             runCatching { JSONObject(tools.optString(toolIndex)) }.getOrNull()?.takeIf { isImageToolItem(it.optString("type")) }
         }
-        if (historicalImageItems.isNotEmpty()) ImageGroupCard(historicalImageItems)
+        if (historicalImageItems.isNotEmpty()) ImageGroupCard(historicalImageItems, state.projectPath)
         if (tools != null) for (index in 0 until tools.length()) {
             val item = runCatching { JSONObject(tools.optString(index)) }.getOrNull() ?: continue
             val type = item.optString("type")

@@ -96,6 +96,9 @@ internal fun NativeActivityGroupRenderer(
     group: NativeActivityGroup,
     subagents: List<NativeSubagentVisual> = emptyList(),
     modifier: Modifier = Modifier,
+    /** Workspace root, used to resolve relative tool paths (a `Read`/`Edit` argument is often
+     *  relative to the CLI's working directory). */
+    projectPath: String = "",
     onSubagentClick: (NativeSubagentVisual) -> Unit = {},
     onSubagentOverflowClick: (List<NativeSubagentVisual>) -> Unit = {},
     onLoadSubagentHistory: ((String) -> Unit)? = null,
@@ -125,6 +128,7 @@ internal fun NativeActivityGroupRenderer(
                 group = group,
                 reasoning = reasoning,
                 nonCommandItems = nonCommandItems,
+                projectPath = projectPath,
                 onLoadSubagentHistory = onLoadSubagentHistory,
                 enterExpanded = enterExpanded,
                 onAutoCollapsed = onAutoCollapsed,
@@ -150,6 +154,7 @@ private fun NativeActivityTimelineCard(
     group: NativeActivityGroup,
     reasoning: String,
     nonCommandItems: List<NativeActivityItem>,
+    projectPath: String = "",
     onLoadSubagentHistory: ((String) -> Unit)? = null,
     enterExpanded: Boolean = false,
     onAutoCollapsed: (() -> Unit)? = null,
@@ -390,6 +395,11 @@ private fun NativeActivityTimelineCard(
                                                 item = listItem.item,
                                                 onLoadHistory = { thread -> onLoadSubagentHistory?.invoke(thread) },
                                             )
+                                            // An edit renders its diff and an image renders a
+                                            // thumbnail; both used to collapse into a bare
+                                            // "tool call" row with no visible content.
+                                            NativeActivityItemType.FILE_CHANGE -> NativeToolFileChangeCard(listItem.item)
+                                            NativeActivityItemType.IMAGE -> NativeToolImageCard(listItem.item, projectPath)
                                             else -> NativeToolTimelineContent(listItem.item)
                                         }
                                         is NativeToolListItem.Group -> FcodeToolGroup(listItem)
@@ -437,7 +447,7 @@ private fun NativeTimelineStep(
 }
 
 @Composable
-private fun NativeToolTimelineContent(item: NativeActivityItem) {
+internal fun NativeToolTimelineContent(item: NativeActivityItem) {
     val language = LocalNativeLanguage.current
     val label = NativeToolConfigs.of(item.type).label(language)
     val detail = item.title.ifBlank { item.text }.trim()
