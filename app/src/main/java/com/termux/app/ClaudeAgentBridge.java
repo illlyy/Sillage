@@ -149,6 +149,22 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     String visibleThreadId() { return sessionId == null ? "" : sessionId; }
 
     /**
+     * Thread id to key *goal* state by.
+     *
+     * Unlike [visibleThreadId] this falls back to the provisional id — the `--resume` / `--session-id`
+     * value the CLI is actually running with — because the CLI only echoes its authoritative
+     * `session_id` with the **first user message of a spawn**. Without the fallback the first turn
+     * after a spawn read an empty thread id and silently dropped the goal prefix, which is exactly
+     * the moment a user who just set a goal sends their first message.
+     */
+    static String goalThreadId(String sessionId, String provisionalSessionId) {
+        if (sessionId != null && !sessionId.isEmpty()) return sessionId;
+        return provisionalSessionId == null ? "" : provisionalSessionId;
+    }
+
+    private String goalThreadId() { return goalThreadId(sessionId, provisionalSessionId); }
+
+    /**
      * Marks the bridge ready exactly once: emits onReady with the current thread id and restores
      * the stored goal. Triggered by the CLI's health probe (routed through the proxy), the
      * direct-connection fallback timer, or defensively when the CLI echoes an authoritative
@@ -827,7 +843,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     }
 
     private String goalPrefix() {
-        String thread = visibleThreadId();
+        String thread = goalThreadId();
         if (thread.isEmpty()) return "";
         String objective = java.util.Optional.ofNullable(prefs.getString(PREF_GOAL + thread, "")).orElse("");
         String status = java.util.Optional.ofNullable(prefs.getString(PREF_GOAL_STATUS + thread, "active")).orElse("active");
@@ -1310,7 +1326,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
 
     @Override
     void setThreadGoal(String objective) {
-        String thread = visibleThreadId();
+        String thread = goalThreadId();
         if (thread.isEmpty() || objective == null || objective.isBlank()) return;
         prefs.edit()
             .putString(PREF_GOAL + thread, objective.trim())
@@ -1321,7 +1337,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
 
     @Override
     void getThreadGoal() {
-        String thread = visibleThreadId();
+        String thread = goalThreadId();
         if (thread.isEmpty()) return;
         String objective = java.util.Optional.ofNullable(prefs.getString(PREF_GOAL + thread, "")).orElse("");
         String status = java.util.Optional.ofNullable(prefs.getString(PREF_GOAL_STATUS + thread, "active")).orElse("active");
@@ -1330,7 +1346,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
 
     @Override
     void setThreadGoalStatus(String status) {
-        String thread = visibleThreadId();
+        String thread = goalThreadId();
         if (thread.isEmpty()) return;
         String normalized = ("active".equals(status) || "paused".equals(status) || "budgetLimited".equals(status)) ? status : "active";
         prefs.edit().putString(PREF_GOAL_STATUS + thread, normalized).apply();
@@ -1339,7 +1355,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
 
     @Override
     void clearThreadGoal() {
-        String thread = visibleThreadId();
+        String thread = goalThreadId();
         if (thread.isEmpty()) return;
         prefs.edit()
             .remove(PREF_GOAL + thread)
