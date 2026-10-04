@@ -247,6 +247,7 @@ import me.rerere.hugeicons.stroke.ArrowDown01
 import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.ChartColumn
+import me.rerere.hugeicons.stroke.ChartRing
 import me.rerere.hugeicons.stroke.Code
 import me.rerere.hugeicons.stroke.Clock02
 import me.rerere.hugeicons.stroke.Download04
@@ -808,6 +809,7 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: Strin
     val price = remember(modelName) { priceStore.priceForModel(modelName) }
     val cost = remember(usage, price) { price?.let { estimateTurnCost(usage, it) } }
     var showCostDetails by remember { mutableStateOf(false) }
+    var showContextDetails by remember { mutableStateOf(false) }
     val prefix = if (usage.estimated) "≈" else ""
     if (usage.inputTokens <= 0 && usage.cachedInputTokens <= 0 && usage.outputTokens <= 0 &&
         usage.reasoningOutputTokens <= 0 && usage.outputTokensPerSecond <= 0.0 && usage.durationMs <= 0
@@ -864,6 +866,22 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: Strin
                 color = mutedColor,
             )
         }
+        if (usage.contextOccupancyKnown) {
+            // Only shown when the backend gave both a window and a current total: a missing window
+            // is not "0 used", and a wrong number is worse than none.
+            val percent = (usage.contextUsedFraction * 100).roundToInt()
+            ResponseUsageMetric(
+                icon = HugeIcons.ChartRing,
+                description = nativeText(language, "上下文占用", "Context used"),
+                text = nativeText(
+                    language,
+                    "${formatNativeTokenCount(usage.currentContextTokens)} / ${formatNativeTokenCount(usage.contextWindow)}（$percent%）",
+                    "${formatNativeTokenCount(usage.currentContextTokens)} / ${formatNativeTokenCount(usage.contextWindow)} ($percent%)",
+                ),
+                color = if (percent >= 80) MaterialTheme.colorScheme.error else mutedColor,
+                onClick = { showContextDetails = true },
+            )
+        }
         cost?.takeIf { it > 0.0 }?.let { estimated ->
             ResponseUsageMetric(
                 icon = HugeIcons.ChartColumn,
@@ -874,6 +892,9 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: Strin
             )
         }
     }
+    if (showContextDetails) {
+        NativeContextDetailDialog(usage = usage, onDismiss = { showContextDetails = false })
+    }
     if (showCostDetails && price != null) {
         NativeCostDetailDialog(
             usage = usage,
@@ -883,6 +904,79 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: Strin
             onDismiss = { showCostDetails = false },
         )
     }
+}
+
+/**
+ * What fills the context window right now, when the backend reports a breakdown. The CLI names its
+ * rows in English, so known ones get a localized label and anything unrecognised is shown as-is
+ * rather than hidden.
+ */
+internal fun contextCategoryLabel(language: String, name: String): String = when (name.trim().lowercase()) {
+    "system prompt" -> nativeText(language, "系统提示", "System prompt")
+    "system tools" -> nativeText(language, "系统工具", "System tools")
+    "skills" -> "Skills"
+    "messages" -> nativeText(language, "对话消息", "Messages")
+    "autocompact buffer", "auto-compact buffer" -> nativeText(language, "自动压缩预留", "Autocompact buffer")
+    "free space" -> nativeText(language, "剩余空间", "Free space")
+    else -> name
+}
+
+@Composable
+internal fun NativeContextDetailDialog(usage: NativeTurnUsage, onDismiss: () -> Unit) {
+    val language = LocalNativeLanguage.current
+    val percent = (usage.contextUsedFraction * 100).roundToInt()
+    FlClashAnimatedDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(nativeText(language, "上下文占用", "Context usage")) },
+        text = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                usage.contextCategories.forEach { category ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            contextCategoryLabel(language, category.name),
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            formatNativeTokenCount(category.tokens),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        )
+                    }
+                }
+                if (usage.contextCategories.isNotEmpty()) {
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        nativeText(language, "已用 / 窗口", "Used / window"),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "${formatNativeTokenCount(usage.currentContextTokens)} / ${formatNativeTokenCount(usage.contextWindow)}（$percent%）",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                if (usage.autoCompactTokenLimit > 0L) {
+                    Text(
+                        nativeText(
+                            language,
+                            "接近 ${formatNativeTokenCount(usage.autoCompactTokenLimit)} 时会自动压缩。",
+                            "Auto-compaction runs near ${formatNativeTokenCount(usage.autoCompactTokenLimit)}.",
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(nativeText(language, "关闭", "Close")) } },
+    )
 }
 
 @Composable

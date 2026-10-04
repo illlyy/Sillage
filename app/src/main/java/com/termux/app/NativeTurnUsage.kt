@@ -20,10 +20,25 @@ data class NativeTurnUsage(
     val contextUsageReliable: Boolean = false,
     /** Optional server threshold; this is never sent back to app-server by the native UI. */
     val autoCompactTokenLimit: Long = 0,
+    /** Breakdown of what currently occupies the window, when the backend reports one. */
+    val contextCategories: List<NativeContextCategory> = emptyList(),
 ) {
     val outputTokensPerSecond: Double
         get() = if (outputTokens <= 0 || durationMs <= 0) 0.0 else outputTokens * 1000.0 / durationMs
+
+    /** 0..1 occupancy of the context window; 0 when either side is unknown. */
+    val contextUsedFraction: Double
+        get() = if (contextWindow <= 0L || currentContextTokens <= 0L) 0.0
+        else (currentContextTokens.toDouble() / contextWindow.toDouble()).coerceIn(0.0, 1.0)
+
+    /** Only trustworthy context numbers should be shown; a missing window is not a zero. */
+    val contextOccupancyKnown: Boolean
+        get() = contextUsageReliable && currentContextTokens > 0L && contextWindow > 0L
 }
+
+/** One row of the context breakdown (system prompt, tools, messages, free space, ...). */
+@Immutable
+data class NativeContextCategory(val name: String, val tokens: Long)
 
 object NativeTokenUsageParser {
     @JvmStatic
@@ -78,8 +93,15 @@ object NativeTokenUsageParser {
             }
             return null
         }
-        val input = value(last, "inputTokens", "input_tokens", "prompt_tokens")
-        val cached = value(last, "cachedInputTokens", "cached_input_tokens", "cached_tokens")
+        // Claude reports its cached input as `cache_read_input_tokens` (+ `cache_creation_input_tokens`
+        // for tokens written to the cache this turn). None of those matched the old key list, so the
+        // cache count was permanently 0 and "输入与缓存" understated what the model actually read.
+        // Cache writes are billed closer to plain input than to a cache hit, so they are counted as
+        // input rather than silently dropped.
+        val cacheRead = value(last, "cacheReadInputTokens", "cache_read_input_tokens", "cachedInputTokens", "cached_input_tokens", "cached_tokens")
+        val cacheWrite = value(last, "cacheCreationInputTokens", "cache_creation_input_tokens")
+        val cached = cacheRead + cacheWrite
+        val input = value(last, "inputTokens", "input_tokens", "prompt_tokens") + cacheWrite
         val output = value(last, "outputTokens", "output_tokens", "completion_tokens")
         val reasoning = value(last, "reasoningOutputTokens", "reasoning_output_tokens")
         val total = value(last, "totalTokens", "total_tokens").takeIf { it > 0 }
@@ -141,7 +163,26 @@ object NativeTokenUsageParser {
             currentContextTokens = currentContext,
             contextUsageReliable = contextUsageReliable,
             autoCompactTokenLimit = autoCompactLimit,
+            contextCategories = contextCategories(root).ifEmpty { contextCategories(last) },
         )
+    }
+
+    /**
+     * Context breakdown, when the backend sends one (Claude's `get_context_usage` answer). Kept in
+     * the backend's own order so the detail dialog can show it as-is.
+     */
+    private fun contextCategories(source: JSONObject): List<NativeContextCategory> {
+        val array = source.optJSONArray("contextCategories")
+            ?: source.optJSONArray("context_categories")
+            ?: return emptyList()
+        val result = ArrayList<NativeContextCategory>()
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            val name = item.optString("name")
+            if (name.isBlank()) continue
+            result.add(NativeContextCategory(name, item.optLong("tokens", 0L).coerceAtLeast(0L)))
+        }
+        return result
     }
 
     @JvmStatic

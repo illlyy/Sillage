@@ -121,6 +121,16 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     private static final long MCP_STATUS_FIRST_PROBE_DELAY_MS = 3_000L;
     private volatile boolean mcpStatusInFlight = false;
     private volatile int mcpStatusReprobeBudget = 0;
+
+    // Context occupancy. The result line carries the turn's tokens but nothing about how full the
+    // conversation is, so `get_context_usage` is asked once per turn and folded into the same usage
+    // event (see onDecoderEvent).
+    private static final String CONTEXT_USAGE_REQUEST_ID = "req_context_usage";
+    private static final long CONTEXT_USAGE_FALLBACK_MS = 1_500L;
+    private volatile String pendingUsageJson;
+    private volatile JSONObject lastContextUsage;
+    private volatile boolean contextUsageInFlight = false;
+    private final Runnable flushPendingUsageRunnable = this::flushPendingUsage;
     private volatile String activeOutboundTurnId = "";
     private volatile boolean spawnInProgress = false;
 
@@ -155,8 +165,121 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         this.prefs = appContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
         this.decoder = new ClaudeEventDecoder(
             () -> visibleThreadId(),
-            (function, value) -> { emit(function, value); return kotlin.Unit.INSTANCE; }
+            (function, value) -> { onDecoderEvent(function, value); return kotlin.Unit.INSTANCE; }
         );
+    }
+
+    /**
+     * Routes decoder output, holding back `onTokenUsage` so the turn's token counts and the current
+     * context occupancy reach the UI as ONE event.
+     *
+     * The context numbers come from a separate `get_context_usage` request, so emitting the usage
+     * immediately and the context a moment later would be two `tokenUsageUpdated` events for the
+     * same turn — and the host's handler replaces rather than merges, so the second (context-only)
+     * payload would wipe the input/output counts. Holding the first one for the length of one local
+     * round-trip is cheaper than teaching the host to merge.
+     */
+    private void onDecoderEvent(String function, String value) {
+        if ("onTokenUsage".equals(function)) {
+            pendingUsageJson = value;
+            requestContextUsage();
+            return;
+        }
+        emit(function, value);
+    }
+
+    private void requestContextUsage() {
+        if (!running) {
+            flushPendingUsage();
+            return;
+        }
+        contextUsageInFlight = true;
+        try {
+            sendControl(CONTEXT_USAGE_REQUEST_ID, new JSONObject().put("subtype", "get_context_usage"));
+        } catch (Exception e) {
+            contextUsageInFlight = false;
+            Log.w(TAG, "unable to request context usage", e);
+            flushPendingUsage();
+            return;
+        }
+        // The probe normally answers in milliseconds; never leave the footer waiting on it.
+        mainHandler.removeCallbacks(flushPendingUsageRunnable);
+        mainHandler.postDelayed(flushPendingUsageRunnable, CONTEXT_USAGE_FALLBACK_MS);
+    }
+
+    private void flushPendingUsage() {
+        mainHandler.removeCallbacks(flushPendingUsageRunnable);
+        contextUsageInFlight = false;
+        String usage = pendingUsageJson;
+        pendingUsageJson = null;
+        if (usage == null) return;
+        emit("onTokenUsage", mergeContextIntoUsage(usage, lastContextUsage));
+    }
+
+    /**
+     * Folds the `get_context_usage` answer into the turn's usage payload.
+     *
+     * Claude reports neither a context window nor a current-context total on the result line, so
+     * without this the UI had no way to say how full the conversation was. `maxTokens` is the
+     * effective window the CLI compacts against; the autocompact buffer is subtracted to get the
+     * threshold where compaction kicks in. Anything missing is simply left out — the UI hides the
+     * metric rather than showing a guess.
+     */
+    static String mergeContextIntoUsage(String usageJson, JSONObject context) {
+        JSONObject payload;
+        try {
+            payload = new JSONObject(usageJson == null || usageJson.isBlank() ? "{}" : usageJson);
+        } catch (Exception e) {
+            return usageJson;
+        }
+        if (context == null) return payload.toString();
+        try {
+            long total = context.optLong("totalTokens", context.optLong("total_tokens", 0L));
+            long window = context.optLong("maxTokens", context.optLong("max_tokens", 0L));
+            if (window <= 0L) window = context.optLong("rawMaxTokens", context.optLong("raw_max_tokens", 0L));
+            if (total > 0L) payload.put("contextTokens", total);
+            if (window > 0L) payload.put("contextWindow", window);
+            long buffer = autocompactBufferTokens(context);
+            if (window > 0L && buffer > 0L && window > buffer) payload.put("autoCompactTokenLimit", window - buffer);
+            if (total > 0L && window > 0L) payload.put("contextUsageReliable", true);
+            JSONArray categories = contextCategoryRows(context);
+            if (categories.length() > 0) payload.put("contextCategories", categories);
+        } catch (Exception e) {
+            Log.w(TAG, "unable to fold context usage into the turn usage", e);
+        }
+        return payload.toString();
+    }
+
+    /** Tokens the CLI reserves before auto-compaction, from the "Autocompact buffer" category. */
+    private static long autocompactBufferTokens(JSONObject context) {
+        JSONArray categories = context.optJSONArray("categories");
+        if (categories == null) return 0L;
+        for (int i = 0; i < categories.length(); i++) {
+            JSONObject item = categories.optJSONObject(i);
+            if (item == null) continue;
+            String name = item.optString("name", "").toLowerCase(java.util.Locale.ROOT);
+            if (name.contains("autocompact") || name.contains("auto-compact")) {
+                return Math.max(0L, item.optLong("tokens", 0L));
+            }
+        }
+        return 0L;
+    }
+
+    /** The breakdown rows, renamed to the `{name, tokens}` shape the host parser reads. */
+    private static JSONArray contextCategoryRows(JSONObject context) {
+        JSONArray source = context.optJSONArray("categories");
+        JSONArray rows = new JSONArray();
+        if (source == null) return rows;
+        for (int i = 0; i < source.length(); i++) {
+            JSONObject item = source.optJSONObject(i);
+            if (item == null) continue;
+            String name = item.optString("name", "");
+            if (name.isEmpty()) continue;
+            try {
+                rows.put(new JSONObject().put("name", name).put("tokens", Math.max(0L, item.optLong("tokens", 0L))));
+            } catch (Exception ignored) {}
+        }
+        return rows;
     }
 
     String visibleThreadId() { return sessionId == null ? "" : sessionId; }
@@ -227,6 +350,12 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         ready = false;
         sessionId = null;
         provisionalSessionId = "";
+        // A new process means the previous context snapshot is meaningless; never fold a stale
+        // window into this session's first turn.
+        pendingUsageJson = null;
+        lastContextUsage = null;
+        contextUsageInFlight = false;
+        mainHandler.removeCallbacks(flushPendingUsageRunnable);
         decoder.reset("");
         // Resume hardening: a stale/ghost resume id (failed init, cross-backend residue) makes
         // the CLI print "No conversation found with session ID: ..." and exit immediately. Verify
@@ -649,6 +778,10 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         stopRequested = true;
         mainHandler.removeCallbacks(readinessFallbackRunnable);
         mainHandler.removeCallbacks(initNoticeRunnable);
+        mainHandler.removeCallbacks(flushPendingUsageRunnable);
+        // A turn cut short by the stop still deserves its token counts; fold in whatever context
+        // snapshot we already have rather than dropping the event.
+        flushPendingUsage();
         // Clear the running flag BEFORE destroying the process: the reader thread's finally
         // observes it to decide whether the close is a deliberate stop or an unexpected exit.
         running = false;
@@ -857,6 +990,13 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         JSONObject response = envelope.optJSONObject("response");
         if (response == null) return false;
         String requestId = response.optString("request_id", "");
+        if (CONTEXT_USAGE_REQUEST_ID.equals(requestId)) {
+            JSONObject payload = response.optString("subtype", "success").startsWith("error")
+                ? null : response.optJSONObject("response");
+            if (payload != null) lastContextUsage = payload;
+            flushPendingUsage();
+            return true;
+        }
         if (!MCP_STATUS_REQUEST_ID.equals(requestId)) return false;
         mcpStatusInFlight = false;
         if (response.optString("subtype", "success").startsWith("error")) {

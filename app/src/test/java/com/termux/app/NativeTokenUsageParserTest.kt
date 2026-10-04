@@ -70,4 +70,49 @@ class NativeTokenUsageParserTest {
         assertEquals(90000L, usage.autoCompactTokenLimit)
         assertTrue(usage.contextUsageReliable)
     }
+
+    /**
+     * Claude's result line reports cached input as `cache_read_input_tokens` (+
+     * `cache_creation_input_tokens` for tokens written to the cache this turn). None of those keys
+     * were in the list, so "输入与缓存" always claimed 0 cached tokens.
+     */
+    @Test
+    fun mapsClaudeCacheTokenKeys() {
+        val usage = NativeTokenUsageParser.parse(
+            """{"input_tokens":12,"cache_read_input_tokens":9000,"cache_creation_input_tokens":500,"output_tokens":40}""",
+        )!!
+        assertEquals(9_500L, usage.cachedInputTokens)
+        // Cache writes are billed closer to plain input than to a cache hit, so they count as input.
+        assertEquals(512L, usage.inputTokens)
+        assertEquals(40L, usage.outputTokens)
+    }
+
+    @Test
+    fun readsTheContextBreakdownWhenPresent() {
+        val usage = NativeTokenUsageParser.parse(
+            """{"input_tokens":10,"output_tokens":2,"contextTokens":21249,"contextWindow":786432,
+               "contextUsageReliable":true,
+               "contextCategories":[{"name":"System prompt","tokens":1838},{"name":"Messages","tokens":31}]}""",
+        )!!
+        assertEquals(2, usage.contextCategories.size)
+        assertEquals("System prompt", usage.contextCategories[0].name)
+        assertEquals(1838L, usage.contextCategories[0].tokens)
+        assertTrue(usage.contextOccupancyKnown)
+        assertEquals(21_249.0 / 786_432.0, usage.contextUsedFraction, 0.000001)
+    }
+
+    @Test
+    fun occupancyIsNotClaimedWithoutAWindowOrAReliableTotal() {
+        // A missing window is not "0 used": the UI hides the metric instead of printing a guess.
+        val noWindow = NativeTokenUsageParser.parse("""{"input_tokens":10,"contextTokens":5000}""")!!
+        assertFalse(noWindow.contextOccupancyKnown)
+        assertEquals(0.0, noWindow.contextUsedFraction, 0.0)
+
+        // An explicit unreliability marker must win even when both numbers are present.
+        val unreliable = NativeTokenUsageParser.parse(
+            """{"input_tokens":10,"contextTokens":5000,"contextWindow":100000,"contextUsageReliable":false}""",
+        )!!
+        assertFalse(unreliable.contextUsageReliable)
+        assertFalse(unreliable.contextOccupancyKnown)
+    }
 }
