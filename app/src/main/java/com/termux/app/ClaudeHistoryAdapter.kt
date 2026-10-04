@@ -14,6 +14,35 @@ import java.io.File
  * and renders a lightweight history snapshot from user/assistant text for resumed sessions —
  * mirroring the codex history pipeline without depending on the Claude CLI.
  */
+/**
+ * Prompt text the bridge prepends for the model's benefit, never for the user's eyes: the active
+ * goal (`ClaudeAgentBridge.goalPrefix`) and plan mode (`PLAN_MODE_PREFIX`). The CLI transcript
+ * stores the *prefixed* text, so replaying it verbatim showed the user a header they never typed —
+ * and the drawer title inherited it too. Both are separated from the real prompt by a blank line;
+ * plan mode wraps the goal, so strip repeatedly. Keep the literals in sync with ClaudeAgentBridge.
+ */
+private val INJECTED_PROMPT_PREFIXES = listOf(
+    "【当前目标】",
+    "请先制定实施计划：只进行分析与调研，不要修改、创建或删除任何文件，完成后调用 ExitPlanMode 提交计划供审批。",
+)
+
+/** Removes bridge-injected prompt prefixes from a replayed user message. */
+internal fun stripInjectedPromptPrefixes(text: String): String {
+    var result = text
+    var changed = true
+    while (changed) {
+        changed = false
+        for (marker in INJECTED_PROMPT_PREFIXES) {
+            if (!result.startsWith(marker)) continue
+            val separator = result.indexOf("\n\n")
+            if (separator < 0) continue
+            result = result.substring(separator + 2)
+            changed = true
+        }
+    }
+    return result
+}
+
 internal object ClaudeHistoryAdapter {
     private const val MAX_SESSION_SCAN = 400
     private const val MAX_TITLE_CHARS = 52
@@ -87,7 +116,7 @@ internal object ClaudeHistoryAdapter {
             val type = entry.optString("type")
             if (type == "user") {
                 flushAssistant(messages, assistantBuffer, createdAt)
-                val text = extractText(entry.optJSONObject("message"))
+                val text = stripInjectedPromptPrefixes(extractText(entry.optJSONObject("message")))
                 if (text.isNotBlank()) messages.add(
                     NativeChatMessage(role = NativeChatRole.USER, content = text, revealStartedAt = createdAt),
                 )
@@ -247,7 +276,7 @@ internal object ClaudeHistoryAdapter {
                     val entry = runCatching { JSONObject(line) }.getOrNull() ?: continue
                     if (entry.optString("type") != "user") continue
                     if (!entry.optString("sessionId").equals(sessionId, ignoreCase = true)) continue
-                    val text = extractText(entry.optJSONObject("message"))
+                    val text = stripInjectedPromptPrefixes(extractText(entry.optJSONObject("message")))
                     if (text.isNotBlank()) return text.trim().replace(Regex("\\s+"), " ").take(MAX_TITLE_CHARS)
                 }
             }
