@@ -155,4 +155,46 @@ class NativeProtocolEventDecoderTest {
         assertEquals("agent-object", event.agentThreadId)
         assertEquals("completed", event.status)
     }
+
+    @Test
+    fun whitespaceOnlyDeltasSurviveSoWordsDoNotRunTogether() {
+        // Codex 0.160.0 streams reasoning token by token, and the spaces arrive as their own
+        // deltas. Treating " " as empty dropped every one of them: "We need run command."
+        // rendered as "Weneedruncommand.".
+        val events = NativeProtocolEventDecoder.decodeDeltas(
+            """
+            {"kind":"reasoningDelta","threadId":"t","turnId":"u","itemId":"r","sequence":1,"delta":"We"}
+            {"kind":"reasoningDelta","threadId":"t","turnId":"u","itemId":"r","sequence":2,"delta":" "}
+            {"kind":"reasoningDelta","threadId":"t","turnId":"u","itemId":"r","sequence":3,"delta":"need"}
+            {"kind":"assistantDelta","threadId":"t","turnId":"u","itemId":"a","sequence":4,"delta":" "}
+            {"kind":"assistantDelta","threadId":"t","turnId":"u","itemId":"a","sequence":5,"delta":"Kernel:"}
+            {"kind":"commandOutput","threadId":"t","turnId":"u","itemId":"c","sequence":6,"delta":" "}
+            """.trimIndent(),
+        )
+        val deltas = events.map {
+            when (it) {
+                is NativeProtocolEvent.ReasoningDelta -> it.delta
+                is NativeProtocolEvent.AssistantDelta -> it.delta
+                else -> error("unexpected ${it::class.simpleName}")
+            }
+        }
+        assertEquals(listOf("We", " ", "need", " ", "Kernel:"), deltas)
+        assertEquals(
+            "We need",
+            events.filterIsInstance<NativeProtocolEvent.ReasoningDelta>().joinToString("") { it.delta },
+        )
+
+        val commandDeltas = NativeProtocolEventDecoder.decodeCommandOutputs(
+            """{"kind":"commandOutput","threadId":"t","turnId":"u","itemId":"c","sequence":1,"delta":" "}""",
+        )
+        assertEquals(listOf(" "), commandDeltas.map { it.delta })
+    }
+
+    @Test
+    fun completedItemTextKeepsItsWhitespace() {
+        val event = NativeProtocolEventDecoder.decodeLifecycle(
+            """{"kind":"reasoningCompleted","threadId":"t","turnId":"u","itemId":"r","item":{"text":"We need run command. No skill relevant."}}""",
+        )
+        assertEquals("We need run command. No skill relevant.", (event as NativeProtocolEvent.ReasoningCompleted).text)
+    }
 }

@@ -36,12 +36,15 @@ internal object NativeProtocolEventDecoder {
                 },
             )
             val common = common(body, fallbackThreadId, payload)
-            val delta = text(body, "delta").ifBlank { text(payload, "delta") }
-            // Blank reasoning/plan deltas carry no content and no side channel, but downstream
-            // still flips phase and burns a snapshot cycle per event. Drop them here.
-            // NOTE: blank assistantDelta is intentionally kept: older app-server versions
+            val delta = contentText(body, "delta").ifEmpty { contentText(payload, "delta") }
+            // Content-less reasoning/plan deltas would flip phase and burn a snapshot cycle per
+            // event, so they are dropped here. Only *empty* deltas qualify: a delta that is just a
+            // space is real content. Codex (0.160.0) streams reasoning token by token with the
+            // spaces as their own deltas, and `isBlank()` swallowed every one of them, rendering
+            // "We need run command." as "Weneedruncommand.".
+            // NOTE: empty assistantDelta is intentionally kept: older app-server versions
             // represent item/started as an empty AssistantDelta (see NativeActivityReducer).
-            if (delta.isBlank() && (kind == "reasoningDelta" || kind == "planDelta")) return@mapNotNull null
+            if (delta.isEmpty() && (kind == "reasoningDelta" || kind == "planDelta")) return@mapNotNull null
             when (kind) {
                 "reasoningDelta" -> NativeProtocolEvent.ReasoningDelta(
                     threadId = common.threadId, turnId = common.turnId, itemId = common.itemId,
@@ -72,11 +75,12 @@ internal object NativeProtocolEventDecoder {
             )
             if (kind !in setOf("commandOutput", "commandDelta")) return@mapNotNull null
             val common = common(body, fallbackThreadId, payload)
-            val commandDelta = text(body, "delta").ifBlank { text(payload, "delta") }
+            val commandDelta = contentText(body, "delta").ifEmpty { contentText(payload, "delta") }
             val outputRef = text(body, "outputRef", "output_ref").ifBlank { text(payload, "outputRef", "output_ref") }
-            // A blank delta with no payload reference is a no-op downstream; drop it before it
-            // occupies a queue slot and advances the sequence watermark.
-            if (commandDelta.isBlank() && outputRef.isBlank()) return@mapNotNull null
+            // A delta with no payload reference is a no-op downstream; drop it before it occupies
+            // a queue slot and advances the sequence watermark. Whitespace still counts: terminal
+            // output arrives in tiny pieces and a lone space is one of them.
+            if (commandDelta.isEmpty() && outputRef.isBlank()) return@mapNotNull null
             NativeProtocolEvent.CommandOutput(
                 threadId = common.threadId,
                 turnId = common.turnId,
@@ -173,7 +177,7 @@ internal object NativeProtocolEventDecoder {
             )
             "reasoningCompleted" -> NativeProtocolEvent.ReasoningCompleted(
                 common.threadId, common.turnId, common.itemId,
-                text(item, "text", "summary"), sequence = common.sequence, timestampMs = common.timestampMs,
+                contentText(item, "text", "summary"), sequence = common.sequence, timestampMs = common.timestampMs,
             )
             "assistantStarted" -> NativeProtocolEvent.AssistantDelta(
                 common.threadId, common.turnId, common.itemId, delta = "",
@@ -181,7 +185,7 @@ internal object NativeProtocolEventDecoder {
             )
             "assistantCompleted" -> NativeProtocolEvent.AssistantCompleted(
                 common.threadId, common.turnId, common.itemId,
-                text = text(item, "text", "content"), finalAnswer = isFinalAssistantItem(item),
+                text = contentText(item, "text", "content"), finalAnswer = isFinalAssistantItem(item),
                 sequence = common.sequence, timestampMs = common.timestampMs,
             )
             "planStarted" -> NativeProtocolEvent.PlanStarted(
@@ -189,7 +193,7 @@ internal object NativeProtocolEventDecoder {
             )
             "planCompleted" -> NativeProtocolEvent.PlanCompleted(
                 common.threadId, common.turnId, common.itemId,
-                text(item, "text", "content"), sequence = common.sequence, timestampMs = common.timestampMs,
+                contentText(item, "text", "content"), sequence = common.sequence, timestampMs = common.timestampMs,
             )
             "toolCompleted" -> NativeProtocolEvent.ToolCompleted(
                 common.threadId, common.turnId, common.itemId,
@@ -291,6 +295,24 @@ internal object NativeProtocolEventDecoder {
         keys.forEach { key ->
             val direct = value.optString(key, "").trim()
             if (direct.isNotBlank() && !direct.equals("null", true)) return direct
+        }
+        return ""
+    }
+
+    /**
+     * Reads a *content* field with whitespace intact.
+     *
+     * [text] trims, which is right for identifiers (" thread_id ") and wrong for prose: Codex
+     * streams reasoning and answer deltas token by token, and a delta that is a single space is a
+     * real character. Trimmed away here, every space vanished and the text read
+     * "Weneedruncommand." instead of "We need run command."
+     */
+    private fun contentText(value: JSONObject?, vararg keys: String): String {
+        if (value == null) return ""
+        keys.forEach { key ->
+            if (!value.has(key) || value.isNull(key)) return@forEach
+            val direct = value.optString(key, "")
+            if (direct != "null") return direct
         }
         return ""
     }

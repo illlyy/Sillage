@@ -436,15 +436,22 @@ final class CodexAppServerBridgeProtocol {
         if (item == null) return "";
         String text = item.optString("text", "");
         if (!text.isEmpty()) return text;
-        JSONArray summary = item.optJSONArray("summary");
-        if (summary == null) return "";
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < summary.length(); i++) {
-            Object part = summary.opt(i);
-            if (part instanceof String) out.append(part);
-            else if (part instanceof JSONObject) out.append(((JSONObject) part).optString("text", ""));
+        // Codex 0.160.0 sends the summary as `summary_text` (snake_case); older builds used
+        // `summary`. `raw_content` is deliberately not read here: that is the model's unfiltered
+        // chain of thought, which the app has never displayed and should not start showing just
+        // because a new field name showed up.
+        for (String key : new String[] { "summary", "summary_text" }) {
+            JSONArray parts = item.optJSONArray(key);
+            if (parts == null) continue;
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < parts.length(); i++) {
+                Object part = parts.opt(i);
+                if (part instanceof String) out.append((String) part);
+                else if (part instanceof JSONObject) out.append(((JSONObject) part).optString("text", ""));
+            }
+            if (out.length() > 0) return out.toString();
         }
-        return out.toString();
+        return "";
     }
 
     static String extractAgentMessageText(JSONObject item) {

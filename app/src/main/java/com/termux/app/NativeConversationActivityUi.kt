@@ -59,6 +59,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowDown01
@@ -160,6 +165,14 @@ private fun NativeActivityTimelineCard(
     onAutoCollapsed: (() -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
+    // Same motion language as the container-transform playground in Developer options
+    // (PageTransitionPlayground): the M3 emphasized curve, a long 360 ms body, a restrained 0.94
+    // scale for depth, and a fade that recedes to 0.3 instead of vanishing. The old fold ran three
+    // different durations (220/260/240) on a plain decelerate curve with no scale at all, which is
+    // why it read as "cheap" next to that playground — short, flat, and with no depth cue.
+    val motionEasing = remember { CubicBezierEasing(0.2f, 0f, 0f, 1f) }
+    val foldEnter = tween<IntSize>(durationMillis = 360, easing = motionEasing)
+    val foldExit = tween<IntSize>(durationMillis = 300, easing = motionEasing)
     val runningCommands = group.runningCommandCount
     val failedItems = group.failedCount
     val automaticExpansion = group.expandedByDefault ||
@@ -190,23 +203,17 @@ private fun NativeActivityTimelineCard(
         }
     }
     SideEffect {
-        if (expanded) {
-            // Expand the shell first. The body only enters after the full-width shell has settled,
-            // so reversing a partially collapsed card never lays out long content in a narrow pill.
-            chromeVisibility.targetState = true
-            bodyVisibility.targetState = chromeFullyExpanded
-        } else {
-            // Collapse width and body in the SAME phase. Previously the width waited for
-            // bodyVisibility to fully settle (bodyFullyCollapsed), so the Surface stayed a
-            // full-width colored block while the body faded and shrank — and if the exit was
-            // interrupted it stranded the card as a full-width empty rectangle.
-            bodyVisibility.targetState = false
-            chromeVisibility.targetState = false
-        }
+        // Shell and body move together. Staging them (the shell settles, then the body enters)
+        // left a ~180 ms gap between the tap and any content appearing, which read as the tap
+        // being ignored. The horizontal step is a clip rather than a re-measure, so laying the
+        // body out early never squeezes long content into a narrow pill. Collapsing stays in one
+        // phase: with a staged collapse the Surface used to linger as a full-width empty block.
+        chromeVisibility.targetState = expanded
+        bodyVisibility.targetState = expanded
     }
     val rotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
-        animationSpec = spring(dampingRatio = .88f, stiffness = 430f),
+        animationSpec = tween(durationMillis = 360, easing = motionEasing),
         label = "activityTimelineArrow",
     )
     val cardShape = RoundedCornerShape(18.dp)
@@ -245,8 +252,8 @@ private fun NativeActivityTimelineCard(
         Column(Modifier.clipToBounds()) {
             AnimatedVisibility(
                 visibleState = chromeVisibility,
-                enter = expandHorizontally(tween(180), expandFrom = Alignment.Start),
-                exit = shrinkHorizontally(tween(180), shrinkTowards = Alignment.Start),
+                enter = expandHorizontally(foldEnter, expandFrom = Alignment.Start),
+                exit = shrinkHorizontally(foldExit, shrinkTowards = Alignment.Start),
             ) {
                 // A zero-height, full-width child is the card's width anchor. Because the Surface
                 // measures this animated width directly, its background and border shrink with it
@@ -319,13 +326,18 @@ private fun NativeActivityTimelineCard(
             }
             AnimatedVisibility(
                 visibleState = bodyVisibility,
-                // Collapse width and height together so the card background folds with the body
-                // instead of lingering as a full-width block. Fade stays in lockstep with the
-                // height tween (the old fade finished early, leaving a transparent shrinking
-                // rectangle that popped); the horizontal clip mirrors the chrome width phase so
-                // the Surface never outlives the content at full width.
-                enter = fadeIn(tween(220)) + expandVertically(tween(260, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) + expandHorizontally(tween(240, easing = FastOutSlowInEasing), expandFrom = Alignment.Start),
-                exit = fadeOut(tween(200)) + shrinkVertically(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top) + shrinkHorizontally(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Start),
+                // Container-transform shape: the shell opens on the emphasized curve while the
+                // body scales up from 0.94, so the content reads as rising out of the card instead
+                // of being revealed. The short delayed fade means the frame of the card is there
+                // first, and fading out to 0.3 (not 0) keeps the collapse from looking like a cut.
+                enter = scaleIn(initialScale = 0.94f, animationSpec = tween(360, easing = motionEasing)) +
+                    fadeIn(tween(170, delayMillis = 60, easing = LinearOutSlowInEasing)) +
+                    expandVertically(foldEnter, expandFrom = Alignment.Top) +
+                    expandHorizontally(foldEnter, expandFrom = Alignment.Start),
+                exit = scaleOut(targetScale = 0.94f, animationSpec = tween(300, easing = motionEasing)) +
+                    fadeOut(tween(150, delayMillis = 90), targetAlpha = 0.3f) +
+                    shrinkVertically(foldExit, shrinkTowards = Alignment.Top) +
+                    shrinkHorizontally(foldExit, shrinkTowards = Alignment.Start),
             ) {
                 Column {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .38f))

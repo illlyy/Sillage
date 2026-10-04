@@ -69,7 +69,18 @@ final class TermuxInstaller {
     private static final String LOG_TAG = "TermuxInstaller";
     private static final String LEGACY_TERMUX_PREFIX = "/data/data/com.termux/files/usr";
     private static final String LEGACY_TERMUX_HOME = "/data/data/com.termux/files/home";
-    private static final String[] APP_MANAGED_BINARIES = {"codex", "mihomo"};
+    /**
+     * Binaries the app downloaded into $PREFIX itself and must survive a bootstrap (re)install.
+     * The bootstrap wipes $PREFIX before extracting, so anything missing from this list is deleted
+     * along with it — which is exactly what used to happen to the Claude CLI: opening the terminal
+     * on a device that already had it installed silently removed it, and the settings page then
+     * reported "Claude CLI not installed" with no way to tell why.
+     *
+     * `claude` is {@code ClaudeInstaller.BINARY_NAME}. The musl loader that binary needs lives in
+     * $PREFIX/lib and is not preserved here on purpose: the bootstrap's lib tree does not ship it,
+     * and ClaudeMuslRuntime reinstalls it from bundled assets the next time the CLI is spawned.
+     */
+    private static final String[] APP_MANAGED_BINARIES = {"codex", "claude", "mihomo"};
 
     /** Performs bootstrap setup if necessary. */
     static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {

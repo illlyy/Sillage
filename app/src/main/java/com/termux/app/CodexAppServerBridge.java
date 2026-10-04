@@ -1988,6 +1988,10 @@ final class CodexAppServerBridge extends NativeBackendBridge {
             JSONObject item = params.optJSONObject("item");
             String itemType = item == null ? "" : item.optString("type", item.optString("item_type", ""));
             String normalizedItemType = CodexAppServerBridgeProtocol.normalizeItemType(itemType);
+            // Codex 0.160.0 echoes the user's own turn back as a UserMessage item. It is already
+            // rendered from the local echo, and the catch-all below would otherwise turn it into a
+            // tool card literally labelled "userMessage".
+            if ("usermessage".equals(normalizedItemType)) return;
             String lifecycle = "item/started".equals(method) ? "started" : "completed";
             String kind;
             if (CodexAppServerBridgeProtocol.isContextCompactionItem(params)) kind = "contextCompaction" + CodexAppServerBridgeProtocol.capitalize(lifecycle);
