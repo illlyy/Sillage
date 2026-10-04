@@ -571,4 +571,47 @@ class ClaudeEventDecoderTest {
         assertEquals("webSearch", payload.optString("type"))
         assertEquals("https://x.dev", payload.optString("subject"))
     }
+
+    @Test
+    fun `manual compaction reports the status pair exactly once`() {
+        // A real /compact streams: status:compacting -> status:compact_result -> compact_boundary.
+        // Emitting from both the status pair and the boundary painted two dividers for one
+        // compaction, so the boundary must be swallowed when the pair already fired.
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.reset("s1")
+        decoder.decode(line("""{"type":"system","subtype":"status","status":"compacting","session_id":"s1"}"""), "s1")
+        decoder.decode(line("""{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"s1"}"""), "s1")
+        decoder.decode(line("""{"type":"system","subtype":"compact_boundary","session_id":"s1"}"""), "s1")
+        assertEquals(
+            listOf("onCompactStatus" to "started", "onCompactStatus" to "completed"),
+            events.filter { it.first == "onCompactStatus" },
+        )
+    }
+
+    @Test
+    fun `auto compaction still reports from the boundary alone`() {
+        // A CLI-triggered compaction announces itself only at the boundary; that path must keep
+        // working, otherwise the capsule spins forever.
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.reset("s1")
+        decoder.decode(line("""{"type":"system","subtype":"compact_boundary","session_id":"s1"}"""), "s1")
+        assertEquals(
+            listOf("onCompactStatus" to "started", "onCompactStatus" to "completed"),
+            events.filter { it.first == "onCompactStatus" },
+        )
+    }
+
+    @Test
+    fun `failed compaction surfaces the reason instead of a success`() {
+        val events = mutableListOf<Pair<String, String>>()
+        val decoder = decoder(events)
+        decoder.reset("s1")
+        decoder.decode(line("""{"type":"system","subtype":"status","status":"compacting","session_id":"s1"}"""), "s1")
+        decoder.decode(line("""{"type":"system","subtype":"status","compact_result":"no_messages","session_id":"s1"}"""), "s1")
+        val outcomes = events.filter { it.first == "onCompactStatus" }.map { it.second }
+        assertEquals("started", outcomes.first())
+        assertTrue("unexpected outcome: $outcomes", outcomes.last().contains("no_messages"))
+    }
 }

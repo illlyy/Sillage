@@ -135,4 +135,17 @@ class ClaudeMcpConfigStoreTest {
         if (array == null) return@buildList
         for (index in 0 until array.length()) array.optString(index)?.let(::add)
     }
+
+    /**
+     * The bridge launches the CLI with CLAUDE_CONFIG_DIR=<home>/.claude, which relocates the global
+     * config with it. Writing <home>/.claude.json put every server the user added into a file the
+     * CLI never read, so this path is load-bearing — assert it explicitly.
+     */
+    @Test
+    fun `global table sits under the config dir the CLI is launched with`() {
+        assertEquals(
+            java.io.File(com.termux.shared.termux.TermuxConstants.TERMUX_HOME_DIR, ".claude/.claude.json").path,
+            ClaudeMcpConfigStore.globalFile().path,
+        )
+    }
 }

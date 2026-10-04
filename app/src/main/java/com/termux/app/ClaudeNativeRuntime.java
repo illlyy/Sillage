@@ -71,6 +71,17 @@ final class ClaudeNativeRuntime {
         return bridge != null && bridge.isRunning();
     }
 
+    /**
+     * Asks the live CLI for its MCP server status. Returns false when there is no session to ask —
+     * the reply comes over the control channel of a running process, so callers should tell the
+     * user to open a conversation rather than wait for a probe that can never arrive.
+     */
+    static synchronized boolean refreshMcpStatus() {
+        if (bridge == null || !bridge.isRunning()) return false;
+        bridge.refreshMcpStatus();
+        return true;
+    }
+
     static synchronized String currentThreadId() {
         return bridge == null ? null : bridge.currentVisibleThreadId();
     }

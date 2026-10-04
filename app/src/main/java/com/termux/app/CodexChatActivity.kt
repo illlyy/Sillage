@@ -886,9 +886,17 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 // Retained bridges used a string-only RPC status. Fold it into the same reducer
                 // instead of appending a second NOTICE capsule.
                 when (value.lowercase()) {
-                    "started" -> if (chatState.compactionItems.none { !it.isTerminal }) {
-                        chatState.closeActivityBoundary()
-                        chatState.beginManualCompaction()
+                    "started" -> {
+                        val pending = chatState.compactionItems.firstOrNull { !it.isTerminal }
+                        if (pending == null) {
+                            chatState.closeActivityBoundary()
+                            chatState.beginManualCompaction()
+                        } else {
+                            // The backend only reports the start once it really began summarising.
+                            // That is a model call, so give it the long budget instead of the short
+                            // "did the request land at all" one.
+                            scheduleCompactionRequestTimeout(pending, COMPACTION_ACTIVE_TIMEOUT_MS)
+                        }
                     }
                     "completed" -> chatState.completeManualCompactionRpc(success = true)
                     "cancelled", "canceled" -> chatState.completeManualCompactionRpc(success = false, cancelled = true)

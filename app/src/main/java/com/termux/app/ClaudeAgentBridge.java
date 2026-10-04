@@ -108,6 +108,19 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     private volatile boolean stopRequested = false;
     private volatile boolean turnResultSeen = false;
     private volatile boolean lastResultFailed = false;
+
+    // MCP status probe. The CLI answers `mcp_status` over the control channel with the same server
+    // list its /mcp panel shows, but it reports `pending` while servers are still handshaking —
+    // so a probe that finds any pending server re-asks a bounded number of times instead of
+    // recording "checking" forever.
+    private static final String MCP_STATUS_REQUEST_ID = "req_mcp_status";
+    private static final int MCP_STATUS_MAX_REPROBES = 3;
+    private static final long MCP_STATUS_REPROBE_DELAY_MS = 2_000L;
+    /** Give the CLI a moment to finish booting before the first probe; a too-early probe just
+     *  reports every server as `pending` and burns a re-probe round. */
+    private static final long MCP_STATUS_FIRST_PROBE_DELAY_MS = 3_000L;
+    private volatile boolean mcpStatusInFlight = false;
+    private volatile int mcpStatusReprobeBudget = 0;
     private volatile String activeOutboundTurnId = "";
     private volatile boolean spawnInProgress = false;
 
@@ -440,6 +453,12 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                     .put("entryPath", entryPath));
             } catch (Exception ignored) {}
             sendControl("req_init", new JSONObject().put("subtype", "initialize").put("hooks", new JSONObject()));
+            // Probe MCP connectivity once per spawn so the MCP page and the work panel have a
+            // recent answer without the user having to hit Refresh. Servers still handshaking are
+            // re-probed a bounded number of times (see publishMcpStatus).
+            mcpStatusInFlight = false;
+            mcpStatusReprobeBudget = MCP_STATUS_MAX_REPROBES;
+            mainHandler.postDelayed(this::sendMcpStatusProbe, MCP_STATUS_FIRST_PROBE_DELAY_MS);
             mainHandler.removeCallbacks(readinessFallbackRunnable);
             mainHandler.removeCallbacks(initNoticeRunnable);
             if (routedThroughProxy) {
@@ -730,6 +749,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             return;
         }
         if ("control_response".equals(type)) {
+            if (handleControlResponse(message)) return;
             return;
         }
         // A fresh session echoes its authoritative session id only on the first user-message
@@ -828,6 +848,116 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         } catch (Exception e) {
             Log.w(TAG, "control request failed", e);
         }
+    }
+
+    // ------------------------------------------------------------------ mcp status
+
+    /** Handles the replies to control requests we send; returns true when the message was ours. */
+    private boolean handleControlResponse(JSONObject envelope) {
+        JSONObject response = envelope.optJSONObject("response");
+        if (response == null) return false;
+        String requestId = response.optString("request_id", "");
+        if (!MCP_STATUS_REQUEST_ID.equals(requestId)) return false;
+        mcpStatusInFlight = false;
+        if (response.optString("subtype", "success").startsWith("error")) {
+            publishMcpStatusFailure(response.optString("error", "MCP status probe was rejected"));
+            return true;
+        }
+        JSONObject payload = response.optJSONObject("response");
+        JSONArray servers = payload == null ? null : payload.optJSONArray("mcpServers");
+        if (servers == null) {
+            publishMcpStatusFailure("MCP status response carried no server list");
+            return true;
+        }
+        publishMcpStatus(servers);
+        return true;
+    }
+
+    /**
+     * Re-probe MCP server status on demand (settings page / work panel).
+     *
+     * Requires a live CLI: the status comes from the running process over the control channel, so
+     * with no session attached there is nothing to ask. Callers surface that as "open a
+     * conversation first" rather than showing a permanent spinner.
+     */
+    @Override
+    void refreshMcpStatus() {
+        if (!running) return;
+        mcpStatusReprobeBudget = MCP_STATUS_MAX_REPROBES;
+        sendMcpStatusProbe();
+    }
+
+    private void sendMcpStatusProbe() {
+        if (!running || mcpStatusInFlight) return;
+        mcpStatusInFlight = true;
+        try {
+            sendControl(MCP_STATUS_REQUEST_ID, new JSONObject().put("subtype", "mcp_status"));
+        } catch (Exception e) {
+            mcpStatusInFlight = false;
+            Log.w(TAG, "unable to request MCP status", e);
+        }
+    }
+
+    /**
+     * Translates the CLI's `mcpServers` list into the payload shape the shared runtime-status store
+     * already understands, so the MCP page and the work panel render Claude exactly like Codex.
+     */
+    static JSONObject mcpStatusPayload(JSONArray servers) throws Exception {
+        JSONArray data = new JSONArray();
+        if (servers != null) {
+            for (int i = 0; i < servers.length(); i++) {
+                JSONObject server = servers.optJSONObject(i);
+                if (server == null) continue;
+                String name = server.optString("name", server.optString("serverName", "")).trim();
+                if (name.isEmpty()) continue;
+                JSONObject entry = new JSONObject().put("name", name)
+                    .put("status", server.optString("status", ""));
+                // Pass the reason through when the CLI gives one, so the badge can explain itself.
+                String error = server.optString("error", "");
+                if (!error.isEmpty()) entry.put("error", error);
+                if (server.has("tools")) entry.put("tools", server.opt("tools"));
+                data.put(entry);
+            }
+        }
+        return new JSONObject().put("result", new JSONObject().put("data", data));
+    }
+
+    /** True while any server is still handshaking (`pending`); those are worth another probe. */
+    static boolean hasPendingServer(JSONObject payload) {
+        JSONArray data = payload == null ? null
+            : payload.optJSONObject("result") == null ? null
+            : payload.optJSONObject("result").optJSONArray("data");
+        if (data == null) return false;
+        for (int i = 0; i < data.length(); i++) {
+            JSONObject entry = data.optJSONObject(i);
+            if (entry == null) continue;
+            String status = entry.optString("status", "").toLowerCase(java.util.Locale.ROOT);
+            if (status.contains("pending") || status.contains("starting")) return true;
+        }
+        return false;
+    }
+
+    private void publishMcpStatus(JSONArray servers) {
+        JSONObject payload;
+        try {
+            payload = mcpStatusPayload(servers);
+            NativeMcpRuntimeStatusStore.record(appContext, payload.toString());
+            emit("onMcpStatus", CodexAppServerBridgeProtocol.mcpStatusSummary(payload));
+        } catch (Exception e) {
+            Log.w(TAG, "unable to publish MCP status", e);
+            return;
+        }
+        if (hasPendingServer(payload) && mcpStatusReprobeBudget > 0) {
+            mcpStatusReprobeBudget--;
+            mainHandler.postDelayed(this::sendMcpStatusProbe, MCP_STATUS_REPROBE_DELAY_MS);
+        } else {
+            mcpStatusReprobeBudget = 0;
+        }
+    }
+
+    private void publishMcpStatusFailure(String detail) {
+        NativeMcpRuntimeStatusStore.recordFailure(appContext, detail);
+        emit("onMcpStatus", "error=" + detail);
     }
 
     // ------------------------------------------------------------------ outbound
@@ -1464,17 +1594,48 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
 
     // ------------------------------------------------------------------ misc
 
+    // ------------------------------------------------------------------ compaction
+
+    /**
+     * Manual compaction.
+     *
+     * The CLI exposes no `compact` control request (verified against 2.1.220: the subtype is
+     * rejected), but `/compact` is a slash command it executes like any other turn, and that does
+     * compact for real — measured on device: 25 297 tokens -> 1 809, 21.9 s, `trigger:"manual"`.
+     * Progress arrives as `system/status` (`compacting`, then `compact_result`) followed by
+     * `system/compact_boundary`, which the decoder turns into the started/completed pair the UI
+     * waits for. Nothing is emitted here on success: the previous implementation fired an immediate
+     * "completed", which is why the UI claimed the context had been compacted without anything
+     * happening.
+     */
     @Override
     void compactThread() {
-        // Claude auto-compacts; report an immediate no-op completion so the UI never spins.
-        emit("onCompactStatus", "completed");
+        sendCompactCommand();
     }
 
     @Override
-    void compactThread(String nativeRequestId) { compactThread(); }
+    void compactThread(String nativeRequestId) {
+        sendCompactCommand();
+    }
 
-    @Override
-    void refreshMcpStatus() { /* first version: no-op */ }
+    private void sendCompactCommand() {
+        if (!running) reconnectForNextTurn();
+        if (!running) {
+            emit("onCompactStatus", "Claude CLI is not running; compaction was not started");
+            return;
+        }
+        beginOutboundTurn(UUID.randomUUID().toString());
+        try {
+            // Deliberately bypasses goalPrefix()/PLAN_MODE_PREFIX: those are prompt text, and a
+            // prefix in front of the slash command would stop it being a command at all.
+            JSONObject user = new JSONObject().put("type", "user").put("message",
+                new JSONObject().put("role", "user").put("content", "/compact"));
+            writeLine(user.toString());
+        } catch (Exception e) {
+            Log.w(TAG, "unable to trigger compaction", e);
+            emit("onCompactStatus", "Unable to request compaction: " + e.getMessage());
+        }
+    }
 
     @Override
     void rebind(Activity activity, NativeBackendBridge.EventListener listener) {

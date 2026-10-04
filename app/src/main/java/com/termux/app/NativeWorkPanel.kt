@@ -443,9 +443,15 @@ internal fun workPanelTabIndex(tab: String): Int = listOf("plan", "checkpoints",
 private fun McpStatusStrip() {
     val language = LocalNativeLanguage.current
     val context = LocalContext.current
+    val prefs = androidx.compose.runtime.remember(context) {
+        context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)
+    }
     val snapshot by produceState<Pair<List<NativeMcpServerConfig>, Map<String, NativeMcpRuntimeStatus>>?>(null) {
         value = withContext(Dispatchers.IO) {
-            val servers = runCatching { NativeMcpConfigStore.load() }.getOrDefault(emptyList())
+            // Through the facade, not NativeMcpConfigStore directly: the latter only ever reads the
+            // Codex config, so the strip stayed hidden on the Claude backend no matter what was
+            // configured.
+            val servers = runCatching { NativeMcpStoreFacade.load(prefs) }.getOrDefault(emptyList())
             if (servers.isEmpty()) null
             else servers to NativeMcpRuntimeStatusStore.load(context, servers)
         }

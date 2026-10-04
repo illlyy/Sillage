@@ -122,6 +122,10 @@ internal fun McpSettingsPage(
     val scope = rememberCoroutineScope()
     var revision by remember { mutableIntStateOf(0) }
     var refreshing by remember { mutableStateOf(false) }
+    val isClaude = NativeMcpStoreFacade.isClaude(prefs)
+    // False once a Claude probe turns out to be impossible (no CLI session to answer). The status
+    // section then explains itself instead of showing every server as permanently "checking".
+    var probeAvailable by remember { mutableStateOf(true) }
     val snapshot by produceState(McpSettingsSnapshot(), revision) {
         value = withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
@@ -129,22 +133,33 @@ internal fun McpSettingsPage(
                 McpSettingsSnapshot(
                     loaded = true,
                     servers = servers,
-                    statuses = if (NativeMcpStoreFacade.isClaude(prefs)) emptyMap() else NativeMcpRuntimeStatusStore.load(context, servers),
+                    statuses = NativeMcpRuntimeStatusStore.load(context, servers),
                 )
             }.getOrElse { McpSettingsSnapshot(true, error = it.message.orEmpty()) }
         }
     }
-    val isClaude = NativeMcpStoreFacade.isClaude(prefs)
+    // Probe on entry so the page reflects now rather than whatever the previous launch recorded.
+    LaunchedEffect(isClaude) {
+        if (!isClaude) return@LaunchedEffect
+        probeAvailable = ClaudeNativeRuntime.refreshMcpStatus()
+        if (probeAvailable) {
+            delay(3000) // Wait for the async mcp_status reply to be recorded.
+            revision++
+        }
+    }
     fun markChanged() {
         prefs.edit().putLong(NativeMcpStoreFacade.revisionKey(prefs), System.currentTimeMillis()).apply()
         revision++
     }
     fun refreshStatus() {
-        if (refreshing || isClaude) return
+        if (refreshing) return
         refreshing = true
-        CodexNativeRuntime.refreshMcpStatus()
+        // Claude answers over the control channel of a running CLI, so there is nothing to ask
+        // without a session; `probeAvailable` drives an explicit hint instead of a dead spinner.
+        if (isClaude) probeAvailable = ClaudeNativeRuntime.refreshMcpStatus()
+        else CodexNativeRuntime.refreshMcpStatus()
         scope.launch {
-            delay(2500) // Wait for the async mcpServerStatus/list response to be recorded.
+            delay(if (isClaude) 3000 else 2500) // Wait for the async probe to be recorded.
             revision++
             refreshing = false
         }
@@ -153,9 +168,9 @@ internal fun McpSettingsPage(
         "MCP",
         tr(
             lang,
-            if (isClaude) "\u4e0e Claude Code \u5171\u7528 ~/.claude.json \u4e2d\u7684 mcpServers \u5168\u5c40\u5de5\u5177"
+            if (isClaude) "\u4e0e Claude Code \u5171\u7528\u540c\u4e00\u4efd\u5168\u5c40 mcpServers \u914d\u7f6e"
             else "\u4e0e WebUI \u5171\u7528 Codex config.toml \u4e2d\u7684\u5916\u90e8\u5de5\u5177",
-            if (isClaude) "Share external tools from the ~/.claude.json mcpServers table with Claude Code"
+            if (isClaude) "Share one global mcpServers table with Claude Code"
             else "Share external tools from Codex config.toml with WebUI",
         ),
         onBack,
@@ -169,7 +184,7 @@ internal fun McpSettingsPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (snapshot.loaded && snapshot.servers.isNotEmpty() && !isClaude) {
+            if (snapshot.loaded && snapshot.servers.isNotEmpty()) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = { refreshStatus() }, enabled = !refreshing) {
@@ -177,6 +192,20 @@ internal fun McpSettingsPage(
                             Spacer(Modifier.width(6.dp))
                             Text(if (refreshing) tr(lang, "\u5237\u65b0\u4e2d…", "Refreshing…") else tr(lang, "\u5237\u65b0\u72b6\u6001", "Refresh status"), style = MaterialTheme.typography.labelMedium)
                         }
+                    }
+                }
+                if (isClaude && !probeAvailable) {
+                    item {
+                        Text(
+                            tr(
+                                lang,
+                                "\u9700\u8981\u5148\u6253\u5f00\u4e00\u4e2a\u4f1a\u8bdd\uff08\u6216\u8fd4\u56de\u804a\u5929\u9875\uff09\u624d\u80fd\u5411 Claude \u63a2\u6d4b\u670d\u52a1\u5668\u72b6\u6001\u3002",
+                                "Open a conversation first — the status comes from a running Claude session.",
+                            ),
+                            Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -204,7 +233,7 @@ internal fun McpSettingsPage(
                                             Text(if (server.isHttp) "HTTP" else "STDIO", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
                                         }
                                         Spacer(Modifier.width(6.dp))
-                                        if (!isClaude) McpRuntimeStatusBadge(lang, runtimeStatus)
+                                        McpRuntimeStatusBadge(lang, runtimeStatus)
                                     }
                                     Text(
                                         if (server.isHttp) server.url else listOf(server.command, server.args.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" "),
@@ -221,16 +250,14 @@ internal fun McpSettingsPage(
                                         "disabled" -> tr(lang, "\u5df2\u7981\u7528\uff0c\u4e0d\u4f1a\u5f71\u54cd\u5bf9\u8bdd", "Disabled; chat will continue normally")
                                         else -> tr(lang, "\u7b49\u5f85\u804a\u5929\u540e\u7aef\u68c0\u6d4b\uff0c\u70b9\u51fb\u5237\u65b0\u72b6\u6001\u91cd\u8bd5", "Waiting for probe; tap Refresh to retry")
                                     }
-                                    if (!isClaude) {
-                                        Text(
-                                            statusDetail,
-                                            modifier = Modifier.padding(top = 5.dp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (runtimeStatus.state == "unavailable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                                            maxLines = 4,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
+                                    Text(
+                                        statusDetail,
+                                        modifier = Modifier.padding(top = 5.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (runtimeStatus.state == "unavailable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                        maxLines = 4,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                                 Switch(server.enabled, onCheckedChange = { enabled ->
                                     scope.launch {
@@ -413,7 +440,7 @@ private fun McpServerEditorContent(
         onDismissRequest = { confirmDelete = false },
         title = { Text(tr(lang, "\u5220\u9664 ${existing.key}\uff1f", "Remove ${existing.key}?")) },
         text = { Text(if (isClaude)
-            tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece ~/.claude.json \u7684 mcpServers \u4e2d\u79fb\u9664\u3002", "This server will be removed from the mcpServers table in ~/.claude.json.")
+            tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece Claude Code \u7684\u5168\u5c40 mcpServers \u8868\u4e2d\u79fb\u9664\u3002", "This server will be removed from Claude Code's global mcpServers table.")
         else tr(lang, "\u8be5\u670d\u52a1\u5c06\u4ece config.toml \u4e2d\u79fb\u9664\u3002", "This server will be removed from config.toml.")) },
         dismissButton = { TextButton({ confirmDelete = false }) { Text(tr(lang, "\u53d6\u6d88", "Cancel")) } },
         confirmButton = { TextButton({

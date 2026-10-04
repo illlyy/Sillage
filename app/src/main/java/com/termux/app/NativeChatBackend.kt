@@ -297,6 +297,10 @@ internal data class NativeBackendStartRequest(
         val rememberedTools = ClaudeAllowedToolsStore.load(prefs, profile.id).sorted()
         // The fingerprint drives bridge re-spawn; it must cover every field that changes the
         // spawned CLI (credentials, tiers, tuning, toggles, custom JSON) plus the active model.
+        // Run the one-time MCP table upgrade before the fingerprint is taken: the old path was
+        // never read by the CLI, and doing this on the attach path means the servers an upgraded
+        // user configured start working without them having to open the MCP settings page.
+        ClaudeMcpConfigStore.migrateLegacyTableIfNeeded()
         val fingerprint = listOf(profile.apiKey, profile.apiKeyField, profile.baseUrl, profile.model,
             profile.haikuModel, profile.sonnetModel, profile.opusModel, profile.fableModel,
             profile.smallFastModel, profile.subagentModel,

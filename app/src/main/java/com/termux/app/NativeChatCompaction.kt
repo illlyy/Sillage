@@ -106,7 +106,10 @@ import org.json.JSONObject
         bridge?.compactThread(requestId)
     }
 
-    internal fun CodexChatActivity.scheduleCompactionRequestTimeout(item: NativeCompactionItem) {
+    internal fun CodexChatActivity.scheduleCompactionRequestTimeout(
+        item: NativeCompactionItem,
+        timeoutMs: Long = COMPACTION_REQUEST_TIMEOUT_MS,
+    ) {
         val requestId = item.requestId?.takeIf { it.isNotBlank() } ?: return
         val timeoutKey = "request:$requestId"
         compactionLifecycleTimeouts.remove(timeoutKey)?.let(streamHandler::removeCallbacks)
@@ -117,7 +120,7 @@ import org.json.JSONObject
             val updated = chatState.completeManualCompactionRpc(
                 requestId = requestId,
                 success = false,
-                error = nativeText(nativeLanguage, "未收到 Codex 的真实压缩事件", "Codex did not return a compaction lifecycle event"),
+                error = nativeText(nativeLanguage, "未收到后端返回的真实压缩事件", "The backend did not return a compaction lifecycle event"),
                 threadId = pending.threadId,
             )
             updated?.let(compactionJournalStore::record)
@@ -125,8 +128,19 @@ import org.json.JSONObject
             compactionLifecycleTimeouts.remove(timeoutKey)
         }
         compactionLifecycleTimeouts[timeoutKey] = timeout
-        streamHandler.postDelayed(timeout, 30_000L)
+        streamHandler.postDelayed(timeout, timeoutMs)
     }
+
+    /** How long to wait for the backend to acknowledge a compaction request at all. */
+    private const val COMPACTION_REQUEST_TIMEOUT_MS = 30_000L
+
+    /**
+     * Budget once the backend has actually begun compacting. Summarising the history is a real model
+     * call, so the acknowledgement timeout above is far too tight for the work itself: measured on
+     * device a small conversation already took 22 s, and exceeding the request timeout turned a
+     * successful compaction into a reported failure.
+     */
+    internal const val COMPACTION_ACTIVE_TIMEOUT_MS = 180_000L
 
     internal fun CodexChatActivity.cancelCompactionRequestTimeout(requestId: String?) {
         val value = requestId?.takeIf { it.isNotBlank() } ?: return

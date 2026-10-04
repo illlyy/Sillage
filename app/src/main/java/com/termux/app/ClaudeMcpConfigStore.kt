@@ -16,8 +16,23 @@ import java.nio.charset.StandardCharsets
  * change takes effect after the next backend restart.
  */
 object ClaudeMcpConfigStore {
+    /**
+     * The global MCP table, at the path the CLI actually reads.
+     *
+     * The bridge launches the CLI with `CLAUDE_CONFIG_DIR=<home>/.claude`, and that variable
+     * relocates the global config along with the rest of the config dir: the file the CLI loads is
+     * `<CLAUDE_CONFIG_DIR>/.claude.json`. Writing `<home>/.claude.json` (what this used to do)
+     * produced a table the CLI never read, so servers added in the app silently never ran — and an
+     * `mcp_status` probe reported an empty list while the settings page showed the servers.
+     */
     @JvmStatic
-    fun globalFile(): File = File(TermuxConstants.TERMUX_HOME_DIR, ".claude.json")
+    fun configDir(): File = File(TermuxConstants.TERMUX_HOME_DIR, ".claude")
+
+    @JvmStatic
+    fun globalFile(): File = File(configDir(), ".claude.json")
+
+    /** Pre-0.4.0 location; kept only so an upgrade can carry the user's servers across. */
+    private fun legacyGlobalFile(): File = File(TermuxConstants.TERMUX_HOME_DIR, ".claude.json")
 
     /** Cheap change detector for edits made by either the settings page or the CLI itself. */
     @JvmStatic
@@ -27,7 +42,28 @@ object ClaudeMcpConfigStore {
     }
 
     @JvmStatic
-    fun load(): List<NativeMcpServerConfig> = parseServers(readGlobalJson())
+    fun load(): List<NativeMcpServerConfig> {
+        migrateLegacyTableIfNeeded()
+        return parseServers(readGlobalJson())
+    }
+
+    /**
+     * One-time upgrade from the pre-0.4.0 location.
+     *
+     * Those entries sat in a file the CLI never read, so they were inert — copying them to the real
+     * path is what finally makes the servers the user configured actually run. Only runs while the
+     * new file is absent, so a table the user has since edited is never overwritten.
+     */
+    @JvmStatic
+    fun migrateLegacyTableIfNeeded() = synchronized(lock) {
+        if (globalFile().isFile) return@synchronized
+        val legacy = runCatching {
+            JSONObject(legacyGlobalFile().readText(StandardCharsets.UTF_8))
+        }.getOrNull() ?: return@synchronized
+        val servers = legacy.optJSONObject("mcpServers") ?: return@synchronized
+        if (servers.length() == 0) return@synchronized
+        runCatching { writeGlobal(JSONObject().put("mcpServers", servers)) }
+    }
 
     @JvmStatic
     fun save(server: NativeMcpServerConfig, previousKey: String? = null) = synchronized(lock) {

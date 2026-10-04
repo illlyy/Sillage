@@ -14,7 +14,13 @@ data class NativeMcpRuntimeStatus(
     val checkedAt: Long = 0L,
 )
 
-/** Last app-server MCP probe, persisted so connectivity belongs to the MCP page, not chat. */
+/**
+ * Last MCP probe, persisted so connectivity belongs to the MCP page, not chat.
+ *
+ * Both backends write the same payload shape (`result.data[]` with `name` / `status` / `error` /
+ * `tools`), so the Claude bridge translates its `mcp_status` reply into it instead of teaching the
+ * UI two vocabularies.
+ */
 object NativeMcpRuntimeStatusStore {
     private const val PREFS = "native_mcp_runtime_status_v1"
     private const val PAYLOAD = "payload"
@@ -51,9 +57,17 @@ object NativeMcpRuntimeStatusStore {
             }
             val statusText = item.optString("status").lowercase()
             val unavailable = error.isNotBlank() || statusText.contains("fail") || statusText.contains("error") || statusText.contains("unavailable")
+            // Claude reports `pending` while it is still handshaking. Treating that as connected
+            // made a server that never came up look online, so it maps to the "checking" state the
+            // UI already renders for an unresolved probe.
+            val pending = statusText.contains("pending") || statusText.contains("starting") || statusText.contains("connecting")
             val tools = item.opt("tools")
             discovered[name] = NativeMcpRuntimeStatus(
-                state = if (unavailable) "unavailable" else "connected",
+                state = when {
+                    unavailable -> "unavailable"
+                    pending -> "checking"
+                    else -> "connected"
+                },
                 toolCount = toolCount(tools),
                 toolNames = toolNames(tools),
                 detail = error.ifBlank { item.optString("status") },
@@ -65,7 +79,7 @@ object NativeMcpRuntimeStatusStore {
                 !server.enabled -> NativeMcpRuntimeStatus("disabled", checkedAt = checkedAt)
                 discovered.containsKey(server.key) -> discovered.getValue(server.key)
                 globalError.isNotBlank() -> NativeMcpRuntimeStatus("unavailable", detail = globalError, checkedAt = checkedAt)
-                checkedAt > 0L -> NativeMcpRuntimeStatus("unavailable", detail = "Server was not discovered by Codex", checkedAt = checkedAt)
+                checkedAt > 0L -> NativeMcpRuntimeStatus("unavailable", detail = "Not reported by the last probe", checkedAt = checkedAt)
                 else -> NativeMcpRuntimeStatus("checking")
             }
             server.key to status

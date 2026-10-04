@@ -41,6 +41,14 @@ internal class ClaudeEventDecoder(
     private var textStreamedThisTurn = false
 
     /**
+     * True when the current compaction was already announced through `system/status`
+     * (`compacting` -> `compact_result`). Claude sends that pair *and then* the boundary line;
+     * emitting from both produced two dividers for a single compaction, so the boundary acts as
+     * the fallback path for compactions that never announce themselves.
+     */
+    private var compactionAnnouncedByStatus = false
+
+    /**
      * True once this turn's upstream API failure reached the error card. Claude Code reports a
      * failed request as a *synthetic assistant message* (`isApiErrorMessage`) carrying the raw
      * upstream body, and a `result` line usually follows with the same failure. Without this flag
@@ -95,6 +103,7 @@ internal class ClaudeEventDecoder(
         thinkingSurfacedThisTurn = false
         textStreamedThisTurn = false
         apiErrorSurfacedThisTurn = false
+        compactionAnnouncedByStatus = false
         activeThinkingIndex = -1
         thinkingSource = 0
         textBuffer = null
@@ -139,11 +148,33 @@ internal class ClaudeEventDecoder(
     private fun decodeSystem(line: JSONObject) {
         when (line.optString("subtype")) {
             "init" -> Unit // capabilities negotiated by the bridge; no UI event needed
+            "status" -> {
+                // Manual compaction (/compact) is announced as a status pair BEFORE the boundary:
+                // {status:"compacting"} then {compact_result:"success"|...}. Surfacing the start
+                // here means the capsule appears as soon as work really begins; the boundary that
+                // follows is then swallowed instead of adding a second divider.
+                val status = line.optString("status")
+                if (status == "compacting") {
+                    compactionAnnouncedByStatus = true
+                    emit("onCompactStatus", "started")
+                    return
+                }
+                if (line.has("compact_result")) {
+                    compactionAnnouncedByStatus = true
+                    val result = line.optString("compact_result")
+                    if (result == "success") emit("onCompactStatus", "completed")
+                    else emit("onCompactStatus", "Compaction failed: $result")
+                }
+            }
             "compact_boundary" -> {
-                // Claude compaction is instantaneous at the boundary; emit the full
-                // started -> completed pair so the UI never leaves a spinning capsule.
-                emit("onCompactStatus", "started")
-                emit("onCompactStatus", "completed")
+                if (compactionAnnouncedByStatus) {
+                    compactionAnnouncedByStatus = false // pair already reported from `status`
+                } else {
+                    // Auto-compaction only announces itself here; emit the full pair so the UI
+                    // never leaves a spinning capsule.
+                    emit("onCompactStatus", "started")
+                    emit("onCompactStatus", "completed")
+                }
             }
             "permission_denied" -> {
                 val tool = line.optString("tool_name", line.optString("toolName"))
@@ -591,6 +622,7 @@ internal class ClaudeEventDecoder(
         thinkingSurfacedThisTurn = false
         textStreamedThisTurn = false
         apiErrorSurfacedThisTurn = false
+        compactionAnnouncedByStatus = false
         activeThinkingIndex = -1
         thinkingSource = 0
         textBuffer = null

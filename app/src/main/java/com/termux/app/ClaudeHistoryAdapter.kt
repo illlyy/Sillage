@@ -43,6 +43,62 @@ internal fun stripInjectedPromptPrefixes(text: String): String {
     return result
 }
 
+/**
+ * The bridge triggers manual compaction by sending `/compact` as a turn, so the CLI records it as a
+ * user message. It is an instruction, not something the user typed — replaying it put a phantom
+ * "/compact" bubble in the conversation. Blanking it makes the existing `isNotBlank()` guards drop
+ * the entry, and also keeps it out of the derived conversation title.
+ */
+internal const val COMPACTION_COMMAND = "/compact"
+
+/**
+ * The bridge triggers manual compaction by sending `/compact` as a turn, and the CLI records that
+ * as three protocol-shaped user entries (a caveat, the command wrapper, and its stdout). None of
+ * them is user text, so replaying them put three noise bubbles in the conversation; blanking them
+ * lets the existing `isNotBlank()` guards drop the whole turn.
+ */
+private val CLI_PROTOCOL_TURNS = listOf(
+    "<local-command-caveat>",
+    "<command-name>",
+    "<local-command-stdout>",
+)
+
+internal fun isCliProtocolTurn(text: String): Boolean =
+    CLI_PROTOCOL_TURNS.any { text.trimStart().startsWith(it) }
+
+/** What the user actually typed for a replayed turn; empty when the turn was bridge-driven. */
+internal fun visibleUserPrompt(text: String): String {
+    val stripped = stripInjectedPromptPrefixes(stripCollapsedInjectedPrefix(text))
+    if (stripped.trim() == COMPACTION_COMMAND) return ""
+    if (isCliProtocolTurn(stripped)) return ""
+    return stripped
+}
+
+/** Heads that only ever come from a bridge-injected prefix. */
+private val INJECTED_PROMPT_HEADS = listOf("【当前目标】", "请先制定实施计划：")
+
+/** Instruction tails that end an injected prefix once its newlines have been collapsed. */
+private val INJECTED_PROMPT_TAILS = listOf("请围绕这个目标继续工作。", "完成后调用 ExitPlanMode 提交计划供审批。")
+
+/**
+ * Same idea as [stripInjectedPromptPrefixes] for text whose newlines were collapsed to spaces.
+ *
+ * The CLI stores conversation titles as single-line summaries, which turns the blank-line separator
+ * into plain spaces — so the strict matcher cannot fire and the drawer listed conversations as
+ * "请先制定实施计划：只进行分析与调研…" instead of the user's actual request. Only strips when the
+ * text opens with a head that a user would not type and an instruction tail is present.
+ */
+internal fun stripCollapsedInjectedPrefix(text: String): String {
+    if (INJECTED_PROMPT_HEADS.none { text.startsWith(it) }) return text
+    var cut = -1
+    for (tail in INJECTED_PROMPT_TAILS) {
+        val at = text.indexOf(tail)
+        if (at >= 0) cut = maxOf(cut, at + tail.length)
+    }
+    if (cut <= 0) return text
+    return text.substring(cut).trim()
+}
+
 internal object ClaudeHistoryAdapter {
     private const val MAX_SESSION_SCAN = 400
     private const val MAX_TITLE_CHARS = 52
@@ -116,7 +172,7 @@ internal object ClaudeHistoryAdapter {
             val type = entry.optString("type")
             if (type == "user") {
                 flushAssistant(messages, assistantBuffer, createdAt)
-                val text = stripInjectedPromptPrefixes(extractText(entry.optJSONObject("message")))
+                val text = visibleUserPrompt(extractText(entry.optJSONObject("message")))
                 if (text.isNotBlank()) messages.add(
                     NativeChatMessage(role = NativeChatRole.USER, content = text, revealStartedAt = createdAt),
                 )
@@ -260,7 +316,13 @@ internal object ClaudeHistoryAdapter {
                 "last-prompt" -> entry.optString("lastPrompt")
                 else -> ""
             }
-            if (title.isNotBlank()) return title.take(MAX_TITLE_CHARS)
+            if (title.isNotBlank()) {
+                // `last-prompt` stores the prompt as sent, so it carries the bridge-injected
+                // prefixes — and with its newlines collapsed, which is why both strippers run.
+                // visibleUserPrompt also screens out the CLI's local-command wrappers.
+                val visible = visibleUserPrompt(title)
+                if (visible.isNotBlank()) return visible.take(MAX_TITLE_CHARS)
+            }
         }
         return ""
     }
@@ -276,7 +338,7 @@ internal object ClaudeHistoryAdapter {
                     val entry = runCatching { JSONObject(line) }.getOrNull() ?: continue
                     if (entry.optString("type") != "user") continue
                     if (!entry.optString("sessionId").equals(sessionId, ignoreCase = true)) continue
-                    val text = stripInjectedPromptPrefixes(extractText(entry.optJSONObject("message")))
+                    val text = visibleUserPrompt(extractText(entry.optJSONObject("message")))
                     if (text.isNotBlank()) return text.trim().replace(Regex("\\s+"), " ").take(MAX_TITLE_CHARS)
                 }
             }
