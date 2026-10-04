@@ -20,6 +20,13 @@ internal data class NativeCompactionItem(
     val createdAtMs: Long = 0L,
     val updatedAtMs: Long = createdAtMs,
     val sequence: Long = 0L,
+    // Token accounting the backend reported when the compaction finished. Left at 0 when it
+    // reports nothing, which is normal: Claude omits `postTokens` when it preserved a segment
+    // instead of summarising the whole history, and Codex reports no figures at all.
+    val preTokens: Long = 0L,
+    val postTokens: Long = 0L,
+    val droppedTokens: Long = 0L,
+    val durationMs: Long = 0L,
 ) {
     val isTerminal: Boolean
         get() = status in setOf(NativeCompactionStatus.COMPLETED, NativeCompactionStatus.FAILED, NativeCompactionStatus.CANCELLED)

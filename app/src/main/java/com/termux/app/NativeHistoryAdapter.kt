@@ -65,6 +65,10 @@ internal object NativeHistoryAdapter {
             .put("createdAtMs", item.createdAtMs)
             .put("updatedAtMs", item.updatedAtMs)
             .put("sequence", item.sequence)
+            .put("preTokens", item.preTokens)
+            .put("postTokens", item.postTokens)
+            .put("droppedTokens", item.droppedTokens)
+            .put("durationMs", item.durationMs)
         return NATIVE_COMPACTION_PREFIX + NativeBase64.encode(payload.toString().toByteArray(Charsets.UTF_8))
     }
 
@@ -88,6 +92,10 @@ internal object NativeHistoryAdapter {
             createdAtMs = payload.optLong("createdAtMs", payload.optLong("created_at_ms")),
             updatedAtMs = payload.optLong("updatedAtMs", payload.optLong("updated_at_ms", payload.optLong("createdAtMs", payload.optLong("created_at_ms")))),
             sequence = payload.optLong("sequence", payload.optLong("sequence_number")),
+            preTokens = payload.optLong("preTokens", payload.optLong("pre_tokens")),
+            postTokens = payload.optLong("postTokens", payload.optLong("post_tokens")),
+            droppedTokens = payload.optLong("droppedTokens", payload.optLong("cumulativeDroppedTokens", payload.optLong("cumulative_dropped_tokens"))),
+            durationMs = payload.optLong("durationMs", payload.optLong("duration_ms")),
         )
     }
 
@@ -329,6 +337,12 @@ internal object NativeHistoryAdapter {
         createdAtMs = if (old.createdAtMs > 0L) old.createdAtMs else next.createdAtMs,
         updatedAtMs = maxOf(old.updatedAtMs, next.updatedAtMs),
         sequence = if (next.sequence > 0L) next.sequence else old.sequence,
+        // Metrics arrive with whichever half carries the server's report, so a later record with
+        // numbers must win over an earlier one without them.
+        preTokens = if (next.preTokens > 0L) next.preTokens else old.preTokens,
+        postTokens = if (next.postTokens > 0L) next.postTokens else old.postTokens,
+        droppedTokens = if (next.droppedTokens > 0L) next.droppedTokens else old.droppedTokens,
+        durationMs = if (next.durationMs > 0L) next.durationMs else old.durationMs,
     )
 
     private fun canMergeLegacyCompaction(old: NativeCompactionItem, next: NativeCompactionItem): Boolean {

@@ -18,7 +18,14 @@ private val CODEX_PATCH_FILE_REGEX = Regex(
 )
 private val UNIFIED_DIFF_FILE_REGEX = Regex("(?m)^(?:\\+\\+\\+|---)\\s+(?:[ab]/)?(.+)$")
 
-/** Parses each immutable tool payload once and classifies it for all UI consumers. */
+/**
+ * Parses each immutable tool payload once and classifies it for all UI consumers.
+ *
+ * The full classification is what the unit tests pin down, but the live UI only ever reads
+ * [ParsedToolDetails.fileChanges]. Rendering therefore goes through [parseFileChangeItems] below
+ * rather than paying for two lists nobody looks at -- the image branch in particular used to parse
+ * every `view_image` payload, base64 and all, only to drop it on the floor.
+ */
 internal fun parseToolDetails(rawItems: List<String>): ParsedToolDetails {
     val commands = ArrayList<JSONObject>()
     val fileChanges = ArrayList<JSONObject>()
@@ -32,6 +39,17 @@ internal fun parseToolDetails(rawItems: List<String>): ParsedToolDetails {
         }
     }
     return ParsedToolDetails(commands, fileChanges, images)
+}
+
+/** The only classification the chat screen needs; skips the lists it would discard. */
+internal fun parseFileChangeItems(rawItems: List<String>): List<JSONObject> {
+    if (rawItems.isEmpty()) return emptyList()
+    val fileChanges = ArrayList<JSONObject>()
+    rawItems.forEach { raw ->
+        val item = runCatching { JSONObject(raw) }.getOrNull() ?: return@forEach
+        if (item.optString("type") == "fileChange") fileChanges.add(item)
+    }
+    return fileChanges
 }
 
 internal fun associatedFileChangeItems(

@@ -362,6 +362,9 @@ internal class NativeChatState {
     /** Stable domain snapshots shared by live and historical renderers. */
     val activityGroups = mutableStateListOf<NativeActivityGroup>()
     val compactionItems = mutableStateListOf<NativeCompactionItem>()
+
+    /** Id of the compaction written most recently; the target for a late metrics report. */
+    private var lastCompactionItemId: String = ""
     private val activityReducer = NativeActivityReducer()
     private val compactionReducer = NativeCompactionReducer()
     private val turnTerminationBarrier = NativeTurnTerminationBarrier()
@@ -895,7 +898,47 @@ internal class NativeChatState {
             revealStartedAt = item.createdAtMs.takeIf { it > 0L } ?: System.currentTimeMillis(),
         )
         if (index >= 0) messages[index] = updated else messages.add(updated)
+        lastCompactionItemId = item.id
         revision++
+    }
+
+    /**
+     * Attaches the backend's token accounting to the compaction that just finished.
+     *
+     * The figures arrive on their own event after the lifecycle has already been reported, so the
+     * item is matched by the id recorded when it was last written rather than by "the pending
+     * one" -- there is no pending one by then. Figures the backend omitted keep their previous
+     * value, and an all-zero report changes nothing.
+     */
+    fun attachCompactionMetrics(
+        threadId: String,
+        preTokens: Long,
+        postTokens: Long,
+        droppedTokens: Long,
+        durationMs: Long,
+    ) {
+        val targetId = lastCompactionItemId.takeIf { it.isNotBlank() } ?: return
+        val index = compactionItems.indexOfFirst { it.id == targetId }
+        if (index < 0) return
+        val current = compactionItems[index]
+        if (current.threadId.isNotBlank() && threadId.isNotBlank() && current.threadId != threadId) return
+        val merged = current.copy(
+            preTokens = if (preTokens > 0L) preTokens else current.preTokens,
+            postTokens = if (postTokens > 0L) postTokens else current.postTokens,
+            droppedTokens = if (droppedTokens > 0L) droppedTokens else current.droppedTokens,
+            durationMs = if (durationMs > 0L) durationMs else current.durationMs,
+        )
+        if (merged == current) return
+        compactionItems[index] = merged
+        // Re-encode the timeline entry too, otherwise the figures would vanish on the next
+        // snapshot and disappear from history replay.
+        val messageIndex = messages.indexOfFirst { it.id == merged.id }
+        if (messageIndex >= 0) {
+            messages[messageIndex] = messages[messageIndex].copy(
+                content = NativeHistoryAdapter.encodeCompaction(merged),
+            )
+        }
+        publishDomainSnapshot()
     }
 
     fun resetConversation() {
@@ -911,6 +954,7 @@ internal class NativeChatState {
         activePlanScopeKey = ""
         activeGoalObjective = ""
         activeGoalStatus = "active"
+        lastCompactionItemId = ""
         retryStatusMessageId = ""
         retryStatusAttempts = 0
         pendingUserInputRequest = ""

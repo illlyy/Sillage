@@ -481,142 +481,7 @@ internal fun NativeToolTimelineContent(item: NativeActivityItem) {
     }
 }
 
-@Composable
-private fun NativeReasoningGroupCapsule(
-    groupKey: String,
-    reasoning: String,
-    running: Boolean,
-    initiallyExpanded: Boolean,
-) {
-    val language = LocalNativeLanguage.current
-    // Include the running transition in the key so a completed group gets its WebUI-style
-    // collapsed default without retaining the live expanded state forever.
-    var expanded by remember(groupKey, running) { mutableStateOf(initiallyExpanded) }
-    val rotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        animationSpec = spring(dampingRatio = .86f, stiffness = 340f),
-        label = "activityReasoningArrow",
-    )
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Surface(
-            modifier = Modifier
-                .widthIn(max = 680.dp)
-                .fcodePressClickable(
-                    onClickLabel = if (expanded) {
-                        nativeText(language, "收起思考过程", "Collapse reasoning")
-                    } else {
-                        nativeText(language, "展开思考过程", "Expand reasoning")
-                    },
-                ) { expanded = !expanded },
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = nativeActivitySurfaceAlpha(.88f)),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .36f)),
-        ) {
-            Row(
-                Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (running) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.7.dp)
-                else Icon(HugeIcons.Zap, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    nativeText(language, if (running) "正在思考" else "思考", if (running) "Thinking" else "Reasoning"),
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Icon(
-                    HugeIcons.ArrowDown01,
-                    null,
-                    Modifier.size(15.dp).graphicsLayer { rotationZ = rotation },
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        AnimatedVisibility(expanded) {
-            Surface(
-                Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = nativeActivitySurfaceAlpha(.72f)),
-            ) {
-                Text(
-                    reasoning,
-                    Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-        }
-    }
-}
 
-@Composable
-private fun NativeCommandCollection(group: NativeActivityGroup) {
-    val language = LocalNativeLanguage.current
-    val running = group.runningCommandCount
-    val failed = group.commands.count { it.status == NativeActivityItemStatus.FAILED }
-    var userExpanded by remember(group.key) { mutableStateOf<Boolean?>(null) }
-    val expanded = resolveNativeCommandDisclosure(
-        // Command disclosure follows command state, not the enclosing turn. The group may keep
-        // running for reasoning or another tool after its last command completes.
-        autoExpanded = nativeCommandCollectionAutoExpanded(running, failed),
-        userExpanded = userExpanded,
-    )
-    val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "activityCommandArrow")
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = nativeActivitySurfaceAlpha(.78f)),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .38f)),
-    ) {
-        Column {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .fcodePressClickable(
-                        onClickLabel = if (expanded) {
-                            nativeText(language, "收起命令集合", "Collapse commands")
-                        } else {
-                            nativeText(language, "展开命令集合", "Expand commands")
-                        },
-                    ) { userExpanded = !expanded }
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (running > 0) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.8.dp)
-                else Icon(if (failed > 0) HugeIcons.Cancel01 else HugeIcons.Tick02, null, Modifier.size(15.dp), tint = if (failed > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    nativeText(language, "命令集合", "Commands"),
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                val summary = buildList {
-                    add(nativeText(language, "${group.commandCount} 条", "${group.commandCount}"))
-                    if (running > 0) add(nativeText(language, "$running 运行中", "$running running"))
-                    if (failed > 0) add(nativeText(language, "$failed 失败", "$failed failed"))
-                }.joinToString(" · ")
-                Text(summary, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(6.dp))
-                Icon(HugeIcons.ArrowDown01, null, Modifier.size(15.dp).graphicsLayer { rotationZ = rotation })
-            }
-            AnimatedVisibility(expanded) {
-                Column {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .45f))
-                    group.commands.forEachIndexed { index, command ->
-                        key(command.id) { NativeCommandRow(command) }
-                        if (index != group.commands.lastIndex) HorizontalDivider(
-                            Modifier.padding(horizontal = 12.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .3f),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun NativeCommandRow(
@@ -814,24 +679,6 @@ internal fun shouldResolveNativeCommandOutput(expanded: Boolean, outputRef: Stri
 internal fun resolveNativeCommandOutput(outputRef: String, preview: String): String =
     if (outputRef.isBlank()) preview else NativeCommandOutputStore.get(outputRef) ?: preview
 
-@Composable
-private fun NativeToolCollection(items: List<NativeActivityItem>) {
-    val language = LocalNativeLanguage.current
-    val grouped = items.groupingBy { it.type }.eachCount()
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        grouped.forEach { (type, count) ->
-            val label = when (type) {
-                NativeActivityItemType.FILE_CHANGE -> nativeText(language, "文件修改", "File changes")
-                NativeActivityItemType.WEB_SEARCH -> nativeText(language, "网页搜索", "Web searches")
-                NativeActivityItemType.TOOL -> nativeText(language, "工具调用", "Tools")
-                else -> nativeText(language, "活动", "Activity")
-            }
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = nativeActivitySurfaceAlpha(.74f))) {
-                Text("$label · $count", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.labelSmall)
-            }
-        }
-    }
-}
 
 @Composable
 internal fun NativeSubagentVisualFlowRow(
@@ -908,6 +755,25 @@ internal fun NativeCompactionDivider(item: NativeCompactionItem?, messageId: Str
         cancelled -> nativeText(language, "已取消", "Cancelled")
         else -> nativeText(language, "完成", "Completed")
     }
+    // Say what the compaction actually bought. Only shown once it finished and only when the
+    // backend reported figures -- Claude omits `postTokens` when it preserved a segment instead of
+    // summarising everything, and Codex reports nothing at all, so both cases stay quiet rather
+    // than implying a saving that did not happen.
+    val savings = if (item.status != NativeCompactionStatus.COMPLETED || item.preTokens <= 0L) {
+        ""
+    } else if (item.postTokens > 0L) {
+        nativeText(
+            language,
+            " · ${formatNativeTokenCount(item.preTokens)} → ${formatNativeTokenCount(item.postTokens)}",
+            " · ${formatNativeTokenCount(item.preTokens)} → ${formatNativeTokenCount(item.postTokens)}",
+        )
+    } else {
+        nativeText(
+            language,
+            " · 压缩前 ${formatNativeTokenCount(item.preTokens)}",
+            " · from ${formatNativeTokenCount(item.preTokens)}",
+        )
+    }
     val tint = when {
         failed -> MaterialTheme.colorScheme.error
         cancelled -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -939,7 +805,12 @@ internal fun NativeCompactionDivider(item: NativeCompactionItem?, messageId: Str
             ) {
                 if (running) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.8.dp, color = tint)
                 else Icon(if (failed || cancelled) HugeIcons.Cancel01 else HugeIcons.Tick02, null, Modifier.size(14.dp), tint = tint)
-                Text(label, style = MaterialTheme.typography.labelSmall, color = tint, fontWeight = FontWeight.Medium)
+                Text(
+                    label + savings,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tint,
+                    fontWeight = FontWeight.Medium,
+                )
             }
             HorizontalDivider(
                 Modifier.weight(1f),

@@ -72,7 +72,7 @@ import org.json.JSONObject
                     ).joinToString("\n").trim(),
                 )
                 runOnUiThread {
-                    if (currentThreadId != routeThreadId || chatState.projectPath != project) return@runOnUiThread
+                    if (currentThreadId != routeThreadId || chatState.projectPath != project || isFinishing || isDestroyed) return@runOnUiThread
                     chatState.gitDiffs[value] = snapshot
                     chatState.gitDiffLoading.remove(value)
                 }
@@ -99,7 +99,7 @@ import org.json.JSONObject
             }
             val status = loadGitSnapshot(project)
             runOnUiThread {
-                if (currentThreadId != routeThreadId || chatState.projectPath != project) return@runOnUiThread
+                if (currentThreadId != routeThreadId || chatState.projectPath != project || isFinishing || isDestroyed) return@runOnUiThread
                 chatState.gitSnapshot = status
                 chatState.gitBusy = false
                 chatState.gitDiffs.clear()
@@ -315,7 +315,7 @@ import org.json.JSONObject
             Thread({
                 val diff = runGit(project, listOf("diff", "--no-ext-diff", "--unified=3", snapshot.commit, currentCommit, "--", path))
                 runOnUiThread {
-                    if (currentThreadId != threadId || chatState.projectPath != project) return@runOnUiThread
+                    if (currentThreadId != threadId || chatState.projectPath != project || isFinishing || isDestroyed) return@runOnUiThread
                     chatState.workspaceSnapshotDiffs[key] = if (diff.first == 0) diff.second else diff.second.ifBlank { "Unable to load diff" }
                     chatState.workspaceSnapshotDiffLoading.remove(key)
                 }
@@ -392,7 +392,7 @@ import org.json.JSONObject
             if (failure != null) error = failure.message ?: failure.javaClass.simpleName
             val snapshots = NativeWorkspaceSnapshotStore.load(this, threadId)
             runOnUiThread {
-                if (currentThreadId != threadId || chatState.projectPath != project) return@runOnUiThread
+                if (currentThreadId != threadId || chatState.projectPath != project || isFinishing || isDestroyed) return@runOnUiThread
                 chatState.workspaceSnapshotBusy = false
                 chatState.workspaceSnapshotError = error.trim()
                 chatState.workspaceSnapshotNotice = notice
@@ -583,7 +583,7 @@ import org.json.JSONObject
             if (failure != null) error = failure.message ?: failure.javaClass.simpleName
             val refreshed = loadWorktrees(project)
             runOnUiThread {
-                if (currentThreadId != routeThread || chatState.projectPath != project) return@runOnUiThread
+                if (currentThreadId != routeThread || chatState.projectPath != project || isFinishing || isDestroyed) return@runOnUiThread
                 chatState.worktreeBusy = false
                 chatState.worktreeError = error.trim()
                 chatState.worktreeNotice = notice

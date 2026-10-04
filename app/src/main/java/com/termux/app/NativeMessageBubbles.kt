@@ -308,7 +308,7 @@ internal fun RikkaMessageItem(
                 // state list so token batches do not parse every completed tool JSON again.
                 val liveToolDetails = liveState?.toolDetails?.toList().orEmpty()
                 val liveFileChanges = remember(liveToolDetails) {
-                    parseToolDetails(liveToolDetails).fileChanges
+                    parseFileChangeItems(liveToolDetails)
                 }
                 RikkaAssistantMessage(
                     message.id,

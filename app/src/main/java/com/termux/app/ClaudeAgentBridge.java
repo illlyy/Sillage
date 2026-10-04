@@ -19,6 +19,7 @@ import java.io.OutputStreamWriter;
 import java.lang.ref.WeakReference;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -68,6 +69,18 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     private volatile WeakReference<Activity> activityRef;
     private volatile NativeBackendBridge.EventListener eventListener;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    // Stream coalescing. The CLI emits one line per token, and posting every one of them through
+    // the main looper floods it even though the chat screen throttles its own repaints. Adjacent
+    // deltas of the same kind are therefore joined before dispatch, exactly as the Codex bridge
+    // does -- AGENTS.md requires every streaming backend to go through this batcher. Lifecycle,
+    // completion and error events stay separate: they are FIFO barriers, and a later delta must
+    // never be merged across one or overtake it.
+    private final NativeStreamEventBatcher streamBatcher = new NativeStreamEventBatcher();
+    private final AtomicBoolean streamDrainScheduled = new AtomicBoolean();
+    private final Runnable streamDrain = this::drainStreamEvents;
+    /** Window used to gather a burst of tokens; matches the Codex bridge. */
+    private static final long STREAM_BATCH_MS = 32L;
 
     // child process
     private Process process;
@@ -779,8 +792,14 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         mainHandler.removeCallbacks(readinessFallbackRunnable);
         mainHandler.removeCallbacks(initNoticeRunnable);
         mainHandler.removeCallbacks(flushPendingUsageRunnable);
+        // Drop half-collected deltas: they describe a turn that is being torn down, and the screen
+        // resets its own stream buffers on stop anyway.
+        mainHandler.removeCallbacks(streamDrain);
+        streamDrainScheduled.set(false);
+        streamBatcher.clear();
         // A turn cut short by the stop still deserves its token counts; fold in whatever context
-        // snapshot we already have rather than dropping the event.
+        // snapshot we already have rather than dropping the event. This re-arms the drain above,
+        // so it must come after the clear.
         flushPendingUsage();
         // Clear the running flag BEFORE destroying the process: the reader thread's finally
         // observes it to decide whether the close is a deliberate stop or an unexpected exit.
@@ -1812,8 +1831,45 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     }
 
     private void emit(String function, String value) {
-        NativeBackendBridge.EventListener listener = eventListener;
-        if (listener == null) return;
-        mainHandler.post(() -> listener.onEvent(function, value));
+        if (eventListener == null) return;
+        boolean urgent;
+        if (isHighFrequencyEmission(function)) {
+            urgent = streamBatcher.offer(function, value);
+        } else {
+            streamBatcher.offerSeparate(function, value);
+            urgent = true;
+        }
+        if (streamDrainScheduled.compareAndSet(false, true)) {
+            mainHandler.postDelayed(streamDrain, urgent ? 0L : STREAM_BATCH_MS);
+        }
+    }
+
+    /**
+     * Emissions the chat screen appends verbatim, so joining neighbours is lossless. Everything
+     * else is parsed as a single JSON object and must stay standalone.
+     */
+    private static boolean isHighFrequencyEmission(String function) {
+        return "onDelta".equals(function) || "onReasoningDelta".equals(function)
+            || "onPlanDelta".equals(function);
+    }
+
+    private void drainStreamEvents() {
+        java.util.List<NativeStreamEventBatcher.Event> events = streamBatcher.drain();
+        try {
+            NativeBackendBridge.EventListener listener = eventListener;
+            if (listener != null) {
+                for (NativeStreamEventBatcher.Event event : events) {
+                    listener.onEvent(event.function, event.value);
+                }
+            }
+        } finally {
+            // The flag stays set for both a queued and a running drain, so an event offered during
+            // dispatch can never be stranded: either this recheck schedules it, or its producer
+            // wins the same false->true CAS after the flag is cleared.
+            streamDrainScheduled.set(false);
+            if (!streamBatcher.isEmpty() && streamDrainScheduled.compareAndSet(false, true)) {
+                mainHandler.post(streamDrain);
+            }
+        }
     }
 }

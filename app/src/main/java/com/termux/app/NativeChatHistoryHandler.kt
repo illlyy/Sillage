@@ -98,7 +98,13 @@ import org.json.JSONObject
             NativeBackendType.set(prefs, to)
             return
         }
-        if (chatState.busy) stopCurrentTurn()
+        // Switching away from a live turn cuts it short. The interrupted conversation is not lost
+        // -- it stays under the backend we are leaving -- but the screen comes up blank on the new
+        // side, which reads as "it vanished". Say what happened instead of leaving the user to
+        // discover it by switching back.
+        val cutShortBySwitch = chatState.busy
+        val leftBackend: NativeBackendType? = attachedBackend
+        if (cutShortBySwitch) stopCurrentTurn()
         NativeBackendType.set(prefs, to)
         chatState.backend = to
         notificationTargetThreadId = ""
@@ -117,6 +123,19 @@ import org.json.JSONObject
         bridge = null
         startBackend()
         newConversationAtProject("")
+        if (cutShortBySwitch) {
+            val leavingLabel = when (leftBackend) {
+                NativeBackendType.CLAUDE -> "Claude"
+                else -> "Codex"
+            }
+            chatState.addNotice(
+                nativeText(
+                    nativeLanguage,
+                    "上一轮对话已中断 · 切回 $leavingLabel 仍可查看",
+                    "The previous turn was interrupted · switch back to $leavingLabel to see it",
+                ),
+            )
+        }
         refreshConversations()
     }
 

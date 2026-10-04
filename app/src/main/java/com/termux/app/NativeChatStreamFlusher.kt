@@ -37,6 +37,26 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Characters that end a "sentence" while text is still streaming, used to decide when a short
+ * pending chunk is worth publishing immediately instead of waiting out the reveal interval.
+ *
+ * The CJK punctuation is written as escapes deliberately. A literal set of them was silently
+ * downgraded to four ASCII '?' when this was first typed (c3e6a86) and survived a later file split
+ * untouched: '?' is both the real question mark and the replacement character, so the mistake
+ * compiled, ran, and cost nothing visibly except that Chinese answers have no sentence boundary
+ * at all -- every short clause waited out the full interval and the text crawled one glyph at a
+ * time. Never spell these out as literals here.
+ */
+private val STREAM_SENTENCE_BOUNDARIES = charArrayOf(
+    '\n',
+    '.', '!', '?',       // ASCII . ! ?
+    '\u3002',            // CJK ideographic full stop
+    '\uff01',            // CJK fullwidth exclamation mark
+    '\uff1f',            // CJK fullwidth question mark
+)
+
+
 
     internal fun CodexChatActivity.discardPendingStreamEvents(reason: String) {
         streamHandler.removeCallbacks(flushReasoningRunnable)
@@ -146,7 +166,7 @@ import org.json.JSONObject
             }
         }
         val now = android.os.SystemClock.uptimeMillis()
-        val boundary = pendingReasoning.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
+        val boundary = pendingReasoning.lastOrNull()?.let { it in STREAM_SENTENCE_BOUNDARIES } == true
         if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingReasoning.length, boundary, now - reasoningPendingSince, force)) {
             reasoningFlushScheduled = true
             streamHandler.postDelayed(flushReasoningRunnable, 32L)
@@ -214,7 +234,7 @@ import org.json.JSONObject
             }
         }
         val now = android.os.SystemClock.uptimeMillis()
-        val boundary = pendingAnswer.lastOrNull()?.let { it in charArrayOf('\n', '.', '!', '?', '?', '?', '?') } == true
+        val boundary = pendingAnswer.lastOrNull()?.let { it in STREAM_SENTENCE_BOUNDARIES } == true
         if (NativeUiRenderSafety.shouldDeferStreamFlush(pendingAnswer.length, boundary, now - answerPendingSince, force)) {
             answerFlushScheduled = true
             streamHandler.postDelayed(flushAnswerRunnable, 32L)

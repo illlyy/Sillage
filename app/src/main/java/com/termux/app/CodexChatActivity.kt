@@ -882,6 +882,23 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 val threadId = payload.optString("threadId")
                 if (threadId.isNotBlank() && threadId == currentThreadId) clearLocalGoal(threadId)
             }
+            "onCompactionMetrics" -> {
+                // Token accounting only; the lifecycle has already been reported. Kept off the
+                // onCompactStatus string channel so a backend that reports nothing needs no change.
+                val metrics = runCatching { JSONObject(value) }.getOrNull()
+                if (metrics != null) {
+                    chatState.attachCompactionMetrics(
+                        threadId = metrics.optString("threadId", metrics.optString("thread_id")),
+                        preTokens = metrics.optLong("preTokens", metrics.optLong("pre_tokens")),
+                        postTokens = metrics.optLong("postTokens", metrics.optLong("post_tokens")),
+                        droppedTokens = metrics.optLong(
+                            "droppedTokens",
+                            metrics.optLong("dropped_tokens", metrics.optLong("cumulativeDroppedTokens")),
+                        ),
+                        durationMs = metrics.optLong("durationMs", metrics.optLong("duration_ms")),
+                    )
+                }
+            }
             "onCompactStatus" -> {
                 // Retained bridges used a string-only RPC status. Fold it into the same reducer
                 // instead of appending a second NOTICE capsule.
@@ -974,7 +991,10 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 chatState.historyLoading = false
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
                 drainPendingNativeUiEvents()
-                approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)
+                // The turn is dead, so a request still waiting on the user must be released on
+                // the backend too, and the WAITING latch released with it -- otherwise the screen
+                // keeps waiting for an answer to a turn that no longer exists.
+                cancelPendingApproval()
                 val translated = CodexAppServerBridgeProtocol.translateModelError(value)
                 NativeChatDiagnostics.record(this, "native_error", JSONObject()
                     .put("thread", currentThreadId.orEmpty().take(8))

@@ -6,8 +6,9 @@ import org.json.JSONObject
 
 /**
  * Durable queued-message store (pattern: claudecodeui queued-message claim ticket). The queue
- * survives process death and rotation; sending removes the entry before dispatch, so two
- * flushers (turn completion here, session restore later) can never double-send.
+ * survives process death and rotation; [take] claims the queue durably before dispatch, so the
+ * completion-time flush and the session-restore flush can never both send the same message even if
+ * the process is killed mid-turn.
  */
 internal class NativeQueuedMessageStore(
     private val preferences: SharedPreferences,
@@ -32,10 +33,17 @@ internal class NativeQueuedMessageStore(
         preferences.edit().putString(key(threadId), array.toString()).apply()
     }
 
-    /** Claim semantics: returns the stored queue and clears it atomically-ish (apply). */
+    /** Claim semantics: returns the stored queue and removes it durably (commit). */
     fun take(threadId: String): List<NativeQueuedFollowUp> {
         val items = read(threadId)
-        if (items.isNotEmpty()) preferences.edit().remove(key(threadId)).apply()
+        // Synchronous on purpose. These messages are about to be executed -- tools run, files
+        // change -- so "already sent" has to survive the process being killed a moment later. An
+        // async apply() can still be sitting in the write queue at that point, and the next launch
+        // would read the queue back and send every message a second time, re-running the tools.
+        // One fsync on the send path is a fair price for that. The enqueue path keeps apply(),
+        // because the two failures are not symmetric: losing an unsent message costs the user a
+        // re-send, losing the claim costs them a duplicated run.
+        if (items.isNotEmpty()) preferences.edit().remove(key(threadId)).commit()
         return items
     }
 

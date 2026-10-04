@@ -162,8 +162,12 @@ internal class ClaudeEventDecoder(
                 if (line.has("compact_result")) {
                     compactionAnnouncedByStatus = true
                     val result = line.optString("compact_result")
-                    if (result == "success") emit("onCompactStatus", "completed")
-                    else emit("onCompactStatus", "Compaction failed: $result")
+                    if (result == "success") {
+                        emit("onCompactStatus", "completed")
+                        emitCompactionMetrics(line)
+                    } else {
+                        emit("onCompactStatus", "Compaction failed: $result")
+                    }
                 }
             }
             "compact_boundary" -> {
@@ -175,6 +179,9 @@ internal class ClaudeEventDecoder(
                     emit("onCompactStatus", "started")
                     emit("onCompactStatus", "completed")
                 }
+                // The boundary is the only place carrying compactMetadata, so the token figures are
+                // reported from here even when the status line already announced the lifecycle.
+                emitCompactionMetrics(line)
             }
             "permission_denied" -> {
                 val tool = line.optString("tool_name", line.optString("toolName"))
@@ -628,6 +635,33 @@ internal class ClaudeEventDecoder(
         textBuffer = null
         subagentCapsules.clear()
         subagentNames.clear()
+    }
+
+    /**
+     * Reports the token accounting attached to a finished compaction, if any.
+     *
+     * Sent as its own event rather than folded into `onCompactStatus` so the lifecycle contract
+     * stays exactly as the UI already handles it, and so a backend that reports nothing (Codex)
+     * simply produces no event.
+     */
+    private fun emitCompactionMetrics(line: JSONObject) {
+        val raw = line.optJSONObject("compactMetadata") ?: line.optJSONObject("compact_metadata")
+            ?: return
+        val pre = raw.optLong("preTokens", raw.optLong("pre_tokens"))
+        val post = raw.optLong("postTokens", raw.optLong("post_tokens"))
+        val dropped = raw.optLong(
+            "cumulativeDroppedTokens",
+            raw.optLong("cumulative_dropped_tokens", maxOf(0L, pre - post)),
+        )
+        val duration = raw.optLong("durationMs", raw.optLong("duration_ms"))
+        if (pre <= 0L && post <= 0L && dropped <= 0L && duration <= 0L) return
+        emit("onCompactionMetrics", JSONObject()
+            .put("threadId", thread())
+            .put("preTokens", pre)
+            .put("postTokens", post)
+            .put("droppedTokens", dropped)
+            .put("durationMs", duration)
+            .toString())
     }
 
     private companion object {

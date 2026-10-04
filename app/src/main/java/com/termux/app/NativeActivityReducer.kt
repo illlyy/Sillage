@@ -71,10 +71,9 @@ internal data class NativeActivityGroup(
 
 internal data class NativeActivityReducerState(
     val groups: List<NativeActivityGroup> = emptyList(),
-    val currentGroupKey: String? = null,
-    val assistantSeenByTurn: Set<String> = emptySet(),
-    val completedTurns: Set<String> = emptySet(),
-    val lastSequence: Long = Long.MIN_VALUE,
+    // Only `groups` is ever read. The snapshot used to carry the key, the per-turn assistant set,
+    // the completed-turn set and the sequence high-water mark as well; every event copied all of
+    // them (including a max() walk over the sequence map) to hand the UI a value it ignored.
 )
 
 /**
@@ -207,10 +206,6 @@ internal class NativeActivityReducer(
         if (lastSnapshot == null || lastSnapshotRevision != revision) {
             lastSnapshot = NativeActivityReducerState(
                 groups = groups.values.map { it.freeze() },
-                currentGroupKey = currentKey,
-                assistantSeenByTurn = assistantSeen.toSet(),
-                completedTurns = completedTurns.toSet(),
-                lastSequence = lastSequenceByThread.values.maxOrNull() ?: Long.MIN_VALUE,
             )
             lastSnapshotRevision = revision
         }

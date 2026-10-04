@@ -297,6 +297,10 @@ internal data class PendingNativeSteer(
         suppressGoalRetryUntilNewTurn = true
         chatState.connectionLabel = "正在停止…"
         syncNativeContinuationHint()
+        // A turn that is being interrupted must not leave an approval request pending: the backend
+        // is told to drop it and the WAITING latch is released, so the UI never sits on a question
+        // whose turn has already gone away.
+        cancelPendingApproval()
         bridge?.interruptCurrentTurn()
     }
 

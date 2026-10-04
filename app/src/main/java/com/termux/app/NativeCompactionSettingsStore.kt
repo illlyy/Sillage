@@ -102,6 +102,10 @@ internal class NativeCompactionJournalStore(
         .put("createdAtMs", item.createdAtMs)
         .put("updatedAtMs", item.updatedAtMs)
         .put("sequence", item.sequence)
+        .put("preTokens", item.preTokens)
+        .put("postTokens", item.postTokens)
+        .put("droppedTokens", item.droppedTokens)
+        .put("durationMs", item.durationMs)
 
     private fun decode(value: JSONObject, threadId: String): NativeCompactionItem? {
         val id = value.optString("id").trim()
@@ -122,6 +126,10 @@ internal class NativeCompactionJournalStore(
             createdAtMs = value.optLong("createdAtMs"),
             updatedAtMs = value.optLong("updatedAtMs"),
             sequence = value.optLong("sequence"),
+            preTokens = value.optLong("preTokens"),
+            postTokens = value.optLong("postTokens"),
+            droppedTokens = value.optLong("droppedTokens"),
+            durationMs = value.optLong("durationMs"),
         )
     }
 
