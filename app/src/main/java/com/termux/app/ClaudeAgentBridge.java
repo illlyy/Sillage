@@ -371,6 +371,9 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
         ready = true;
         mainHandler.removeCallbacks(readinessFallbackRunnable);
         mainHandler.removeCallbacks(initNoticeRunnable);
+        // A CLI that reached ready demonstrably runs here, so any remembered sandbox block is
+        // stale — leaving it up would train the user to ignore the warning in settings.
+        ClaudeRuntimeNote.INSTANCE.clear(appContext);
         emit("onReady", thread);
         restoreClientGoal(thread);
     }
@@ -900,6 +903,12 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                 || stderrLine.toLowerCase().contains("epoll_pwait2")
                 || stderrLine.toLowerCase().contains("sigsys")
                 || stderrLine.toLowerCase().contains("seccomp");
+            // Remember a sandbox kill on the device: it is the one fact that explains why this
+            // phone needs the npm distribution, and settings shows it next to the version. Without
+            // it the user only ever sees a backend that silently never becomes usable.
+            if (seccomp && wasRunning && !deliberate) {
+                ClaudeRuntimeNote.INSTANCE.recordSandboxBlock(appContext, exit);
+            }
             try {
                 FcodeLog.event(appContext, "claude_process_exit", new org.json.JSONObject()
                     .put("exit", exit)

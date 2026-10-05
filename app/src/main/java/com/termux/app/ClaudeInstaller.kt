@@ -158,6 +158,38 @@ internal object ClaudeInstaller {
 
     fun isInstalled(): Boolean = nodeEntry() != null || isDeviceExecutable(binEntry())
 
+    /** Which of the two distributions is actually on the device. */
+    enum class InstallKind { NONE, OFFICIAL_BINARY, NPM_PACKAGE }
+
+    /**
+     * The distribution the bridge will launch, mirroring its own preference order: a Node-runnable
+     * npm entry always wins over the official binary. Two devices on the same app version can be
+     * running very different CLIs — the npm path is pinned to a release over a hundred older than
+     * the bundled binary — and until settings said so, that was invisible to the user.
+     */
+    fun installKind(): InstallKind =
+        installKind(nodeEntry() != null, isDeviceExecutable(binEntry()))
+
+    internal fun installKind(hasNodeEntry: Boolean, hasOfficialBinary: Boolean): InstallKind = when {
+        hasNodeEntry -> InstallKind.NPM_PACKAGE
+        hasOfficialBinary -> InstallKind.OFFICIAL_BINARY
+        else -> InstallKind.NONE
+    }
+
+    /** Version of the bundled official build, without the leading `v`. */
+    fun pinnedBinaryVersion(): String = VERSION.removePrefix("v")
+
+    /**
+     * Version to show in settings: the installed npm package's own version, else the pinned
+     * official build. Empty when nothing recognisable is installed — a guess would be worse than
+     * a blank, since the whole point is to let the user trust the number.
+     */
+    fun displayVersion(kind: InstallKind = installKind()): String = when (kind) {
+        InstallKind.NPM_PACKAGE -> installedVersion()
+        InstallKind.OFFICIAL_BINARY -> pinnedBinaryVersion()
+        InstallKind.NONE -> ""
+    }
+
     /**
      * True when [file] is an ELF image this device can exec — what the official binary install
      * leaves at `bin/claude`.

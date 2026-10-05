@@ -149,4 +149,35 @@ class ClaudeInstallerTest {
     fun `missing manifest and missing bin resolve to nothing`() {
         assertNull(ClaudeInstaller.resolveNodeEntry(File(tempDir(), "absent"), File(tempDir(), "absent")))
     }
+
+    /**
+     * Which distribution is on the device decides everything downstream — the npm build runs
+     * through Node and is pinned to a release over a hundred older than the bundled binary — and
+     * until settings said so, two phones on the same app version looked identical while running
+     * very different CLIs.
+     */
+    @Test
+    fun `npm entry wins over the official binary, matching the bridge's launch order`() {
+        assertEquals(
+            ClaudeInstaller.InstallKind.NPM_PACKAGE,
+            ClaudeInstaller.installKind(hasNodeEntry = true, hasOfficialBinary = true),
+        )
+        assertEquals(
+            ClaudeInstaller.InstallKind.NPM_PACKAGE,
+            ClaudeInstaller.installKind(hasNodeEntry = true, hasOfficialBinary = false),
+        )
+        assertEquals(
+            ClaudeInstaller.InstallKind.OFFICIAL_BINARY,
+            ClaudeInstaller.installKind(hasNodeEntry = false, hasOfficialBinary = true),
+        )
+        assertEquals(
+            ClaudeInstaller.InstallKind.NONE,
+            ClaudeInstaller.installKind(hasNodeEntry = false, hasOfficialBinary = false),
+        )
+    }
+
+    @Test
+    fun `pinned binary version is reported without the leading v`() {
+        assertEquals("2.1.220", ClaudeInstaller.pinnedBinaryVersion())
+    }
 }

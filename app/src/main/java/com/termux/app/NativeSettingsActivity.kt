@@ -478,6 +478,9 @@ class NativeSettingsActivity : ComponentActivity() {
                                 }
                             },
                             claudeInstalled = ClaudeInstaller.isInstalled(),
+                            claudeInstallInfo = remember(backendRevision, providerRevision) {
+                                ClaudeInstallInfo.from(this@NativeSettingsActivity)
+                            },
                             onUninstallClaude = {
                                 if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
                                 ClaudeInstaller.uninstall()

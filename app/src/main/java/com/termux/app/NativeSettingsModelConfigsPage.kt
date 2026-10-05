@@ -129,6 +129,7 @@ internal fun ModelConfigurationsPage(
     onClaudeEdit: (String) -> Unit = {},
     onClaudeActivate: (String) -> Unit = {},
     claudeInstalled: Boolean = false,
+    claudeInstallInfo: ClaudeInstallInfo = ClaudeInstallInfo.Unknown,
     onUninstallClaude: () -> Unit = {},
     codexInstalled: Boolean = false,
     onUninstallCodex: () -> Unit = {},
@@ -198,6 +199,12 @@ internal fun ModelConfigurationsPage(
                         }
                     }
                 } else {
+                    item {
+                        ClaudeInstallStatusCard(
+                            lang = lang,
+                            info = claudeInstallInfo,
+                        )
+                    }
                     item {
                         TextButton(
                             onClick = { confirmUninstall = "claude" },
