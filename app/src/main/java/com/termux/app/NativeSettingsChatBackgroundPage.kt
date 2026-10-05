@@ -269,23 +269,21 @@ internal fun ChatBackgroundSettingsPage(
     }
 
     if (importing) {
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = {},
             icon = { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) },
             title = { Text(tr(lang, "正在导入图片", "Importing image")) },
             text = { Text(tr(lang, "正在验证并复制到应用私有目录…", "Validating and copying into private app storage…")) },
             confirmButton = {},
-            shape = RoundedCornerShape(28.dp),
         )
     }
 
     importError?.let { error ->
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = { importError = null },
             title = { Text(tr(lang, "无法使用这张图片", "Unable to use this image")) },
             text = { Text(error) },
             confirmButton = { Button(onClick = { importError = null }) { Text(tr(lang, "关闭", "Close")) } },
-            shape = RoundedCornerShape(28.dp),
         )
     }
 }

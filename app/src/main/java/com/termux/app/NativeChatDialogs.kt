@@ -281,6 +281,7 @@ internal fun FlClashAnimatedDialog(
     confirmButton: @Composable () -> Unit,
     modifier: Modifier = Modifier,
     dismissButton: (@Composable () -> Unit)? = null,
+    icon: (@Composable () -> Unit)? = null,
     title: (@Composable () -> Unit)? = null,
     text: (@Composable () -> Unit)? = null,
 ) {
@@ -314,7 +315,23 @@ internal fun FlClashAnimatedDialog(
                     shadowElevation = 12.dp,
                 ) {
                     Column(modifier = Modifier.padding(top = 24.dp, bottom = 10.dp)) {
-                        if (title != null) Box(Modifier.padding(horizontal = 24.dp)) { title() }
+                        if (icon != null) {
+                            // Material centres the icon and the title together when an icon is
+                            // present. The settings dialogs were written against that, so a shell
+                            // that left-aligned everything would visibly shift them the moment they
+                            // moved onto it.
+                            Box(
+                                Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                                contentAlignment = Alignment.Center,
+                            ) { icon() }
+                            Spacer(Modifier.height(16.dp))
+                        }
+                        if (title != null) {
+                            Box(
+                                Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                                contentAlignment = if (icon != null) Alignment.Center else Alignment.CenterStart,
+                            ) { title() }
+                        }
                         if (title != null && text != null) Spacer(Modifier.height(16.dp))
                         if (text != null) Box(Modifier.padding(horizontal = 24.dp)) { text() }
                         Spacer(Modifier.height(14.dp))

@@ -275,20 +275,6 @@ import me.rerere.hugeicons.stroke.Upload02
 import me.rerere.hugeicons.stroke.Voice
 import me.rerere.hugeicons.stroke.Zap
 
-internal data class MarkdownBlock(val code: Boolean, val text: String, val language: String = "")
-
-internal fun markdownBlocks(source: String): List<MarkdownBlock> {
-    if (!source.contains("```")) return listOf(MarkdownBlock(false, source))
-    return source.split("```").mapIndexedNotNull { index, part ->
-        if (part.isEmpty()) null
-        else if (index % 2 == 1) {
-            val firstLine = part.substringBefore('\n').trim()
-            val hasLanguage = part.contains('\n') && firstLine.matches(Regex("[A-Za-z0-9_+.#-]{1,24}"))
-            MarkdownBlock(true, if (hasLanguage) part.substringAfter('\n').trimEnd() else part.trimEnd(), if (hasLanguage) firstLine else "")
-        } else MarkdownBlock(false, part)
-    }
-}
-
 @Composable
 internal fun RichResponseText(
     text: String,
@@ -313,17 +299,28 @@ internal fun RichResponseText(
         StableLiveTextChunk(normalized, reasoning = false)
         return
     }
-    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         parsed.blocks.forEachIndexed { index, block ->
             androidx.compose.runtime.key(index, block.type, block.text.hashCode()) {
-                when (block.type) {
-                    NativeMarkdownBlockType.CODE -> RikkaCodeBlock(block.language, block.text, onQuoteSelection)
-                    NativeMarkdownBlockType.INLINE_CODE -> FcodeStandaloneInlineCode(block.text, onQuoteSelection)
-                    NativeMarkdownBlockType.TABLE -> block.table?.let { table ->
-                        FcodeMarkdownTable(table, block.text)
-                    }
-                    NativeMarkdownBlockType.PROSE -> if (block.text.isNotBlank()) {
-                        RichMarkdownText(block.text, onQuoteSelection, projectPath)
+                // Spacing now states the relationship instead of being one uniform 10dp: prose flows
+                // into prose, a fence or table stands apart, a heading gets an opening. A single gap
+                // for everything is what made a long answer read as a wall of equally-related
+                // paragraphs. The rule is a pure function so it can be tested (fcodeBlockGapDp).
+                val gapDp = fcodeBlockGapDp(
+                    previousType = parsed.blocks.getOrNull(index - 1)?.type,
+                    currentType = block.type,
+                    currentText = block.text,
+                )
+                Box(Modifier.fillMaxWidth().padding(top = gapDp.dp)) {
+                    when (block.type) {
+                        NativeMarkdownBlockType.CODE -> RikkaCodeBlock(block.language, block.text, onQuoteSelection)
+                        NativeMarkdownBlockType.INLINE_CODE -> FcodeStandaloneInlineCode(block.text, onQuoteSelection)
+                        NativeMarkdownBlockType.TABLE -> block.table?.let { table ->
+                            FcodeMarkdownTable(table, block.text)
+                        }
+                        NativeMarkdownBlockType.PROSE -> if (block.text.isNotBlank()) {
+                            RichMarkdownText(block.text, onQuoteSelection, projectPath)
+                        }
                     }
                 }
             }
@@ -423,9 +420,9 @@ internal fun FcodeSelectableCodeText(
                 movementMethod = restingMovementMethod
                 isHorizontalScrollBarEnabled = true
                 scrollBarStyle = android.view.View.SCROLLBARS_INSIDE_OVERLAY
-                textSize = 13f
+                textSize = FcodeType.codeSp
                 typeface = android.graphics.Typeface.MONOSPACE
-                setLineSpacing(resources.displayMetrics.density * 2f, 1.04f)
+                setLineSpacing(resources.displayMetrics.density * FcodeType.codeLineSpacingExtraDp, FcodeType.codeLineHeightMultiplier)
             }
         },
         onReset = { view -> view.finishSelection() },
@@ -930,9 +927,9 @@ internal fun RichMarkdownText(
         factory = { viewContext ->
             FcodeSelectableTextView(viewContext).apply {
                 includeFontPadding = false
-                textSize = 15.5f
+                textSize = FcodeType.bodySp
                 letterSpacing = if (resources.configuration.locales[0].language == "zh") 0f else 0.0025f
-                setLineSpacing(resources.displayMetrics.density * 2f, 1.12f)
+                setLineSpacing(resources.displayMetrics.density * FcodeType.bodyLineSpacingExtraDp, FcodeType.bodyLineHeightMultiplier)
                 val horizontal = (3f * resources.displayMetrics.density).roundToInt()
                 val vertical = (2f * resources.displayMetrics.density).roundToInt()
                 setPadding(horizontal, vertical, horizontal, vertical)
@@ -957,7 +954,7 @@ internal fun RichMarkdownText(
             view.selectAllLabel = nativeText(language, "\u5168\u9009", "Select all")
             view.onSelectionActivityChanged = onSelectionActivityChanged
             view.onQuoteSelection = onQuoteSelection
-            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15.5f * chatFontScale)
+            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, FcodeType.bodySp * chatFontScale)
             view.setTextColor(colors.text.toArgb())
             val rendered = parsed
             if (rendered != null && markwon != null && view.tag != renderedTag) {
@@ -1032,27 +1029,3 @@ private class WorkspaceLinkSpan(
         }
     }
 }
-
-@Composable
-internal fun MarkdownLikeText(text: String) {
-    val colors = LocalFcodeMarkdownColors.current
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        markdownBlocks(text).forEach { block ->
-            if (block.code) {
-                Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = colors.codeBlockBackground) {
-                    Text(
-                        block.text,
-                        modifier = Modifier.padding(14.dp),
-                        color = colors.codeBlockText,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                    )
-                }
-            } else {
-                Text(block.text, color = colors.text, style = MaterialTheme.typography.bodyLarge, lineHeight = 22.sp)
-            }
-        }
-    }
-}
-

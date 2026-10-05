@@ -152,7 +152,7 @@ internal fun MissingCodexCliDialog(
             "WebUI, Codex commands in Termux and model execution require Codex CLI, but it is not installed on this device.",
         )
     }
-    AlertDialog(
+    FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         icon = {
             Surface(
@@ -188,7 +188,6 @@ internal fun MissingCodexCliDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
         confirmButton = { Button(onClick = onInstall) { Text(tr(lang, "下载安装", "Download & install")) } },
-        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -366,7 +365,7 @@ internal fun EmptySettingsState(icon: ImageVector, title: String, body: String) 
 
 @Composable
 internal fun SettingsChoiceDialog(title: String, options: List<Pair<String, String>>, selected: String, onDismiss: () -> Unit, onSelected: (String) -> Unit) {
-    AlertDialog(
+    FlClashAnimatedDialog(
         onDismissRequest = onDismiss, title = { Text(title) },
         text = { Column {
             options.forEachIndexed { index, (value, label) ->
@@ -390,7 +389,7 @@ internal fun SettingsChoiceDialog(title: String, options: List<Pair<String, Stri
 
 @Composable
 internal fun InfoDialog(title: String, body: String, lang: String, onDismiss: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(title) }, text = { Text(body) }, confirmButton = { TextButton(onDismiss) { Text(tr(lang, "完成", "Done")) } })
+    FlClashAnimatedDialog(onDismissRequest = onDismiss, title = { Text(title) }, text = { Text(body) }, confirmButton = { TextButton(onDismiss) { Text(tr(lang, "完成", "Done")) } })
 }
 
 internal fun tr(lang: String, zh: String, en: String) = if (lang == "zh") zh else en

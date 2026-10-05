@@ -436,7 +436,7 @@ private fun McpServerEditorContent(
             item { Spacer(Modifier.height(28.dp)) }
         }
     }
-    if (confirmDelete && existing != null) AlertDialog(
+    if (confirmDelete && existing != null) FlClashAnimatedDialog(
         onDismissRequest = { confirmDelete = false },
         title = { Text(tr(lang, "\u5220\u9664 ${existing.key}\uff1f", "Remove ${existing.key}?")) },
         text = { Text(if (isClaude)

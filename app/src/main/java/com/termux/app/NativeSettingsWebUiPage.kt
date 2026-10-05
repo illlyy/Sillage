@@ -150,7 +150,7 @@ internal fun WebUiSettingsPage(
             item { Spacer(Modifier.height(28.dp)) }
         }
     }
-    if (confirmReset) AlertDialog(
+    if (confirmReset) FlClashAnimatedDialog(
         onDismissRequest = { confirmReset = false },
         title = { Text(tr(lang, "重置 WebUI？", "Reset WebUI?")) },
         text = { Text(tr(lang, "这会删除 WebUI 的语言、外观、项目列表和本地界面状态，但不会删除 API 配置、Codex 会话和技能。", "This removes WebUI language, appearance, project list and local UI state, but keeps API configurations, Codex conversations and skills.")) },

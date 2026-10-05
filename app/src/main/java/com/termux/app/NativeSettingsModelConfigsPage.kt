@@ -266,7 +266,7 @@ internal fun ModelConfigurationsPage(
         )
     }
     when (confirmUninstall) {
-        "claude" -> AlertDialog(
+        "claude" -> FlClashAnimatedDialog(
             onDismissRequest = { confirmUninstall = null },
             icon = { Icon(HugeIcons.Delete01, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text(tr(lang, "卸载 Claude CLI？", "Uninstall Claude CLI?")) },
@@ -278,9 +278,8 @@ internal fun ModelConfigurationsPage(
                 }) { Text(tr(lang, "卸载", "Uninstall"), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmUninstall = null }) { Text(tr(lang, "取消", "Cancel")) } },
-            shape = RoundedCornerShape(28.dp),
         )
-        "codex" -> AlertDialog(
+        "codex" -> FlClashAnimatedDialog(
             onDismissRequest = { confirmUninstall = null },
             icon = { Icon(HugeIcons.Delete01, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text(tr(lang, "卸载 Codex CLI？", "Uninstall Codex CLI?")) },
@@ -292,7 +291,6 @@ internal fun ModelConfigurationsPage(
                 }) { Text(tr(lang, "卸载", "Uninstall"), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmUninstall = null }) { Text(tr(lang, "取消", "Cancel")) } },
-            shape = RoundedCornerShape(28.dp),
         )
         else -> Unit
     }
@@ -325,7 +323,7 @@ private fun ClaudeInstallDialog(
             }
         })
     }
-    AlertDialog(
+    FlClashAnimatedDialog(
         onDismissRequest = { if (done) onDismiss() },
         icon = { if (failed == null && !done) CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) },
         title = {
@@ -341,7 +339,6 @@ private fun ClaudeInstallDialog(
         confirmButton = {
             if (done) TextButton(onClick = onDismiss) { Text(tr(lang, "关闭", "Close")) }
         },
-        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -399,7 +396,7 @@ private fun ClaudeModelPickerDialog(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
 ) {
-    AlertDialog(
+    FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(tr(lang, "选择模型", "Select a model")) },
         text = {
@@ -426,7 +423,6 @@ private fun ClaudeModelPickerDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text(tr(lang, "取消", "Cancel")) } },
-        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -1208,14 +1204,14 @@ internal fun ModelConfigurationEditor(
             openModelEditor(current, fetchedModel)
         },
     ) }
-    pendingDeleteModel?.let { target -> AlertDialog(
+    pendingDeleteModel?.let { target -> FlClashAnimatedDialog(
         onDismissRequest = { pendingDeleteModel = null },
         title = { Text(tr(lang, "删除模型？", "Delete model?")) },
         text = { Text(tr(lang, "将从此配置中删除“${modelDisplayName(target) ?: target.id}”。", "Remove “${modelDisplayName(target) ?: target.id}” from this configuration.")) },
         dismissButton = { TextButton({ pendingDeleteModel = null }) { Text(tr(lang, "取消", "Cancel")) } },
         confirmButton = { TextButton({ models.remove(target); if (defaultModelId == target.id) defaultModelId = models.firstOrNull()?.id.orEmpty(); pendingDeleteModel = null }) { Text(tr(lang, "删除", "Delete"), color = MaterialTheme.colorScheme.error) } },
     ) }
-    if (confirmDelete && existing != null) AlertDialog(
+    if (confirmDelete && existing != null) FlClashAnimatedDialog(
         onDismissRequest = { confirmDelete = false },
         title = { Text(tr(lang, "删除模型配置？", "Delete model configuration?")) },
         text = { Text(tr(lang, "“${existing.name}”及其中保存的 API Key 和模型目录将被删除。", "“${existing.name}”, its API key and model catalog will be deleted.")) },
@@ -1446,7 +1442,7 @@ private fun FetchModelsDialog(
     onDismiss: () -> Unit,
     onChoose: (CodexProviderStore.ModelConfig) -> Unit,
 ) {
-    AlertDialog(
+    FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(tr(lang, "API 可用模型", "Models available from API")) },
         text = {

@@ -304,7 +304,7 @@ internal fun ProxySettingsPage(
         },
     )
     pendingDeleteSubscription?.let { item ->
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = { pendingDeleteSubscription = null },
             title = { Text(tr(lang, "删除这个订阅？", "Delete this subscription?")) },
             text = { Text(item.name) },
@@ -318,7 +318,7 @@ internal fun ProxySettingsPage(
         )
     }
     errorMessage?.let { message ->
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = { errorMessage = null },
             title = { Text(tr(lang, "代理操作未完成", "Proxy action not completed")) },
             text = { Text(message) },
@@ -606,7 +606,7 @@ private fun AddSubscriptionDialog(lang: String, onDismiss: () -> Unit, onAdd: (S
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
-    AlertDialog(
+    FlClashAnimatedDialog(
         onDismissRequest = onDismiss,
         title = { Text(tr(lang, "添加订阅", "Add subscription")) },
         text = {

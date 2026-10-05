@@ -322,7 +322,7 @@ internal fun DevelopmentToolsSettingsPage(
 
     if (confirmInstall) {
         val selectedTools = DevelopmentToolCatalog.tools.filter { it.id in selectedIds }
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = { confirmInstall = false },
             icon = { Icon(HugeIcons.Code, null) },
             title = { Text(tr(lang, "确认安装", "Confirm installation")) },
@@ -353,12 +353,11 @@ internal fun DevelopmentToolsSettingsPage(
                     installSelectedTools()
                 }) { Text(tr(lang, "开始安装", "Start installation")) }
             },
-            shape = RoundedCornerShape(28.dp),
         )
     }
 
     if (installing) {
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = {},
             icon = { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp) },
             title = { Text(installStage.ifBlank { tr(lang, "正在安装", "Installing") }) },
@@ -378,12 +377,11 @@ internal fun DevelopmentToolsSettingsPage(
                 }
             },
             confirmButton = {},
-            shape = RoundedCornerShape(28.dp),
         )
     }
 
     installError?.let { error ->
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = { installError = null },
             title = { Text(tr(lang, "安装未完成", "Installation incomplete")) },
             text = {
@@ -399,7 +397,6 @@ internal fun DevelopmentToolsSettingsPage(
             confirmButton = {
                 Button(onClick = { installError = null }) { Text(tr(lang, "关闭", "Close")) }
             },
-            shape = RoundedCornerShape(28.dp),
         )
     }
 
@@ -413,7 +410,7 @@ internal fun DevelopmentToolsSettingsPage(
     }
 
     if (showLog) {
-        AlertDialog(
+        FlClashAnimatedDialog(
             onDismissRequest = { showLog = false },
             title = { Text(tr(lang, "安装日志", "Installation log")) },
             text = {
@@ -425,7 +422,6 @@ internal fun DevelopmentToolsSettingsPage(
                 )
             },
             confirmButton = { Button(onClick = { showLog = false }) { Text(tr(lang, "完成", "Done")) } },
-            shape = RoundedCornerShape(28.dp),
         )
     }
 }
