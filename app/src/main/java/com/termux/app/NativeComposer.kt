@@ -1046,12 +1046,25 @@ internal fun RikkaChatInput(
                                     modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
-                                    InputTool(HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick)
+                                    InputTool(
+                                        HugeIcons.Sparkles, modelLabel.ifBlank { "模型" }, onModelClick,
+                                    )
                                     LiquidEffortTool(effortOptions, selectedEffort, onEffortSelected, onUltraBurst)
+                                    // Full access is the default state, so drawing it like any other
+                                    // option says nothing. It only earns emphasis once the agent has
+                                    // actually been restricted -- then the tint explains why a write
+                                    // may be refused, which is the question a restricted run raises.
+                                    // The icon itself stays reachable either way: this is the only
+                                    // place the mode can be changed from.
                                     InputTool(
                                         HugeIcons.Settings03,
                                         NativePermissionMode.label(permissionMode, language != "en"),
                                         { permissionExpanded = true },
+                                        tint = if (permissionMode == NativePermissionMode.FULL_ACCESS) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                        } else {
+                                            MaterialTheme.colorScheme.tertiary
+                                        },
                                     )
                                     InputTool(HugeIcons.Add01, "工具", { toolsExpanded = true })
                                     if (loading) {
@@ -1533,9 +1546,19 @@ internal fun RikkaFileAction(icon: ImageVector, label: String, onClick: () -> Un
 }
 
 @Composable
-internal fun InputTool(icon: ImageVector, description: String, onClick: () -> Unit = {}) {
+internal fun InputTool(
+    icon: ImageVector,
+    description: String,
+    onClick: () -> Unit = {},
+    tint: Color = Color.Unspecified,
+) {
     IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
-        Icon(icon, description, modifier = Modifier.size(21.dp))
+        Icon(
+            icon,
+            description,
+            modifier = Modifier.size(21.dp),
+            tint = if (tint == Color.Unspecified) LocalContentColor.current else tint,
+        )
     }
 }
 

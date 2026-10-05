@@ -833,11 +833,54 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: Strin
     val cost = remember(usage, price) { price?.let { estimateTurnCost(usage, it) } }
     var showCostDetails by remember { mutableStateOf(false) }
     var showContextDetails by remember { mutableStateOf(false) }
+    // Diagnostic detail stays folded. Per-message, because inspecting a number is momentary.
+    var usageExpanded by remember { mutableStateOf(false) }
     val prefix = if (usage.estimated) "≈" else ""
     if (usage.inputTokens <= 0 && usage.cachedInputTokens <= 0 && usage.outputTokens <= 0 &&
         usage.reasoningOutputTokens <= 0 && usage.outputTokensPerSecond <= 0.0 && usage.durationMs <= 0
     ) return
     val mutedColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.56f)
+    // Six metrics under every answer wrapped onto three lines on a phone, pushing the conversation
+    // apart for detail almost nobody reads twice. Fold them behind the one figure that can change
+    // what you do next -- how full the context is -- with the rest one tap away.
+    if (!usageExpanded) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (usage.contextOccupancyKnown) {
+                val percent = (usage.contextUsedFraction * 100).roundToInt()
+                ResponseUsageMetric(
+                    icon = HugeIcons.ChartRing,
+                    description = nativeText(language, "上下文占用", "Context used"),
+                    text = nativeText(
+                        language,
+                        "${formatNativeTokenCount(usage.currentContextTokens)} / ${formatNativeTokenCount(usage.contextWindow)}（$percent%）",
+                        "${formatNativeTokenCount(usage.currentContextTokens)} / ${formatNativeTokenCount(usage.contextWindow)} ($percent%)",
+                    ),
+                    color = if (percent >= 80) MaterialTheme.colorScheme.error else mutedColor,
+                    onClick = { showContextDetails = true },
+                )
+            } else if (usage.outputTokens > 0) {
+                // No window from the backend: fall back to the output count so the strip still says
+                // something instead of collapsing to nothing.
+                ResponseUsageMetric(
+                    icon = HugeIcons.Download04,
+                    description = nativeText(language, "输出", "Output"),
+                    text = "$prefix${formatNativeTokenCount(usage.outputTokens)} tokens",
+                    color = mutedColor,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            ResponseUsageMetric(
+                icon = HugeIcons.ArrowDown01,
+                description = nativeText(language, "展开用量明细", "Show usage details"),
+                text = nativeText(language, "详情", "Details"),
+                color = mutedColor,
+                onClick = { usageExpanded = true },
+            )
+        }
+    } else {
     FlowRow(
         modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp, end = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -914,6 +957,7 @@ internal fun ResponseUsageFooterCompact(usage: NativeTurnUsage, modelName: Strin
                 onClick = { showCostDetails = true },
             )
         }
+    }
     }
     if (showContextDetails) {
         NativeContextDetailDialog(usage = usage, onDismiss = { showContextDetails = false })
