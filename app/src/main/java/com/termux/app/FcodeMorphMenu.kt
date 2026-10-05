@@ -5,17 +5,15 @@ package com.termux.app
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -50,7 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.invisibleToUser
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -107,132 +105,149 @@ internal fun FcodeMorphMenu(
     val anchorTopPadding = statusTop + ANCHOR_TOP_GAP
     val panelWidth = PANEL_WIDTH
     val panelHeight = ITEM_HEIGHT * items.size.toFloat() + PANEL_VERTICAL_PADDING * 2f
-    // Item entrance is driven by one Animatable that lives outside the AnimatedContent branches, so
-    // opening and closing share the same clock and reverse seamlessly from any mid-flight frame.
-    val itemReveal = remember { Animatable(if (expanded) 1f else 0f) }
+    val surface = MaterialTheme.colorScheme.surfaceContainerHigh
+    val onSurface = MaterialTheme.colorScheme.onSurface
+    // ONE clock. The container morph, the dim layer, the source button's state and the row stagger
+    // all read from it, so no part can finish before the one beside it. Because it is an Animatable
+    // living outside the state branches, an interruption (tap outside, tap the anchor, back press)
+    // reverses from whatever frame it is on instead of restarting.
+    //
+    // The previous build ran a 360ms container against a 400ms+80ms stagger and an anchor that
+    // faded out over 120ms and back in over 240ms after a 150ms delay: four separate clocks, which
+    // is what read as several things happening slightly out of step rather than one menu opening.
+    val progress = remember { Animatable(if (expanded) 1f else 0f) }
     LaunchedEffect(expanded) {
-        if (expanded) {
-            itemReveal.animateTo(1f, tween(400, delayMillis = 80, easing = MORPH_EASING))
-        } else {
-            itemReveal.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
-        }
+        progress.animateTo(
+            targetValue = if (expanded) 1f else 0f,
+            animationSpec = tween(MORPH_DURATION_MS, easing = MORPH_EASING),
+        )
     }
     BackHandler(enabled = expanded, onBack = onDismissRequest)
 
     SharedTransitionLayout(modifier) {
         val sharedState = rememberSharedContentState(key = "fcodeMorphMenu")
-        AnimatedContent(
-            targetState = expanded,
-            transitionSpec = {
-                if (targetState) {
-                    // Opening: the panel fades in while the anchor (icon + seed) dissolves quickly.
-                    // scaleIn keeps the container morph on the emphasized 360ms clock so the shared
-                    // bounds interpolation matches the playground's opening motion.
-                    (fadeIn(tween(200, delayMillis = 90, easing = LinearOutSlowInEasing)) +
-                        scaleIn(
-                            initialScale = 0.98f,
-                            animationSpec = tween(360, easing = MORPH_EASING),
-                        ))
-                        .togetherWith(
-                            fadeOut(tween(120, easing = FastOutSlowInEasing), targetAlpha = 0f),
-                        )
-                } else {
-                    // Closing: the anchor fades back in late (once the panel has mostly collapsed),
-                    // while the panel recedes with a slight spring overshoot - the container
-                    // morph's bounds interpolation inherits this spring, giving the gentle bounce.
-                    (fadeIn(tween(240, delayMillis = 150, easing = LinearOutSlowInEasing)) +
-                        scaleIn(
-                            initialScale = 0.94f,
-                            animationSpec = tween(300, easing = MORPH_EASING),
-                        ))
-                        .togetherWith(
-                            fadeOut(tween(180, delayMillis = 40, easing = LinearOutSlowInEasing)) +
-                                scaleOut(
-                                    targetScale = 0.94f,
-                                    animationSpec = spring(dampingRatio = 0.78f, stiffness = 520f),
-                                ),
-                        )
-                }
-            },
-            label = "fcodeMorphMenuContainer",
-        ) { open ->
-            Box(Modifier.fillMaxSize()) {
-                if (open) {
-                    // A whisper of a dim layer: taps anywhere outside the panel dismiss the menu.
-                    // It is invisible to accessibility so the menu items stay directly focusable.
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.04f))
-                            .semantics { invisibleToUser() }
-                            .clickable(
+        Box(Modifier.fillMaxSize()) {
+            // A whisper of a dim layer, faded by the same clock so it cannot pop in ahead of the
+            // panel. It is invisible to accessibility so the menu items stay directly focusable,
+            // and it only takes clicks while the menu is actually open, so a closing menu cannot
+            // swallow a tap meant for the screen underneath.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = MORPH_SCRIM_ALPHA * progress.value))
+                    .semantics { hideFromAccessibility() }
+                    .then(
+                        if (expanded) {
+                            Modifier.clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
                                 onClick = onDismissRequest,
-                            ),
-                    )
-                    Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(end = anchorEndOffset, top = anchorTopPadding),
-                    ) {
-                        // The whole panel (surface + items) is the shared element, so it zooms out
-                        // of the button bounds exactly like the playground card expands to a page.
+                            )
+                        } else {
+                            Modifier
+                        },
+                    ),
+            )
+            AnimatedContent(
+                targetState = expanded,
+                transitionSpec = {
+                    // Identical in both directions, so the menu returns along exactly the path it
+                    // opened by, at the same speed. The previous build opened over 360ms and closed
+                    // over a spring with a 150ms-delayed anchor fade -- and its own comment admitted
+                    // the anchor came back "late", which is a window where neither the panel nor the
+                    // button is legible.
+                    fadeIn(tween(MORPH_DURATION_MS, easing = MORPH_EASING))
+                        .togetherWith(fadeOut(tween(MORPH_DURATION_MS, easing = MORPH_EASING)))
+                },
+                label = "fcodeMorphMenuContainer",
+            ) { open ->
+                // Both branches are full-screen boxes, so AnimatedContent has no size to tween and
+                // the only thing moving the panel is sharedBounds. The branch fade above is the
+                // single opacity change; sharedBounds deliberately contributes none, because
+                // stacking a branch fade on a sharedBounds enter transition is how the old build
+                // ended up compounding two transforms onto one element.
+                Box(Modifier.fillMaxSize()) {
+                    if (open) {
                         Box(
                             Modifier
-                                .size(panelWidth, panelHeight)
-                                .sharedBounds(
-                                    sharedContentState = sharedState,
-                                    animatedVisibilityScope = this@AnimatedContent,
-                                    enter = fadeIn(
-                                        tween(240, delayMillis = 60, easing = LinearOutSlowInEasing),
-                                    ),
-                                    exit = fadeOut(tween(190, easing = LinearOutSlowInEasing)),
+                                .align(Alignment.TopEnd)
+                                .padding(
+                                    end = anchorEndOffset,
+                                    top = anchorTopPadding + ANCHOR_SIZE + ANCHOR_PANEL_GAP,
                                 ),
                         ) {
-                            MorphMenuPanel(items, itemReveal.value, onDismissRequest)
-                        }
-                    }
-                } else {
-                    Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(end = anchorEndOffset, top = anchorTopPadding),
-                    ) {
-                        // The shared seed: the same surface material at reduced alpha, so the morph
-                        // starts from the button's exact footprint and material continuity holds in
-                        // both directions.
-                        Box(
-                            Modifier
-                                .size(ANCHOR_SIZE)
-                                .sharedBounds(
-                                    sharedContentState = sharedState,
-                                    animatedVisibilityScope = this@AnimatedContent,
-                                    enter = fadeIn(
-                                        tween(260, delayMillis = 120, easing = LinearOutSlowInEasing),
-                                    ),
-                                    exit = fadeOut(tween(130)),
-                                ),
-                        ) {
+                            // The panel is the shared element, so it grows out of the button's exact
+                            // footprint and, on the way back, collapses into it.
                             Box(
                                 Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(24.dp))
-                                    .background(
-                                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.55f),
+                                    .size(panelWidth, panelHeight)
+                                    .sharedBounds(
+                                        sharedContentState = sharedState,
+                                        animatedVisibilityScope = this@AnimatedContent,
+                                        boundsTransform = MORPH_BOUNDS,
+                                        enter = EnterTransition.None,
+                                        exit = ExitTransition.None,
+                                    ),
+                            ) {
+                                MorphMenuPanel(items, progress.value, onDismissRequest)
+                            }
+                        }
+                    } else {
+                        Box(
+                            Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(end = anchorEndOffset, top = anchorTopPadding),
+                        ) {
+                            // The other half of the shared element: the button's exact rect, and
+                            // nothing drawn inside it. The button itself is composed separately
+                            // below and is never removed, so this only supplies the bounds the morph
+                            // starts from and returns to.
+                            Box(
+                                Modifier
+                                    .size(ANCHOR_SIZE)
+                                    .sharedBounds(
+                                        sharedContentState = sharedState,
+                                        animatedVisibilityScope = this@AnimatedContent,
+                                        boundsTransform = MORPH_BOUNDS,
+                                        enter = EnterTransition.None,
+                                        exit = ExitTransition.None,
                                     ),
                             )
                         }
-                        IconButton(onClick = onAnchorClick) {
-                            if (anchorContent != null) {
-                                anchorContent()
-                            } else {
-                                Icon(
-                                    HugeIcons.MoreVertical,
-                                    contentDescription = nativeText(language, "更多操作", "More actions"),
-                                )
-                            }
-                        }
+                    }
+                }
+            }
+            // The source button: drawn last so it stays above the panel, and never removed. The
+            // whole point of the motion is that it is visibly where the menu came from and where it
+            // goes back to, so it dims instead of disappearing -- fading it to nothing (what the
+            // previous build did) left the closing animation with no source to return into.
+            //
+            // It is also the only way to close the menu by tapping it, which the old build could not
+            // do at all: the button was gone while the menu was open.
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = anchorEndOffset, top = anchorTopPadding),
+            ) {
+                Box(
+                    Modifier
+                        .size(ANCHOR_SIZE)
+                        .graphicsLayer { alpha = morphAnchorAlpha(progress.value) }
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(surface.copy(alpha = 0.55f)),
+                )
+                IconButton(
+                    onClick = { if (expanded) onDismissRequest() else onAnchorClick() },
+                    modifier = Modifier.graphicsLayer { alpha = morphAnchorAlpha(progress.value) },
+                ) {
+                    if (anchorContent != null) {
+                        anchorContent()
+                    } else {
+                        Icon(
+                            HugeIcons.MoreVertical,
+                            contentDescription = nativeText(language, "更多操作", "More actions"),
+                            tint = onSurface,
+                        )
                     }
                 }
             }
@@ -353,11 +368,49 @@ internal fun morphMenuItemReveal(index: Int, count: Int, reveal: Float): Float {
     return smoothstep01(progress)
 }
 
+/**
+ * Opacity of the source button across the open morph.
+ *
+ * Never reaches zero, and that is the point: the whole motion is "from the button, back into the
+ * button", so the button has to stay visible for the return to have somewhere to land. The previous
+ * build faded it to 0 on open and then faded it back in on a delayed, differently-timed curve, which
+ * left a window where neither the panel nor the button was legible.
+ */
+internal fun morphAnchorAlpha(progress: Float): Float {
+    val t = progress.coerceIn(0f, 1f)
+    return 1f - (1f - MORPH_ANCHOR_DIM) * t
+}
+
 private val MORPH_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
+/**
+ * The one spec every part of the morph runs on, container bounds included.
+ *
+ * sharedBounds does NOT take its duration from the enter/exit transitions or from the enclosing
+ * AnimatedContent: left alone it runs on its own default spring, so the container would finish on a
+ * different clock from the dim layer, the source button and the row stagger. Measured while
+ * building evidence for this: with the other two slowed to 5s for frame capture, the panel still
+ * reached full size within a few hundred milliseconds. That silent second clock is a good part of
+ * what "several things happening out of step" was.
+ */
+private val MORPH_BOUNDS = BoundsTransform { _, _ -> tween(MORPH_DURATION_MS, easing = MORPH_EASING) }
+
+/** One duration for both directions: the menu closes along the path it opened by, at the same speed. */
+private const val MORPH_DURATION_MS = 300
+
+/** Dim behind the open menu. Faded on the shared clock so it cannot arrive ahead of the panel. */
+private const val MORPH_SCRIM_ALPHA = 0.04f
+
+/** How far the source button dims while the menu is out; 1 = untouched, 0 = invisible. */
+private const val MORPH_ANCHOR_DIM = 0.55f
 
 private val ANCHOR_SIZE = 48.dp
 private val ANCHOR_END_GAP_DEFAULT = 4.dp
 private val ANCHOR_TOP_GAP = 8.dp
+
+/** Gap between the button and the panel beneath it, so dimming the button stays legible. */
+private val ANCHOR_PANEL_GAP = 8.dp
+
 private val PANEL_WIDTH = 248.dp
 private val ITEM_HEIGHT = 48.dp
 private val PANEL_VERTICAL_PADDING = 6.dp

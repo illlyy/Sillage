@@ -81,4 +81,43 @@ class FcodeMorphMenuTest {
     fun anEmptyMenuIsTreatedAsFullyRevealed() {
         assertEquals(1f, morphMenuItemReveal(index = 0, count = 0, reveal = 0f), 1e-4f)
     }
+
+    @Test
+    fun theSourceButtonIsUntouchedWhileTheMenuIsClosed() {
+        assertClose(1f, morphAnchorAlpha(0f))
+    }
+
+    @Test
+    fun theSourceButtonDimsButDoesNotVanishWhileTheMenuIsOpen() {
+        val open = morphAnchorAlpha(1f)
+        assertClose(0.55f, open)
+        assertTrue("the source faded to $open", open > 0f)
+    }
+
+    @Test
+    fun theSourceButtonNeverDisappearsAtAnyPointInTheMorph() {
+        // The regression this pins: the button used to fade to 0 on open, which left the closing
+        // animation with no source to return into -- the motion read as a menu appearing from
+        // nowhere rather than one unfolding out of the button.
+        for (step in 0..100) {
+            val alpha = morphAnchorAlpha(step / 100f)
+            assertTrue("alpha collapsed to $alpha at ${step}%", alpha >= 0.5f)
+        }
+    }
+
+    @Test
+    fun theSourceButtonDimsMonotonicallyAsTheMenuOpens() {
+        var previous = morphAnchorAlpha(0f)
+        for (step in 1..100) {
+            val alpha = morphAnchorAlpha(step / 100f)
+            assertTrue("alpha rose from $previous to $alpha", alpha <= previous + 1e-4f)
+            previous = alpha
+        }
+    }
+
+    @Test
+    fun theSourceButtonIsClampedForOutOfRangeProgress() {
+        assertClose(1f, morphAnchorAlpha(-3f))
+        assertClose(0.55f, morphAnchorAlpha(4f))
+    }
 }
