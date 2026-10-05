@@ -197,6 +197,19 @@ import org.json.JSONObject
             item.optBoolean("final", false) || item.optBoolean("isFinal", false)
     }
 
+    /**
+     * True only for the interim note Codex sends before it starts working.
+     *
+     * Deliberately narrow: a message with no `phase` at all is an answer from an older app-server,
+     * not a note, so it has to keep rendering as one.
+     */
+    internal fun CodexChatActivity.isCommentaryItem(item: JSONObject?): Boolean {
+        if (item == null) return false
+        val phase = protocolString(item, "phase", "itemPhase", "item_phase")
+            .replace("-", "_").replace(" ", "_").lowercase(Locale.ROOT)
+        return phase == "commentary"
+    }
+
     internal fun CodexChatActivity.enqueueProtocolEvent(event: NativeProtocolEvent, immediate: Boolean = false) {
         // Legacy callbacks do not carry a sequence.  Flush any normalized deltas already waiting
         // for the same UI batch before accepting the unsequenced barrier, otherwise a later queue
@@ -499,7 +512,8 @@ import org.json.JSONObject
             "assistantStarted", "assistantCompleted" -> enqueueProtocolEvent(
                 if (kind == "assistantCompleted") NativeProtocolEvent.AssistantCompleted(
                     threadId, turnId, itemId, text = protocolString(item, "text", "content"),
-                    finalAnswer = isFinalAssistantItem(item), sequence = sequence, timestampMs = timestamp,
+                    finalAnswer = isFinalAssistantItem(item), commentary = isCommentaryItem(item),
+                    sequence = sequence, timestampMs = timestamp,
                 ) else NativeProtocolEvent.AssistantDelta(threadId, turnId, itemId, delta = "", sequence = sequence, timestampMs = timestamp),
                 immediate = true,
             )

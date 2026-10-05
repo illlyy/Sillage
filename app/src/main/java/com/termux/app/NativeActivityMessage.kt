@@ -49,6 +49,13 @@ internal fun RikkaActivityMessage(message: NativeChatMessage, state: NativeChatS
         ) { planText, streaming ->
             if (streaming) {
                 StreamingResponseText(message.id, planText, true, message.revealStartedAt, false, projectPath = state.projectPath)
+            } else if (NativeUiRenderSafety.requiresRichMarkdown(planText)) {
+                // A plan is free-form model prose: it arrives with headings, bullet lists and fenced
+                // commands, and rendering it through the reasoning path kept every one of those
+                // markers on screen as literal punctuation. Anything without markdown syntax -- a
+                // one-line step label, a plain sentence of explanation -- still takes the cheap
+                // path, so a long plan does not build a rich view per step.
+                RichMarkdownText(planText, projectPath = state.projectPath)
             } else {
                 DeferredHistoricalRichText(planText)
             }

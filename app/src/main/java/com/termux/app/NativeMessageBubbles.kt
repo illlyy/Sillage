@@ -326,6 +326,7 @@ internal fun RikkaMessageItem(
                     onLoadSubagentHistory,
                     onQuote,
                     onReasoningAutoCollapse,
+                    commentary = message.commentary,
                 )
             }
             NativeChatRole.ACTIVITY -> RikkaActivityMessage(message, chatState, onLoadSubagentHistory)
@@ -673,6 +674,7 @@ internal fun RikkaAssistantMessage(
     onLoadSubagentHistory: (String) -> Unit,
     onQuote: (String) -> Unit,
     onReasoningAutoCollapse: () -> Unit = {},
+    commentary: Boolean = false,
 ) {
     val language = LocalNativeLanguage.current
     val context = LocalContext.current
@@ -697,6 +699,27 @@ internal fun RikkaAssistantMessage(
                     if (liveState != null) {
                         ActiveProcessingPanel(liveState, hasVisibleContent, onLoadSubagentHistory, onReasoningAutoCollapse)
                         Spacer(Modifier.height(6.dp))
+                    }
+                    if (commentary) {
+                        // An interim note, not the conclusion. A leading rule plus a muted label
+                        // marks it as narration so it cannot be mistaken for the answer the model
+                        // actually settled on, which is what the note used to look exactly like.
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(width = 3.dp, height = 13.dp)
+                                    .background(MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(2.dp)),
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                nativeText(language, "过程说明", "Working note"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                     StreamingResponseText(
                         messageId = messageId,

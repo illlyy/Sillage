@@ -51,6 +51,8 @@ internal sealed interface NativeProtocolEvent {
         val finalAnswer: Boolean = false,
         override val sequence: Long = 0L,
         override val timestampMs: Long = System.currentTimeMillis(),
+        /** phase == commentary: an interim note, not the answer. */
+        val commentary: Boolean = false,
     ) : NativeProtocolEvent
 
     data class CommandStarted(

@@ -95,4 +95,8 @@ data class NativeChatMessage(
     // True when this durable ACTIVITY row was just sealed from a live turn (turn completion). The
     // historical card enters expanded and auto-collapses with animation instead of popping in.
     val enterExpanded: Boolean = false,
+    // Codex marks an interim "here is what I am about to do" note with phase=commentary, then
+    // sends the real conclusion as final_answer. Both used to render in the identical answer
+    // style, so the note could not be told apart from what the model actually concluded.
+    val commentary: Boolean = false,
 )

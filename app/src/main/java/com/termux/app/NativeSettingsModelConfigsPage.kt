@@ -356,6 +356,18 @@ private fun ClaudePresetChip(label: String, onClick: () -> Unit) {
     }
 }
 
+/** Same chip, used by the Codex editor's "start from a template" row. */
+@Composable
+private fun CodexPresetChip(label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+    ) {
+        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
 @Composable
 private fun ClaudeModelChip(label: String, selected: String, onSelect: (String) -> Unit) {
     val active = label == selected
@@ -1078,6 +1090,35 @@ internal fun ModelConfigurationEditor(
         tr(lang, "服务商、模型目录与 Codex 运行能力", "Provider, model catalog and Codex capabilities"), onBack,
     ) { pad ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
+            if (existing == null) {
+                // Starting points mirror the Claude editor: the credential is then the only thing the
+                // user has to know, because the endpoint, the wire format and the model id are the
+                // parts that are easy to get subtly wrong and produce an opaque failure.
+                item {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        SettingsSection(tr(lang, "模板", "Template"))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CodexPresetChip(tr(lang, "OpenAI 官方", "OpenAI official")) {
+                                // Must match ModelConfig.knownTemplate(), which is what fills in the
+                                // rest of this model's capabilities when the profile is saved.
+                                val officialModel = "gpt-5.6-sol"
+                                name = "OpenAI"
+                                baseUrl = "https://api.openai.com/v1"
+                                apiFormat = "openai_responses"
+                                if (models.none { it.id == officialModel }) {
+                                    models.add(CodexProviderStore.ModelConfig("GPT-5.6-Sol", officialModel, 372_000L))
+                                }
+                                defaultModelId = officialModel
+                            }
+                            CodexPresetChip(tr(lang, "通用中转", "Generic relay")) {
+                                name = "Relay"
+                                baseUrl = "https://api.example.com/v1"
+                                apiFormat = "auto"
+                            }
+                        }
+                    }
+                }
+            }
             item { SettingsSection(tr(lang, "基本信息", "Details")) }
             item { SettingsTextField(name, { name = it; error = null }, tr(lang, "配置名称", "Configuration name"), tr(lang, "例如：工作 API", "e.g. Work API")) }
             item { SettingsTextField(providerId, { providerId = it; error = null }, "ID", "provider-id", enabled = existing == null) }

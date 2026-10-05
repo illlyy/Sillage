@@ -186,6 +186,7 @@ internal object NativeProtocolEventDecoder {
             "assistantCompleted" -> NativeProtocolEvent.AssistantCompleted(
                 common.threadId, common.turnId, common.itemId,
                 text = contentText(item, "text", "content"), finalAnswer = isFinalAssistantItem(item),
+                commentary = isCommentaryItem(item),
                 sequence = common.sequence, timestampMs = common.timestampMs,
             )
             "planStarted" -> NativeProtocolEvent.PlanStarted(
@@ -329,6 +330,18 @@ internal object NativeProtocolEventDecoder {
         "automatic", "auto", "server", "fallback" -> NativeCompactionSource.AUTOMATIC
         "legacy" -> NativeCompactionSource.LEGACY
         else -> null
+    }
+
+    /**
+     * True only for the interim note Codex sends before it starts working.
+     *
+     * Deliberately narrow: a message with no `phase` at all is an answer from an older
+     * app-server, not a note, so it must keep rendering as one.
+     */
+    private fun isCommentaryItem(item: JSONObject): Boolean {
+        val phase = text(item, "phase", "itemPhase", "item_phase")
+            .replace("-", "_").replace(" ", "_").lowercase()
+        return phase == "commentary"
     }
 
     private fun isFinalAssistantItem(item: JSONObject): Boolean {

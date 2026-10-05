@@ -684,7 +684,7 @@ internal class NativeChatState {
                 is NativeProtocolEvent.AssistantCompleted -> {
                     finishReasoning()
                     if (event.finalAnswer) appendAssistantFinal(event.text, event.itemId)
-                    else completeAssistantItem(event.text, event.itemId)
+                    else completeAssistantItem(event.text, event.itemId, commentary = event.commentary)
                 }
                 is NativeProtocolEvent.TurnCompleted -> {
                     if (event.failed) {
@@ -1559,7 +1559,7 @@ internal class NativeChatState {
         }
     }
 
-    private fun sealLiveAssistant(index: Int, authoritativeText: String = ""): String {
+    private fun sealLiveAssistant(index: Int, authoritativeText: String = "", commentary: Boolean = false): String {
         val buffered = liveAssistantMarkdown.materialize()
         val cleanedAuthoritative = cleanProtocolMarkup(authoritativeText)
         val full = when {
@@ -1580,6 +1580,10 @@ internal class NativeChatState {
                 streaming = false,
                 finalOnlyReveal = completionNeedsReveal,
                 usage = pendingTurnUsage,
+                // The note usually arrives as a completed item, but when it streamed first the flag
+                // has to survive the seal or the marker is lost on exactly the long turns that
+                // produced one.
+                commentary = commentary || existing.commentary,
             )
         }
         clearLiveAssistantBuffer()
@@ -1684,7 +1688,7 @@ internal class NativeChatState {
         parsedAssistantText = fullAssistant
     }
 
-    fun completeAssistantItem(text: String, itemId: String? = null) {
+    fun completeAssistantItem(text: String, itemId: String? = null, commentary: Boolean = false) {
         val normalizedItemId = itemId.orEmpty().takeIf { it.isNotBlank() }
         val parsed = planStreamParser.complete(text, normalizedItemId)
         if (parsed.hasPlan) {
@@ -1701,7 +1705,7 @@ internal class NativeChatState {
         val existingIndex = (messages.lastIndex downTo turnMessageStartIndex.coerceAtLeast(0))
             .firstOrNull { messages[it].role == NativeChatRole.ASSISTANT && messages[it].streaming }
         if (existingIndex != null) {
-            sealLiveAssistant(existingIndex, cleanedText)
+            sealLiveAssistant(existingIndex, cleanedText, commentary)
         } else if (cleanedText.isNotBlank()) {
             addTurnMessageBeforeTerminalErrors(
                 NativeChatMessage(
@@ -1711,6 +1715,7 @@ internal class NativeChatState {
                     revealStartedAt = System.currentTimeMillis(),
                     finalOnlyReveal = true,
                     usage = pendingTurnUsage,
+                    commentary = commentary,
                 ),
             )
         }
