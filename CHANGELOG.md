@@ -3,7 +3,7 @@
 本文件记录面向用户的重要变化。每次发布时，同时更新仓库根目录的
 `RELEASE_NOTES.md`；GitHub Actions 会将该文件写入 GitHub Release 和 `update.json`。
 
-## [未发布]
+## [0.3.6] - 2026-10-05
 
 ### 新增
 
