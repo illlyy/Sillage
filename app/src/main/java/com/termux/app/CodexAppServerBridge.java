@@ -1937,6 +1937,19 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                 boolean failed = CodexAppServerBridgeProtocol.turnFailed(params);
                 recordOrFinalizeTaskCompletion(
                     completedThread, completedTurnId, failed, hasPendingContinuation);
+            } else if (!compactionTurnTracker.isAuxiliaryTurn(completedThread, completedTurnId)) {
+                // A turn that finishes while its conversation is not the visible route still has to
+                // release its persisted running state. Everything above is gated on owning the
+                // visible route (isExactActivePrimaryTurn requires sourceThread == visibleThreadId),
+                // and the send is the only writer of RUNNING -- so without this the drawer row for a
+                // conversation the user stepped away from spins forever, with no code path left
+                // that could ever clear it. Verified on device: `sleep 75` left one behind.
+                //
+                // Narrow by construction: this only ever releases a record that is already RUNNING,
+                // so subagent threads (which are never registered) and auxiliary compaction turns
+                // cannot mint phantom drawer entries.
+                CodexTaskStore.markCompletedIfRunning(
+                    appContext, completedThread, CodexAppServerBridgeProtocol.turnFailed(params));
             }
         } else if (primaryEvent && "error".equals(method) && params != null) {
             // Error notifications with willRetry=true are part of one turn. Keep their protocol

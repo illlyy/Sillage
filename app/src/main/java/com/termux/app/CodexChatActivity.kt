@@ -1004,6 +1004,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                     .put("translated", translated))
                 currentThreadId?.let { threadId ->
                     NativeTaskNotificationManager.notifyEvent(this, threadId, NativeTaskNotificationPolicy.FAILED, translated.hashCode().toString(), "")
+                    // An errored turn is over as far as the backend is concerned; without this the
+                    // drawer would keep showing it as running.
+                    runCatching { CodexTaskStore.markCompletedIfRunning(this, threadId, true) }
                 }
                 chatState.addError(translated)
                 stopFrameDiagnostics()
@@ -1058,6 +1061,21 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 .put("completedThread", completionThreadId.take(8))
                 .put("completedTurn", completionTurnId.take(12))
                 .put("activeTurn", activeTurnId.take(12)))
+            // The backend just reported that this thread's turn is over, even though the screen is
+            // no longer showing it. Releasing the live entry here is what stops the drawer row for
+            // an abandoned conversation from spinning after its turn quietly finished elsewhere.
+            if (completionThreadId.isNotBlank()) {
+                // Computed here rather than reusing `wasFailed` below: that value is read after the
+                // drain, and hoisting it would let a drained event change the phase underneath it.
+                val staleFailed = chatState.phase == NativeTurnPhase.FAILED ||
+                    nativeTurnLifecycleFailed(
+                        completion?.optJSONObject("turn"),
+                        completion?.optJSONObject("details"),
+                        completion,
+                    )
+                NativeSessionActivityStore.markIdle(completionThreadId)
+                runCatching { CodexTaskStore.markCompletedIfRunning(this, completionThreadId, staleFailed) }
+            }
             return
         }
         // Only the completion that owns the visible thread/turn may publish the global
@@ -1097,6 +1115,13 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         pendingPlanItemId = ""
         if (chatState.planJson != "[]") chatState.finishPlanPanel(runCatching { JSONArray(chatState.planJson).length() }.getOrDefault(0))
         if (!hasPendingContinuation) stopFrameDiagnostics()
+        if (!hasPendingContinuation) {
+            // Both halves of the drawer's running indicator have to be released together. The
+            // Codex bridge releases the persisted registry itself, but a turn that ends anywhere
+            // else -- an interrupted backend switch, a stopped turn, any Claude turn -- left the
+            // row spinning with nothing left to clear it.
+            runCatching { CodexTaskStore.markCompletedIfRunning(this, routeThreadId, wasFailed) }
+        }
         refreshConversations()
         if (!hasPendingContinuation) applyPendingProviderConfiguration()
         if (!hasPendingContinuation) applyPendingClaudeModelSwitch()

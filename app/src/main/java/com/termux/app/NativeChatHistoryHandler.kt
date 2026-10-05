@@ -49,6 +49,7 @@ import org.json.JSONObject
         }
         val backend = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE))
         chatState.backend = backend
+        syncSessionActivitySnapshot()
         val generation = ++conversationRefreshGeneration
         android.util.Log.d("IlyopCodexTasks", "refresh generation=$generation backend=$backend")
         if (backend != lastConversationBackend) {
@@ -58,6 +59,39 @@ import org.json.JSONObject
             chatState.conversations.clear()
         }
         NativeConversationSourceRegistry.sourceFor(backend).refresh(this, backend, generation)
+    }
+
+    /**
+     * Reconciles the drawer's live activity map against what is actually still running.
+     *
+     * [NativeSessionActivityStore] has exactly one writer, and that writer only ever names the
+     * conversation this screen is attached to. An entry written for a thread the screen later left
+     * is therefore never revisited: its turn finishes somewhere the visible route no longer
+     * observes, and the drawer row keeps spinning with nothing left to clear it. The map already
+     * ships a [NativeSessionActivityStore.sync] for exactly this -- it was just never called.
+     *
+     * The authoritative snapshot is the persisted task registry (which the Codex bridge maintains
+     * for background turns) plus this screen's own conversation while its phase is live. Anything
+     * else is a leftover and ages out instead of spinning forever, while a genuine background turn
+     * keeps its row.
+     */
+    internal fun CodexChatActivity.syncSessionActivitySnapshot() {
+        val snapshot = LinkedHashMap<String, NativeSessionActivity>()
+        runCatching { CodexTaskStore.current(this) }
+            .getOrDefault(emptyList())
+            .filter { it.state == CodexTaskStore.RUNNING && it.threadId.isNotBlank() }
+            .forEach { snapshot[it.threadId] = NativeSessionActivity(startedAt = it.updatedAt) }
+        val visible = currentThreadId?.takeIf { it.isNotBlank() }
+        if (visible != null && chatState.phase.active) {
+            snapshot[visible] = NativeSessionActivity(
+                statusText = chatState.processingLabel,
+                canInterrupt = chatState.phase != NativeTurnPhase.STOPPING && chatState.busy,
+                // Keep the original stamp so repeated refreshes cannot push a long turn past the
+                // grace window and blink its spinner off mid-run.
+                startedAt = NativeSessionActivityStore.activityFor(visible)?.startedAt ?: 0L,
+            )
+        }
+        NativeSessionActivityStore.sync(snapshot)
     }
 
     internal fun CodexChatActivity.applyConversationSnapshot(backend: NativeBackendType, generation: Int, conversations: List<NativeConversation>) {        runOnUiThread {

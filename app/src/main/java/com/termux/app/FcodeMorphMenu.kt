@@ -264,9 +264,7 @@ private fun MorphMenuPanel(
     ) {
         Column(Modifier.fillMaxSize().padding(vertical = PANEL_VERTICAL_PADDING)) {
             items.forEachIndexed { index, item ->
-                val start = ITEM_STAGGER_START + index * ITEM_STAGGER_STEP
-                val progress = ((reveal - start) / ITEM_STAGGER_SPAN).coerceIn(0f, 1f)
-                val eased = smoothstep01(progress)
+                val eased = morphMenuItemReveal(index, items.size, reveal)
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -332,6 +330,29 @@ private fun smoothstep01(t: Float): Float {
     return v * v * (3f - 2f * v)
 }
 
+/**
+ * Reveal progress for one menu row, as a pure function so the arithmetic is unit-testable.
+ *
+ * The step is derived from the item count rather than being a constant. With fixed constants the
+ * stagger window overflowed as soon as the menu grew: with four items the last row settled at
+ * alpha 0.66 and 6dp below its resting place, because the animation ended before its own window
+ * did, and a fifth item would have started at 0.94 and finished at alpha 0.07 -- a row that is
+ * effectively invisible for as long as the menu is open. Deriving the step keeps the whole
+ * stagger inside the animated range for any count, and reserves a margin so the last row also
+ * *finishes* rather than arriving on the final frame.
+ */
+internal fun morphMenuItemReveal(index: Int, count: Int, reveal: Float): Float {
+    if (count <= 0) return 1f
+    val start = MORPH_ITEM_STAGGER_START
+    val step = if (count <= 1) {
+        0f
+    } else {
+        (1f - MORPH_ITEM_STAGGER_SPAN - MORPH_ITEM_STAGGER_END_MARGIN - start) / (count - 1).toFloat()
+    }
+    val progress = ((reveal - (start + index * step)) / MORPH_ITEM_STAGGER_SPAN).coerceIn(0f, 1f)
+    return smoothstep01(progress)
+}
+
 private val MORPH_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
 private val ANCHOR_SIZE = 48.dp
@@ -340,6 +361,12 @@ private val ANCHOR_TOP_GAP = 8.dp
 private val PANEL_WIDTH = 248.dp
 private val ITEM_HEIGHT = 48.dp
 private val PANEL_VERTICAL_PADDING = 6.dp
-private val ITEM_STAGGER_START = 0.30f
-private val ITEM_STAGGER_STEP = 0.16f
-private val ITEM_STAGGER_SPAN = 0.36f
+
+/** Fraction of the reveal consumed before the first row starts; the rest is shared by the stagger. */
+private const val MORPH_ITEM_STAGGER_START = 0.14f
+
+/** Reveal window of a single row. */
+private const val MORPH_ITEM_STAGGER_SPAN = 0.28f
+
+/** Reveal kept in reserve after the last row, so it settles instead of arriving on the last frame. */
+private const val MORPH_ITEM_STAGGER_END_MARGIN = 0.06f

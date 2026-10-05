@@ -301,6 +301,11 @@ internal data class PendingNativeSteer(
         // is told to drop it and the WAITING latch is released, so the UI never sits on a question
         // whose turn has already gone away.
         cancelPendingApproval()
+        // A stopped turn never produces the completion that would otherwise release the drawer's
+        // running indicator, so release it here. Persisted state (COMPLETED, not FAILED): the user
+        // ended this turn deliberately, and the drawer colours FAILED as an error.
+        currentThreadId?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { CodexTaskStore.markCompletedIfRunning(this, it, false) } }
         bridge?.interruptCurrentTurn()
     }
 

@@ -96,6 +96,24 @@ final class CodexTaskStore {
         update(context, threadId, title, failed ? FAILED : COMPLETED);
     }
 
+    /**
+     * Releases a running record, and only a running record.
+     *
+     * Used on turn-completion paths that cannot claim to own the visible route (a turn that
+     * finishes while the user is reading another conversation). Those paths must not mint a record
+     * for a thread that never had one -- the drawer would then grow phantom conversations with a
+     * generated title -- and they must not resurrect a record that has already been retired.
+     */
+    static synchronized void markCompletedIfRunning(Context context, String threadId, boolean failed) {
+        if (threadId == null || threadId.isEmpty()) return;
+        List<Task> tasks = read(context);
+        Task previous = find(tasks, threadId);
+        if (previous == null || !RUNNING.equals(previous.state)) return;
+        FcodeLog.d("CodexTaskStore", "markCompletedIfRunning thread=" + shortId(threadId)
+            + " failed=" + failed);
+        update(context, threadId, previous.title, failed ? FAILED : COMPLETED);
+    }
+
     /** A missing process-scoped runtime means persisted running entries are orphaned. */
     static synchronized void markInterruptedTasks(Context context) {
         List<Task> tasks = read(context);
