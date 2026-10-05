@@ -169,6 +169,7 @@ internal class NativeActivityReducer(
             is NativeProtocolEvent.CommandStarted -> startCommand(event)
             is NativeProtocolEvent.CommandOutput -> appendCommandOutput(event)
             is NativeProtocolEvent.CommandCompleted -> completeCommand(event)
+            is NativeProtocolEvent.ToolStarted -> startTool(event)
             is NativeProtocolEvent.ToolCompleted -> completeTool(event)
             is NativeProtocolEvent.SubagentUpdated -> updateSubagent(event)
             is NativeProtocolEvent.AssistantDelta -> {
@@ -494,15 +495,64 @@ internal class NativeActivityReducer(
     private fun isMcpToolName(title: String): Boolean =
         title.isNotBlank() && title.lowercase().contains("mcp__")
 
-    private fun completeTool(event: NativeProtocolEvent.ToolCompleted) {
-        val type = when {
-            event.type.lowercase() in setOf("filechange", "file_change", "patch", "apply_patch") -> NativeActivityItemType.FILE_CHANGE
-            event.type.lowercase() in setOf("websearch", "web_search", "search") -> NativeActivityItemType.WEB_SEARCH
-            event.type.lowercase() in setOf("subagent", "subagentactivity", "collabagenttoolcall") -> NativeActivityItemType.SUBAGENT
-            event.type.lowercase() in setOf("image", "imageview", "view_image") -> NativeActivityItemType.IMAGE
-            isMcpToolName(event.title) -> NativeActivityItemType.MCP
+    /**
+     * Maps a protocol item type onto the row it renders as.
+     *
+     * The same concept is spelled differently across versions and backends -- `WebSearch`,
+     * `web_search`, `web_search_call`; `FileChange` versus `file_change` -- and the live path used
+     * to compare the raw string against a lowercased set, so any spelling carrying an underscore
+     * fell through to the generic tool row and rendered as raw JSON. Normalising first (which the
+     * history replayer already did) makes the two paths agree, and covers the item types Codex
+     * 0.160.0 introduced.
+     */
+    private fun activityTypeFor(type: String, title: String): NativeActivityItemType {
+        val normalized = type.replace("_", "").replace("-", "").lowercase()
+        return when {
+            normalized in setOf("filechange", "patch", "applypatch") -> NativeActivityItemType.FILE_CHANGE
+            normalized in setOf("websearch", "websearchcall", "toolsearchcall", "search") -> NativeActivityItemType.WEB_SEARCH
+            normalized in setOf("subagent", "subagentactivity", "subagenttoolcall", "collabagenttoolcall") -> NativeActivityItemType.SUBAGENT
+            normalized in setOf("image", "imageview", "viewimage", "imagegeneration", "imagegenerationcall") -> NativeActivityItemType.IMAGE
+            normalized == "mcptoolcall" || isMcpToolName(title) -> NativeActivityItemType.MCP
             else -> NativeActivityItemType.TOOL
         }
+    }
+
+    /**
+     * Opens the RUNNING row for a tool the moment it starts.
+     *
+     * Only a tool that reports an item id gets a row here: an anonymous start would have to invent
+     * an id the completion cannot match, which would render one call as two rows. Those tools keep
+     * the previous behaviour of appearing when they finish.
+     */
+    private fun startTool(event: NativeProtocolEvent.ToolStarted) {
+        val id = event.itemId?.takeIf { it.isNotBlank() } ?: return
+        val group = groupForItem(event, id)
+        val type = activityTypeFor(event.type, event.title)
+        val label = event.title.ifBlank { event.type }
+        val existing = group.items[id]
+        when {
+            existing == null -> group.items[id] = NativeActivityItem(
+                id = id,
+                type = type,
+                title = label,
+                status = NativeActivityItemStatus.RUNNING,
+                sequence = event.sequence,
+                startedAtMs = event.timestampMs,
+                turnId = event.turnId,
+                itemId = event.itemId,
+            )
+            // A completion already sealed this row; a late or repeated start must not reopen it.
+            existing.status == NativeActivityItemStatus.RUNNING ->
+                if (existing.title != label || existing.type != type) {
+                    group.items[id] = existing.copy(title = label, type = type)
+                }
+            else -> return
+        }
+        revision++
+    }
+
+    private fun completeTool(event: NativeProtocolEvent.ToolCompleted) {
+        val type = activityTypeFor(event.type, event.title)
         val id = event.itemId?.takeIf { it.isNotBlank() } ?: run {
             // Legacy tool completions carry sequence=0 and no itemId; keying only on
             // "tool:<sequence>:<type>" overwrote same-type tools within a turn. Disambiguate

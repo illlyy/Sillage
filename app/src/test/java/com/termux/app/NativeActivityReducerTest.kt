@@ -248,4 +248,57 @@ class NativeActivityReducerTest {
         val item = reducer.groups().single().items.single { it.type == NativeActivityItemType.SUBAGENT }
         assertEquals(NativeActivityItemStatus.FAILED, item.status)
     }
+
+    @Test
+    fun toolStartOpensARunningRowBeforeCompletion() {
+        // A tool other than a command used to stay invisible until it finished, so a call that never
+        // returned left the screen empty and read as though nothing had been attempted at all.
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.ToolStarted("t", "turn", "s1", type = "WebSearch", title = "android 17", sequence = 1))
+
+        val item = reducer.groups().single().items.single()
+        assertEquals(NativeActivityItemType.WEB_SEARCH, item.type)
+        assertEquals(NativeActivityItemStatus.RUNNING, item.status)
+        assertEquals("android 17", item.title)
+    }
+
+    @Test
+    fun toolCompletionUpdatesTheRowThatStartedInsteadOfAddingOne() {
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.ToolStarted("t", "turn", "s1", type = "WebSearch", title = "android 17", sequence = 1))
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", "s1", type = "WebSearch", title = "android 17", sequence = 2))
+
+        val items = reducer.groups().single().items
+        assertEquals(1, items.size)
+        assertEquals(NativeActivityItemStatus.COMPLETED, items.single().status)
+    }
+
+    @Test
+    fun aLateStartDoesNotReopenACompletedRow() {
+        // Start and completion travel through the batcher and may arrive out of order.
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", "s1", type = "WebSearch", title = "q", sequence = 1))
+        reducer.accept(NativeProtocolEvent.ToolStarted("t", "turn", "s1", type = "WebSearch", title = "q", sequence = 2))
+
+        val items = reducer.groups().single().items
+        assertEquals(1, items.size)
+        assertEquals(NativeActivityItemStatus.COMPLETED, items.single().status)
+    }
+
+    @Test
+    fun underscoredAndPascalCaseTypesMapToTheSameRow() {
+        // The live path compared the raw string against a lowercased set, so a snake_case spelling
+        // fell through to the generic tool row and rendered as raw JSON.
+        val reducer = NativeActivityReducer()
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", "a", type = "web_search_call", title = "q", sequence = 1))
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", "b", type = "WebSearch", title = "q", sequence = 2))
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", "c", type = "file_change", title = "f", sequence = 3))
+        reducer.accept(NativeProtocolEvent.ToolCompleted("t", "turn", "d", type = "mcpToolCall", title = "mcp__fs__read", sequence = 4))
+
+        val byId = reducer.groups().single().items.associateBy { it.itemId }
+        assertEquals(NativeActivityItemType.WEB_SEARCH, byId["a"]?.type)
+        assertEquals(NativeActivityItemType.WEB_SEARCH, byId["b"]?.type)
+        assertEquals(NativeActivityItemType.FILE_CHANGE, byId["c"]?.type)
+        assertEquals(NativeActivityItemType.MCP, byId["d"]?.type)
+    }
 }

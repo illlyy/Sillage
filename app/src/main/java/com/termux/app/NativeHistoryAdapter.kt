@@ -145,9 +145,12 @@ internal object NativeHistoryAdapter {
             val type = when (normalizeType(item.optString("type", item.optString("item_type")))) {
                 "commandexecution" -> NativeActivityItemType.COMMAND
                 "filechange" -> NativeActivityItemType.FILE_CHANGE
-                "websearch" -> NativeActivityItemType.WEB_SEARCH
-                "image", "imageview", "view_image" -> NativeActivityItemType.IMAGE
+                "websearch", "websearchcall", "toolsearchcall" -> NativeActivityItemType.WEB_SEARCH
+                // Types are normalised before the match, so an alias must be written without its
+                // underscores -- the old "view_image" entry could never be reached.
+                "image", "imageview", "viewimage", "imagegeneration" -> NativeActivityItemType.IMAGE
                 "collabagenttoolcall", "subagentactivity", "subagent", "subagenttoolcall" -> NativeActivityItemType.SUBAGENT
+                "mcptoolcall" -> NativeActivityItemType.MCP
                 else -> NativeActivityItemType.TOOL
             }
             val rawStatus = if (type == NativeActivityItemType.COMMAND) {

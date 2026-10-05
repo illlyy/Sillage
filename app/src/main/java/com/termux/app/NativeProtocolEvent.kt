@@ -87,6 +87,26 @@ internal sealed interface NativeProtocolEvent {
         override val timestampMs: Long = System.currentTimeMillis(),
     ) : NativeProtocolEvent
 
+    /**
+     * A non-command tool has started running.
+     *
+     * Commands already carried a start signal; every other tool stayed invisible until it
+     * completed. A web search that never returned therefore produced nothing at all, and the
+     * screen read as though the request had been dropped. Carrying the start lets the row appear
+     * immediately in RUNNING state, exactly like a command, and the completion that follows still
+     * owns the final status.
+     */
+    data class ToolStarted(
+        override val threadId: String,
+        override val turnId: String? = null,
+        override val itemId: String? = null,
+        val type: String,
+        val title: String = "",
+        val payload: String = "",
+        override val sequence: Long = 0L,
+        override val timestampMs: Long = System.currentTimeMillis(),
+    ) : NativeProtocolEvent
+
     data class ToolCompleted(
         override val threadId: String,
         override val turnId: String? = null,

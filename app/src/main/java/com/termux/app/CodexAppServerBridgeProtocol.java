@@ -337,8 +337,11 @@ final class CodexAppServerBridgeProtocol {
         if (item == null) return false;
         String type = normalizeItemType(item.optString("type", item.optString("item_type", "")));
         return "filechange".equals(type) || "mcptoolcall".equals(type) || "websearch".equals(type)
+            || "websearchcall".equals(type) || "toolsearchcall".equals(type)
             || "collabagenttoolcall".equals(type) || "subagentactivity".equals(type)
-            || "imageview".equals(type) || "viewimage".equals(type);
+            || "subagenttoolcall".equals(type)
+            || "imageview".equals(type) || "viewimage".equals(type)
+            || "imagegeneration".equals(type) || "imagegenerationcall".equals(type);
     }
 
     static boolean isPlanItem(JSONObject params) {

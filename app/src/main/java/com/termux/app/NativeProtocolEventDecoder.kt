@@ -195,6 +195,13 @@ internal object NativeProtocolEventDecoder {
                 common.threadId, common.turnId, common.itemId,
                 contentText(item, "text", "content"), sequence = common.sequence, timestampMs = common.timestampMs,
             )
+            "toolStarted" -> NativeProtocolEvent.ToolStarted(
+                common.threadId, common.turnId, common.itemId,
+                type = text(payload, "itemType", "item_type").ifBlank { text(item, "type") },
+                title = text(item, "tool", "name", "query", "agentName"),
+                payload = item.toString(),
+                sequence = common.sequence, timestampMs = common.timestampMs,
+            )
             "toolCompleted" -> NativeProtocolEvent.ToolCompleted(
                 common.threadId, common.turnId, common.itemId,
                 type = text(payload, "itemType", "item_type").ifBlank { text(item, "type") },

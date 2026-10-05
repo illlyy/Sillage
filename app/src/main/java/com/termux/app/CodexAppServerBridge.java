@@ -2023,6 +2023,15 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                     safeItem.put("status", "done");
                 }
             }
+            // Metadata only -- never the payload, which carries the user's own text. Recording what
+            // the app-server actually announced is what makes "a tool ran but the screen showed
+            // nothing" answerable after the fact instead of guessable.
+            NativeChatDiagnostics.record(appContext, "protocol_item", new JSONObject()
+                .put("method", method)
+                .put("kind", kind)
+                .put("itemType", itemType)
+                .put("itemId", CodexAppServerBridgeProtocol.shortId(CodexAppServerBridgeProtocol.protocolItemId(params))));
+
             JSONObject payload = new JSONObject()
                 .put("kind", kind)
                 .put("method", method)
