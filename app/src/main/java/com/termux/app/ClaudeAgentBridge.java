@@ -61,8 +61,31 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     // probe (HEAD /api/hello) is the readiness signal; a direct connection falls back to a boot
     // grace timer. A very long notice-only guard nudges a CLI that hangs before reaching the probe.
     private static final long READY_FALLBACK_MS = 4_000L;
+    /**
+     * Boot grace for a proxy-routed CLI that never sends the health probe.
+     *
+     * <p>The probe is an undocumented CLI handshake, and the npm distribution — the only one that
+     * runs on devices whose seccomp filter blocks the Bun binary, i.e. every Android 13+ device —
+     * is pinned to an older release whose handshake may differ or be absent. Readiness gates the
+     * composer, and a disabled composer also blocks the first user message, which is the third
+     * readiness source (the CLI echoes its session id only after that message). A missing probe
+     * therefore deadlocks the backend permanently: the user sees "正在连接 Claude…" and an input
+     * that cannot be used at all, with nothing in the log. A live process becomes ready on its own
+     * after this grace; a genuinely broken CLI still surfaces its own error once a message goes out.
+     */
+    private static final long PROXY_READY_FALLBACK_MS = 8_000L;
     private static final long INIT_NOTICE_MS = 120_000L;
     private static final long MAX_IMAGE_BYTES = 8L * 1024 * 1024;
+
+    /**
+     * Boot grace before a live CLI is assumed ready without having seen the probe. Armed for both
+     * wirings, so readiness is never gated on the probe alone; the proxy path waits longer so the
+     * probe — the precise signal — normally wins the race. Unit-tested because the failure it
+     * prevents is silent: no fallback on the proxy path left the composer disabled forever.
+     */
+    static long readyFallbackDelayMs(boolean routedThroughProxy) {
+        return routedThroughProxy ? PROXY_READY_FALLBACK_MS : READY_FALLBACK_MS;
+    }
 
     private final Context appContext;
     private final SharedPreferences prefs;
@@ -163,7 +186,7 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     private final ConcurrentHashMap<String, String> pendingApprovalToolUseIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> pendingUserInputToolUseIds = new ConcurrentHashMap<>();
 
-    private final Runnable readinessFallbackRunnable = this::markReady;
+    private final Runnable readinessFallbackRunnable = this::markReadyByFallback;
     private final Runnable initNoticeRunnable = () -> {
         if (!ready && running) {
             Log.w(TAG, "Claude CLI still initializing after " + INIT_NOTICE_MS + "ms");
@@ -312,6 +335,25 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
     }
 
     private String goalThreadId() { return goalThreadId(sessionId, provisionalSessionId); }
+
+    /**
+     * The boot-grace path to readiness: assumes a live CLI is usable even though its health probe
+     * never arrived. A fallback that actually fires is the one signal separating "this CLI has no
+     * probe" from "everything is fine", so it is persisted — on someone else's device it is the
+     * only evidence that the handshake changed, and it makes a follow-up log conclusive.
+     */
+    private void markReadyByFallback() {
+        if (!ready) {
+            try {
+                FcodeLog.event(appContext, "claude_ready_by_fallback", new org.json.JSONObject()
+                    .put("routedThroughProxy", proxyBaseUrl != null && !proxyBaseUrl.isEmpty())
+                    .put("entryKind", entryKind(ClaudeInstaller.INSTANCE.nodeEntry(),
+                        claudeBinPath == null ? null : new File(claudeBinPath)))
+                    .put("packageVersion", ClaudeInstaller.INSTANCE.installedVersion()));
+            } catch (Exception ignored) {}
+        }
+        markReady();
+    }
 
     /**
      * Marks the bridge ready exactly once: emits onReady with the current thread id and restores
@@ -608,10 +650,11 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
                 // notice-only guard nudges a CLI that hangs before reaching the probe, without
                 // killing a healthy process that is simply waiting for its first message.
                 mainHandler.postDelayed(initNoticeRunnable, INIT_NOTICE_MS);
-            } else {
-                // Direct connection: the probe isn't observable, so assume ready after the boot grace.
-                mainHandler.postDelayed(readinessFallbackRunnable, READY_FALLBACK_MS);
             }
+            // Readiness is never gated on the probe alone, in either wiring: the probe is
+            // undocumented CLI behaviour, and a missing one also blocks the first user message —
+            // which is the third readiness source (the CLI echoes its session id only after it).
+            mainHandler.postDelayed(readinessFallbackRunnable, readyFallbackDelayMs(routedThroughProxy));
         } catch (Exception e) {
             Log.w(TAG, "Failed to spawn claude", e);
             try {

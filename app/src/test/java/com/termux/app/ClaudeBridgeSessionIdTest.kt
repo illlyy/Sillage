@@ -1,6 +1,7 @@
 package com.termux.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -51,5 +52,25 @@ class ClaudeBridgeSessionIdTest {
     fun goalIsEmptyWhenNeitherIdIsKnown() {
         assertEquals("", ClaudeAgentBridge.goalThreadId(null, null))
         assertEquals("", ClaudeAgentBridge.goalThreadId("", ""))
+    }
+
+    /**
+     * Readiness must never depend on the CLI's undocumented health probe alone. When routed
+     * through the loopback proxy the probe used to be the *only* readiness signal, and readiness
+     * gates the composer — so a CLI that never sent the probe left the input permanently disabled
+     * and the backend unusable, with no error logged anywhere (F-CLAUDE-33).
+     */
+    @Test
+    fun readinessAlwaysHasABootGrace() {
+        assertTrue(ClaudeAgentBridge.readyFallbackDelayMs(true) > 0L)
+        assertTrue(ClaudeAgentBridge.readyFallbackDelayMs(false) > 0L)
+    }
+
+    /** The probe is the precise signal, so the proxy path waits longer before assuming ready. */
+    @Test
+    fun proxyPathWaitsLongerForTheProbeThanTheDirectPath() {
+        assertTrue(
+            ClaudeAgentBridge.readyFallbackDelayMs(true) > ClaudeAgentBridge.readyFallbackDelayMs(false)
+        )
     }
 }

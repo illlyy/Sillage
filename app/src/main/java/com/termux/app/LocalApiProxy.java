@@ -190,19 +190,23 @@ final class LocalApiProxy {
                 body = new byte[contentLength];
                 readExactly(input, body);
             }
-            boolean requestResponses = pathWithoutQuery(path).endsWith("/responses") && "POST".equalsIgnoreCase(method);
+            String requestPath = pathWithoutQuery(path);
+            boolean requestResponses = requestPath.endsWith("/responses") && "POST".equalsIgnoreCase(method);
             // Claude CLI runs an API health probe (HEAD {base}/api/hello) before sending real
             // requests. Anthropic-compatible gateways commonly reject the unauthenticated probe
             // with 401, which stalls the CLI's initialization. Answer the probe locally so the
             // CLI proceeds to the real authenticated request, and notify the bridge — the probe
             // is the CLI's initialization-complete signal for fresh stream-json sessions.
-            if (pathWithoutQuery(path).endsWith("/api/hello")
-                    && ("HEAD".equalsIgnoreCase(method) || "GET".equalsIgnoreCase(method))) {
-                onHealthProbe.run();
-                OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
-                writeAscii(clientOut, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                clientOut.flush();
-                return;
+            if (isHealthProbePath(requestPath)) {
+                boolean answerable = "HEAD".equalsIgnoreCase(method) || "GET".equalsIgnoreCase(method);
+                logHealthProbe(method, path, answerable);
+                if (answerable) {
+                    onHealthProbe.run();
+                    OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
+                    writeAscii(clientOut, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    clientOut.flush();
+                    return;
+                }
             }
             String requestId = Long.toHexString(System.nanoTime());
             boolean subagentRequest = requestResponses && preventRecursiveSubagents && isSubagentRequest(headers);
@@ -297,8 +301,8 @@ final class LocalApiProxy {
                 byte[] rejection = readBounded(response, MAX_ERROR_BODY_BYTES);
                 InputStream replay = new ByteArrayInputStream(rejection);
                 response = response == null ? replay : new SequenceInputStream(replay, response);
-                logUpstreamRejection(code, requestId, requestModel, adaptChat, subagentRequest,
-                    spawnToolRemoved, flattenThirdPartyNamespaces, flattenMcpNamespaces,
+                logUpstreamRejection(code, requestId, method, path, requestModel, adaptChat,
+                    subagentRequest, spawnToolRemoved, flattenThirdPartyNamespaces, flattenMcpNamespaces,
                     internalEffort, wireEffort, ultraTransportEffort, toolSummary, body, rejection);
             }
             if (adaptChat && code >= 200 && code < 300) {
@@ -424,22 +428,60 @@ final class LocalApiProxy {
         return buffer.toByteArray();
     }
 
+    private static final String HEALTH_PROBE_SUFFIX = "/api/hello";
+
+    /**
+     * True for the CLI's startup health probe path, tolerating trailing slashes.
+     *
+     * <p>The probe is an undocumented CLI handshake whose spelling varies between releases, and a
+     * miss here is not cosmetic: {@link ClaudeAgentBridge} treats the probe as the readiness
+     * signal for a proxy-routed CLI, so failing to recognize it can leave the composer disabled
+     * for the whole session. Kept static and side-effect free so the matching rule is unit-tested.
+     */
+    static boolean isHealthProbePath(String pathWithoutQuery) {
+        if (pathWithoutQuery == null || pathWithoutQuery.isEmpty()) return false;
+        int end = pathWithoutQuery.length();
+        while (end > 0 && pathWithoutQuery.charAt(end - 1) == '/') end--;
+        return pathWithoutQuery.substring(0, end).endsWith(HEALTH_PROBE_SUFFIX);
+    }
+
+    /**
+     * Records a probe-shaped request, including the ones this proxy forwards because the method is
+     * not one it answers. A rejected or forwarded probe is the only evidence of a CLI whose
+     * handshake changed, and it is invisible on someone else's device without this line.
+     */
+    private void logHealthProbe(String method, String path, boolean answeredLocally) {
+        Context context = diagnosticsContext;
+        if (context == null) return;
+        try {
+            FcodeLog.event(context, "claude_health_probe", new JSONObject()
+                .put("method", method)
+                .put("path", path)
+                .put("answeredLocally", answeredLocally));
+        } catch (Exception ignored) {}
+    }
+
     /**
      * Persists an upstream rejection together with every local rewrite that produced the request.
      * Diagnosing a "tool schema" rejection needs both halves — the upstream complaint and what
      * this proxy actually put on the wire — and only the pair identifies which rewrite is at fault.
      */
-    private void logUpstreamRejection(int code, String requestId, String model, boolean adaptChat,
-                                      boolean subagentRequest, boolean spawnToolRemoved,
-                                      boolean flattenedCollaboration, boolean flattenedMcp,
-                                      String coreEffort, String wireEffort, String ultraTransportEffort,
-                                      String toolSummary, byte[] sentBody, byte[] rejection) {
+    private void logUpstreamRejection(int code, String requestId, String method, String path, String model,
+                                      boolean adaptChat, boolean subagentRequest, boolean spawnToolRemoved,
+                                      boolean flattenedCollaboration, boolean flattenedMcp, String coreEffort,
+                                      String wireEffort, String ultraTransportEffort, String toolSummary,
+                                      byte[] sentBody, byte[] rejection) {
         Context context = diagnosticsContext;
         if (context == null) return;
         try {
             FcodeLog.event(context, "proxy_upstream_error", new JSONObject()
                 .put("status", code)
                 .put("requestId", requestId)
+                // Which endpoint was rejected is the first question about any upstream failure, and
+                // it used to be missing: a 404 on someone else's device was indistinguishable from
+                // a bad model name, a wrong base URL prefix, or an unrecognized startup probe.
+                .put("method", method)
+                .put("path", path)
                 .put("model", model)
                 .put("api", adaptChat ? "chat" : "responses")
                 .put("subagentRequest", subagentRequest)
