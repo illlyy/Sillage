@@ -15,6 +15,35 @@ internal data class NativeDrawerTaskClassification(
     val tasksByProject: Map<String, List<NativeConversation>>,
 )
 
+/** Conversations grouped by their owning persona for the persona-first drawer mode. */
+internal data class NativePersonaConversationGroup(
+    val personaId: String,
+    val conversations: List<NativeConversation>,
+)
+
+/**
+ * Groups every conversation into exactly one persona bucket.
+ *
+ * A stale owner id (for example a custom persona removed on another screen) falls back to the
+ * shipped default instead of disappearing from the drawer.
+ */
+internal fun classifyNativePersonaConversations(
+    conversations: List<NativeConversation>,
+    personaIds: List<String>,
+    fallbackPersonaId: String,
+): List<NativePersonaConversationGroup> {
+    if (personaIds.isEmpty()) return emptyList()
+    val known = personaIds.toSet()
+    val fallback = fallbackPersonaId.takeIf { it in known } ?: personaIds.first()
+    val buckets = linkedMapOf<String, MutableList<NativeConversation>>()
+    personaIds.forEach { buckets[it] = mutableListOf() }
+    conversations.forEach { conversation ->
+        val owner = conversation.personaId.takeIf { it in known } ?: fallback
+        buckets.getValue(owner).add(conversation)
+    }
+    return personaIds.map { id -> NativePersonaConversationGroup(id, buckets.getValue(id).toList()) }
+}
+
 /**
  * Result of inspecting an old task whose project assignment has not been persisted yet.
  *

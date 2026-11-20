@@ -135,6 +135,9 @@ internal fun SettingsRootPage(
     onAppearance: () -> Unit,
     onMcp: () -> Unit,
     onSkills: () -> Unit,
+    onEnvironment: () -> Unit,
+    onPersona: () -> Unit,
+    onDeviceControl: () -> Unit,
     onLanguage: () -> Unit,
     onTypography: () -> Unit,
     onDeveloper: () -> Unit,
@@ -171,6 +174,19 @@ internal fun SettingsRootPage(
     ) { contentPadding ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
             item { ActiveProviderCard(lang, provider, onModels) }
+            item { SettingsSection(tr(lang, "助手", "Assistant")) }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.MagicWand01,
+                    tr(lang, "人物与记忆", "Persona & memory"),
+                    tr(
+                        lang,
+                        "名字、头像、口吻，以及 AI 自己能检索的长期记忆",
+                        "Name, avatar, tone, and long-term memory the assistant can search",
+                    ),
+                    onPersona,
+                )
+            }
             item { SettingsSection(tr(lang, "服务与工具", "Services & tools")) }
             if (!codexCliInstalled) {
                 item {
@@ -202,6 +218,7 @@ internal fun SettingsRootPage(
                 )
             }
             item { SettingsSection(tr(lang, "扩展与连接", "Extensions & connections")) }
+            item { NavigationSettingsRow(HugeIcons.MagicWand01, tr(lang, "\u8bbe\u5907\u63a7\u5236", "Device control"), tr(lang, "\u901a\u8fc7 Shizuku \u8ba9 AI \u89c2\u5bdf\u548c\u64cd\u4f5c\u672c\u673a", "Let AI observe and operate this phone through Shizuku"), onDeviceControl) }
             item { NavigationSettingsRow(HugeIcons.Code, "MCP", tr(lang, "\u8fde\u63a5\u5916\u90e8\u5de5\u5177\u3001\u6570\u636e\u6e90\u4e0e\u8fdc\u7a0b\u670d\u52a1", "Connect external tools, data sources and remote services"), onMcp) }
             item { NavigationSettingsRow(HugeIcons.Sparkles, "Skills", tr(lang, "\u6d4f\u89c8\u5b98\u65b9 Skill \u5e76\u7ba1\u7406\u5df2\u5b89\u88c5\u5185\u5bb9", "Browse official skills and manage installed skills"), onSkills) }
             item {
@@ -224,6 +241,14 @@ internal fun SettingsRootPage(
             item { NavigationSettingsRow(HugeIcons.Text, tr(lang, "文字与 Markdown", "Typography & Markdown"), tr(lang, "代码、表格、列表与公式", "Code, tables, lists and math"), onTypography) }
             item { NavigationSettingsRow(HugeIcons.Code, tr(lang, "开发者选项", "Developer options"), tr(lang, "页面切换动画与交互测试", "Page transition and interaction testing"), onDeveloper) }
             item { SettingsSection(tr(lang, "系统", "System")) }
+            item {
+                NavigationSettingsRow(
+                    HugeIcons.Settings03,
+                    tr(lang, "环境自检", "Environment check"),
+                    tr(lang, "检查 CLI、工具、网络与权限，并给出可执行的处理入口", "Check CLIs, tools, network and permissions, with a way to act on each finding"),
+                    onEnvironment,
+                )
+            }
             item {
                 val developmentSummary = when {
                     !environment.loaded -> tr(lang, "正在检查已安装工具…", "Checking installed tools…")

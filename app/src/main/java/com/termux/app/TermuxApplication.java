@@ -19,6 +19,9 @@ public class TermuxApplication extends Application {
 
         // Start the unified file logger (session metadata + startup event)
         FcodeLog.init(this);
+
+        // Process-scoped device-control runtime; inactive unless the user enabled it.
+        com.termux.app.DeviceControlRuntime.INSTANCE.initialize(this);
     }
 
     private void setLogLevel() {

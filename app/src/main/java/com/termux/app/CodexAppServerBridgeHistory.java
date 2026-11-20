@@ -181,7 +181,12 @@ final class CodexAppServerBridgeHistory {
         JSONObject pendingUserMessage = null;
         String pendingHistoricalPlan = "";
         String pendingHistoricalPlanId = "";
-        boolean sawEventMessage = false;
+        // Some app-server builds emit both event_msg/user_message and response_item/user for one
+        // prompt. Track the event copy only long enough to fold the richer response-item metadata
+        // into it; unrelated event_msg records (task_started, token_count, settings) must never
+        // suppress the response-item user messages entirely.
+        int lastEventUserIndex = -1;
+        String lastEventUserText = "";
         int lastProcessIndex = -1;
         long reasoningStartedAtMs = 0L;
         long latestRecordAtMs = 0L;
@@ -195,7 +200,6 @@ final class CodexAppServerBridgeHistory {
                 long recordAtMs = parseRecordTimestampMs(record.optString("timestamp", ""));
                 if (recordAtMs > 0L) latestRecordAtMs = recordAtMs;
                 boolean eventMessageRecord = "event_msg".equals(record.optString("type"));
-                if (eventMessageRecord) sawEventMessage = true;
                 JSONObject historicalCompaction = historicalCompactionItem(record, payload, recordAtMs);
                 if (historicalCompaction != null) {
                     String compactionKey = historicalCompaction.optString("serverItemId", "");
@@ -236,7 +240,11 @@ final class CodexAppServerBridgeHistory {
                     pendingHistoricalPlan = "";
                     pendingHistoricalPlanId = "";
                     JSONObject confirmed = confirmedHistoryUserMessage(pendingUserMessage, payload);
-                    if (confirmed != null) messages.put(confirmed);
+                    if (confirmed != null) {
+                        messages.put(confirmed);
+                        lastEventUserIndex = messages.length() - 1;
+                        lastEventUserText = normalizeHistoricalUserText(confirmed.optString("content", ""));
+                    }
                     pendingUserMessage = null;
                     continue;
                 }
@@ -314,6 +322,7 @@ final class CodexAppServerBridgeHistory {
                 if (!"message".equals(payloadType)) continue;
                 String role = payload.optString("role", "");
                 if (!"user".equals(role) && !"assistant".equals(role)) continue;
+                if ("user".equals(role) && isInternalHistoricalUserPayload(payload)) continue;
                 String assistantProtocolItemId = "assistant".equals(role)
                     ? historicalProtocolItemId(payload) : "";
                 JSONArray content = payload.optJSONArray("content");
@@ -321,6 +330,16 @@ final class CodexAppServerBridgeHistory {
                 StringBuilder text = new StringBuilder();
                 JSONArray referencedSkills = new JSONArray();
                 JSONArray referencedAttachments = new JSONArray();
+                JSONArray payloadSkills = payload.optJSONArray("skills");
+                if (payloadSkills != null) for (int i = 0; i < payloadSkills.length(); i++) {
+                    JSONObject skill = payloadSkills.optJSONObject(i);
+                    if (skill != null) referencedSkills.put(new JSONObject(skill.toString()));
+                }
+                JSONArray payloadAttachments = payload.optJSONArray("attachments");
+                if (payloadAttachments != null) for (int i = 0; i < payloadAttachments.length(); i++) {
+                    JSONObject attachment = payloadAttachments.optJSONObject(i);
+                    if (attachment != null) referencedAttachments.put(new JSONObject(attachment.toString()));
+                }
                 for (int i = 0; i < content.length(); i++) {
                     JSONObject part = content.optJSONObject(i);
                     if (part == null) continue;
@@ -338,7 +357,9 @@ final class CodexAppServerBridgeHistory {
                         int nameStart = attachmentValue.lastIndexOf(" (");
                         String path = (nameStart >= 0 ? attachmentValue.substring(0, nameStart) : attachmentValue).trim();
                         String name = partText.contains("(") ? partText.substring(partText.lastIndexOf('(') + 1).replace(")", "").trim() : new File(path).getName();
-                        if (!path.isEmpty()) referencedAttachments.put(new JSONObject().put("name", name).put("path", path).put("image", false));
+                        if (!path.isEmpty() && !hasHistoricalAttachment(referencedAttachments, path)) {
+                            referencedAttachments.put(new JSONObject().put("name", name).put("path", path).put("image", false));
+                        }
                         continue;
                     }
                     text.append(partText);
@@ -348,21 +369,30 @@ final class CodexAppServerBridgeHistory {
                     appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
                     pendingHistoricalPlan = "";
                     pendingHistoricalPlanId = "";
-                    if (pendingUserMessage != null && !sawEventMessage
-                            && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
+                    if (shouldEmitHistoricalUserMessage(pendingUserMessage)) {
                         messages.put(pendingUserMessage);
                     }
-                    pendingUserMessage = historyUserMessage(value, referencedSkills, referencedAttachments);
+                    JSONObject candidate = historyUserMessage(value, referencedSkills, referencedAttachments);
+                    String candidateText = normalizeHistoricalUserText(candidate.optString("content", ""));
+                    if (lastEventUserIndex >= 0 && lastEventUserIndex < messages.length()
+                            && candidateText.equals(lastEventUserText)
+                            && !isInjectedContextMessage(candidate.optString("content", ""))) {
+                        mergeHistoricalUserMetadata(messages, lastEventUserIndex, candidate);
+                        pendingUserMessage = null;
+                        lastEventUserIndex = -1;
+                        lastEventUserText = "";
+                    } else {
+                        pendingUserMessage = candidate;
+                    }
                     continue;
                 }
                 if ("assistant".equals(role)) {
                     if (pendingUserMessage != null) {
-                        if (!sawEventMessage
-                                && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
-                            messages.put(pendingUserMessage);
-                        }
+                        if (shouldEmitHistoricalUserMessage(pendingUserMessage)) messages.put(pendingUserMessage);
                         pendingUserMessage = null;
                     }
+                    lastEventUserIndex = -1;
+                    lastEventUserText = "";
                     int processIndex = appendHistoricalProcess(
                         messages, reasoning, command, tools, reasoningStartedAtMs, recordAtMs);
                     if (processIndex >= 0) lastProcessIndex = processIndex;
@@ -390,8 +420,7 @@ final class CodexAppServerBridgeHistory {
         appendHistoricalProcess(
             messages, reasoning, command, tools, reasoningStartedAtMs, latestRecordAtMs);
         appendHistoricalProposedPlan(messages, pendingHistoricalPlan, pendingHistoricalPlanId);
-        if (pendingUserMessage != null && !sawEventMessage
-                && !isInjectedContextMessage(pendingUserMessage.optString("content", ""))) {
+        if (shouldEmitHistoricalUserMessage(pendingUserMessage)) {
             messages.put(pendingUserMessage);
         }
         return messages;
@@ -696,6 +725,78 @@ final class CodexAppServerBridgeHistory {
         return message;
     }
 
+    static boolean shouldEmitHistoricalUserMessage(JSONObject message) {
+        if (message == null) return false;
+        JSONArray attachments = message.optJSONArray("attachments");
+        JSONArray skills = message.optJSONArray("skills");
+        if ((attachments != null && attachments.length() > 0)
+                || (skills != null && skills.length() > 0)) return true;
+        return !isInjectedContextMessage(message.optString("content", ""));
+    }
+
+    /**
+     * Internal continuation records are persisted with role=user so the model sees them, but they
+     * are not chat input and must never be replayed as a user bubble or drawer title.
+     */
+    static boolean isInternalHistoricalUserPayload(JSONObject payload) {
+        if (payload == null) return true;
+        JSONArray attachments = payload.optJSONArray("attachments");
+        JSONArray skills = payload.optJSONArray("skills");
+        JSONArray localImages = payload.optJSONArray("local_images");
+        if ((attachments != null && attachments.length() > 0)
+                || (skills != null && skills.length() > 0)
+                || (localImages != null && localImages.length() > 0)) return false;
+
+        JSONObject metadata = payload.optJSONObject("internal_chat_message_metadata_passthrough");
+        JSONArray kinds = metadata == null ? null : metadata.optJSONArray("content_item_kinds");
+        boolean sawInternalKind = false;
+        if (kinds != null) for (int index = 0; index < kinds.length(); index++) {
+            String kind = kinds.optString(index, "");
+            if ("user.text".equals(kind)) return false;
+            if (!kind.isEmpty()) sawInternalKind = true;
+        }
+        if (sawInternalKind) return true;
+
+        StringBuilder text = new StringBuilder();
+        Object content = payload.opt("content");
+        if (content instanceof JSONArray) {
+            JSONArray parts = (JSONArray) content;
+            for (int index = 0; index < parts.length(); index++) {
+                JSONObject part = parts.optJSONObject(index);
+                if (part != null) text.append(part.optString("text", ""));
+            }
+        } else if (content != null && content != JSONObject.NULL) {
+            text.append(String.valueOf(content));
+        }
+        return isInjectedContextMessage(text.toString());
+    }
+
+    private static boolean hasHistoricalAttachment(JSONArray attachments, String path) {
+        if (attachments == null || path == null || path.isEmpty()) return false;
+        for (int i = 0; i < attachments.length(); i++) {
+            JSONObject attachment = attachments.optJSONObject(i);
+            if (attachment != null && path.equals(attachment.optString("path", ""))) return true;
+        }
+        return false;
+    }
+
+    /** Carries attachments/skills from a response_item into its matching event_msg user row. */
+    static void mergeHistoricalUserMetadata(JSONArray messages, int index, JSONObject candidate) throws Exception {
+        if (messages == null || candidate == null || index < 0 || index >= messages.length()) return;
+        JSONObject existing = messages.optJSONObject(index);
+        if (existing == null || !"user".equals(existing.optString("role"))) return;
+        JSONArray skills = candidate.optJSONArray("skills");
+        if (skills != null && skills.length() > 0 && existing.optJSONArray("skills") == null) {
+            existing.put("skills", skills);
+        }
+        JSONArray attachments = candidate.optJSONArray("attachments");
+        if (attachments != null && attachments.length() > 0
+                && existing.optJSONArray("attachments") == null) {
+            existing.put("attachments", attachments);
+        }
+        messages.put(index, existing);
+    }
+
     static JSONObject confirmedHistoryUserMessage(JSONObject pending, JSONObject eventPayload) throws Exception {
         String fallback = pending == null ? "" : pending.optString("content", "");
         String text = normalizeHistoricalUserText(eventPayload == null ? fallback
@@ -732,6 +833,8 @@ final class CodexAppServerBridgeHistory {
         if (text.startsWith("<environment_context>")
             || text.startsWith("<permissions instructions>")
             || text.startsWith("<app-context>")
+            || text.startsWith("<turn_aborted>")
+            || text.startsWith("<codex_internal_context")
             || text.startsWith("<collaboration_mode>")
             || text.startsWith("<skills_instructions>")
             || text.startsWith("<plugins_instructions>")
@@ -744,6 +847,7 @@ final class CodexAppServerBridgeHistory {
         String lower = text.toLowerCase(java.util.Locale.ROOT);
         String[] internalMarkers = new String[] {
             "<environment_context>", "<permissions instructions>", "<app-context>",
+            "<turn_aborted>", "<codex_internal_context",
             "<collaboration_mode>", "<skills_instructions>", "<plugins_instructions>",
             "<goal>", "<thread_goal>", "<task_goal>", "<goal_context>"
         };

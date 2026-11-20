@@ -148,11 +148,33 @@ class NativeDrawerTaskClassificationTest {
         assertNull(migration.registeredProjectPath)
     }
 
-    private fun conversation(id: String, projectPath: String) = NativeConversation(
+    @Test
+    fun conversationsAreGroupedUnderTheirOwningPersona() {
+        val result = classifyNativePersonaConversations(
+            conversations = listOf(
+                conversation("a", "", personaId = "sillage"),
+                conversation("b", "", personaId = "dafeiyu"),
+                conversation("stale", "", personaId = "deleted-persona"),
+            ),
+            personaIds = listOf("sillage", "dafeiyu"),
+            fallbackPersonaId = "sillage",
+        )
+
+        assertEquals(listOf("sillage", "dafeiyu"), result.map { it.personaId })
+        assertEquals(listOf("a", "stale"), result[0].conversations.map { it.threadId })
+        assertEquals(listOf("b"), result[1].conversations.map { it.threadId })
+    }
+
+    private fun conversation(
+        id: String,
+        projectPath: String,
+        personaId: String = NativePersonaStore.DEFAULT_ID,
+    ) = NativeConversation(
         threadId = id,
         title = id,
         state = CodexTaskStore.COMPLETED,
         projectPath = projectPath,
         favorite = false,
+        personaId = personaId,
     )
 }

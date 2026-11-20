@@ -41,8 +41,8 @@ import org.json.JSONObject
 
     internal fun CodexChatActivity.configuredProjectPath(): String {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
-        val configured = prefs.getString("custom_project_root", "").orEmpty()
-        return configured.takeIf { prefs.getBoolean("custom_project_root_enabled", true) && File(it).isDirectory } ?: ""
+        val configured = NativeWorkspace.configured(prefs) ?: return ""
+        return if (NativeWorkspace.isUsable(configured)) configured.absolutePath else ""
     }
 
     internal fun CodexChatActivity.performGitAction(action: String, value: String) {
@@ -174,13 +174,7 @@ import org.json.JSONObject
         val process = ProcessBuilder(command)
             .directory(directory)
             .redirectErrorStream(true)
-            .also { builder ->
-                builder.environment()["PATH"] = TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin:/system/xbin"
-                builder.environment()["HOME"] = TermuxConstants.TERMUX_HOME_DIR_PATH
-                builder.environment()["PREFIX"] = TermuxConstants.TERMUX_PREFIX_DIR_PATH
-                builder.environment()["TMPDIR"] = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH
-                builder.environment().putAll(environment)
-            }
+            .also { builder -> NativeProcessEnv.apply(builder, environment) }
             .start()
         val collected = StringBuilder()
         val outputReader = Thread({

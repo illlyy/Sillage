@@ -79,6 +79,8 @@ internal data class NativeConversation(
     val projectPath: String,
     val favorite: Boolean,
     val attention: String = "",
+    /** Persona that owns this conversation. A conversation never changes owner in place. */
+    val personaId: String = NativePersonaStore.DEFAULT_ID,
 ) { val projectName: String get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { "无项目" } }
 
 @Immutable

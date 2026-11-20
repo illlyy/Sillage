@@ -16,14 +16,11 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -54,15 +51,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.HugeIcons
@@ -165,14 +161,15 @@ private fun NativeActivityTimelineCard(
     onAutoCollapsed: (() -> Unit)? = null,
 ) {
     val language = LocalNativeLanguage.current
-    // Same motion language as the container-transform playground in Developer options
-    // (PageTransitionPlayground): the M3 emphasized curve, a long 360 ms body, a restrained 0.94
-    // scale for depth, and a fade that recedes to 0.3 instead of vanishing. The old fold ran three
-    // different durations (220/260/240) on a plain decelerate curve with no scale at all, which is
-    // why it read as "cheap" next to that playground — short, flat, and with no depth cue.
+    // One motion language for every disclosure in chat (see QElasticExpand): the M3 emphasized
+    // curve, a short expand, a shorter collapse. The previous body stacked scale + vertical +
+    // horizontal + a delayed fade over 360 ms. Four concurrent layout animations meant the card
+    // grew in both axes and appeared to zoom while its content was still clipped, which read as
+    // jank rather than depth. Expansion is now height-only; the width morph below is kept for the
+    // collapsed pill and runs on the same curve so both settle together.
     val motionEasing = remember { CubicBezierEasing(0.2f, 0f, 0f, 1f) }
-    val foldEnter = tween<IntSize>(durationMillis = 360, easing = motionEasing)
-    val foldExit = tween<IntSize>(durationMillis = 300, easing = motionEasing)
+    val foldEnter = tween<IntSize>(durationMillis = 240, easing = motionEasing)
+    val foldExit = tween<IntSize>(durationMillis = 180, easing = motionEasing)
     val runningCommands = group.runningCommandCount
     val failedItems = group.failedCount
     val automaticExpansion = group.expandedByDefault ||
@@ -213,7 +210,7 @@ private fun NativeActivityTimelineCard(
     }
     val rotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(durationMillis = 360, easing = motionEasing),
+        animationSpec = tween(durationMillis = 240, easing = motionEasing),
         label = "activityTimelineArrow",
     )
     val cardShape = RoundedCornerShape(18.dp)
@@ -326,18 +323,13 @@ private fun NativeActivityTimelineCard(
             }
             AnimatedVisibility(
                 visibleState = bodyVisibility,
-                // Container-transform shape: the shell opens on the emphasized curve while the
-                // body scales up from 0.94, so the content reads as rising out of the card instead
-                // of being revealed. The short delayed fade means the frame of the card is there
-                // first, and fading out to 0.3 (not 0) keeps the collapse from looking like a cut.
-                enter = scaleIn(initialScale = 0.94f, animationSpec = tween(360, easing = motionEasing)) +
-                    fadeIn(tween(170, delayMillis = 60, easing = LinearOutSlowInEasing)) +
-                    expandVertically(foldEnter, expandFrom = Alignment.Top) +
-                    expandHorizontally(foldEnter, expandFrom = Alignment.Start),
-                exit = scaleOut(targetScale = 0.94f, animationSpec = tween(300, easing = motionEasing)) +
-                    fadeOut(tween(150, delayMillis = 90), targetAlpha = 0.3f) +
-                    shrinkVertically(foldExit, shrinkTowards = Alignment.Top) +
-                    shrinkHorizontally(foldExit, shrinkTowards = Alignment.Start),
+                // Height only. The fade starts immediately and finishes ahead of the height so the
+                // body never sits fully opaque while the container is still shrinking (that delayed
+                // fade was the "stuck, then pops" half of the old fold).
+                enter = expandVertically(foldEnter, expandFrom = Alignment.Top) +
+                    fadeIn(tween(170, easing = motionEasing)),
+                exit = shrinkVertically(foldExit, shrinkTowards = Alignment.Top) +
+                    fadeOut(tween(120, easing = motionEasing)),
             ) {
                 Column {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .38f))
@@ -363,12 +355,21 @@ private fun NativeActivityTimelineCard(
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary,
                                 )
-                                Text(
-                                    bodyReasoning,
-                                    modifier = Modifier.padding(top = 4.dp),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                )
+                                Column(Modifier.padding(top = 4.dp)) {
+                                    if (group.running && body == null) {
+                                        // Chunked streaming renderer: completed chunks keep their
+                                        // measure result and only the tail is re-laid out per
+                                        // batch. A single Text here re-measured the entire chain
+                                        // of thought on every delta while the card was animating.
+                                        LiveReasoningText(bodyReasoning)
+                                    } else {
+                                        Text(
+                                            bodyReasoning,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                             }
                         }
                         bodyCommands.forEach { command ->
@@ -432,25 +433,32 @@ private fun NativeTimelineStep(
     isLast: Boolean,
     content: @Composable () -> Unit,
 ) {
-    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-        Box(Modifier.width(22.dp).fillMaxHeight()) {
-            if (!isLast) {
-                Box(
-                    Modifier
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .align(Alignment.TopCenter)
-                        .padding(top = 12.dp)
-                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = .62f)),
-                )
-            }
-            Surface(
-                modifier = Modifier.size(9.dp).align(Alignment.TopCenter),
-                shape = CircleShape,
-                color = markerColor,
-                border = BorderStroke(2.dp, MaterialTheme.colorScheme.surfaceContainerHigh),
-            ) {}
-        }
+    // The connector used to be a fillMaxHeight child inside a `height(IntrinsicSize.Min)` row,
+    // which forced an extra intrinsic measure pass over every step — and the whole card is
+    // re-measured on each frame while it expands. Drawing the rail behind the row removes the
+    // intrinsic pass entirely; the dot keeps the same geometry (outer ring + 2dp inset).
+    val railColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .62f)
+    val ringColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                val railX = 11.dp.toPx()
+                val dotCenterY = 4.5.dp.toPx()
+                val dotRadius = 4.5.dp.toPx()
+                if (!isLast) {
+                    drawLine(
+                        color = railColor,
+                        start = Offset(railX, 12.dp.toPx()),
+                        end = Offset(railX, size.height),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                }
+                drawCircle(ringColor, dotRadius, Offset(railX, dotCenterY))
+                drawCircle(markerColor, dotRadius - 2.dp.toPx(), Offset(railX, dotCenterY))
+            },
+    ) {
+        Spacer(Modifier.width(22.dp))
         Column(
             modifier = Modifier.weight(1f).padding(start = 7.dp, bottom = if (isLast) 12.dp else 15.dp),
             content = { content() },
@@ -581,7 +589,7 @@ private fun NativeCommandRow(
                 )
             }
         }
-        AnimatedVisibility(expanded && hasDetails) {
+        QElasticExpand(expanded && hasDetails) {
             Column(
                 Modifier.fillMaxWidth().padding(
                     start = if (showStatusDot) 27.dp else 0.dp,

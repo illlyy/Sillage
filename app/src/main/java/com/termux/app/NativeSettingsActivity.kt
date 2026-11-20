@@ -327,6 +327,9 @@ class NativeSettingsActivity : ComponentActivity() {
                             onAppearance = { navigator.navigate(SettingsPage.APPEARANCE) },
                             onMcp = { navigator.navigate(SettingsPage.MCP) },
                             onSkills = { navigator.navigate(SettingsPage.SKILLS) },
+                            onEnvironment = { navigator.navigate(SettingsPage.ENVIRONMENT) },
+                        onPersona = { navigator.navigate(SettingsPage.PERSONA) },
+                        onDeviceControl = { navigator.navigate(SettingsPage.DEVICE_CONTROL) },
                             onLanguage = { dialog = "language" },
                             onTypography = { navigator.navigate(SettingsPage.TYPOGRAPHY) },
                             onDeveloper = { navigator.navigate(SettingsPage.DEVELOPER) },
@@ -538,6 +541,19 @@ class NativeSettingsActivity : ComponentActivity() {
                             onDeleted = { navigator.finishMcpEditor() },
                         )
                         SettingsPage.SKILLS -> SkillsSettingsPage(lang, prefs, navigateBack)
+                        SettingsPage.ENVIRONMENT -> EnvironmentSettingsPage(
+                            lang = lang,
+                            prefs = prefs,
+                            environmentRevision = resumeRevision,
+                            onBack = navigateBack,
+                            onOpenDevelopmentTools = { navigator.navigate(SettingsPage.DEVELOPMENT_TOOLS) },
+                            onOpenModelConfigs = { navigator.navigate(SettingsPage.MODEL_CONFIGS) },
+                            onOpenSkills = { navigator.navigate(SettingsPage.SKILLS) },
+                            onOpenMcp = { navigator.navigate(SettingsPage.MCP) },
+                            onOpenLogs = { navigator.navigate(SettingsPage.LOGS) },
+                        )
+                        SettingsPage.PERSONA -> PersonaSettingsPage(lang, navigateBack)
+                        SettingsPage.DEVICE_CONTROL -> DeviceControlSettingsPage(lang, navigateBack)
                         SettingsPage.PROXY -> ProxySettingsPage(
                             lang = lang,
                             prefs = prefs,

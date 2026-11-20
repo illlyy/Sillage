@@ -44,6 +44,13 @@ internal data class PendingNativeSteer(
     val followUp: NativeQueuedFollowUp,
 )
 
+internal const val LEGACY_NEW_CHAT_DRAFT_KEY = "native_chat_draft_v1"
+
+internal fun newChatDraftKey(personaId: String): String =
+    "native_chat_draft_v1:new:${personaId.ifBlank { NativePersonaStore.DEFAULT_ID }}"
+
+internal fun threadChatDraftKey(threadId: String): String = "native_chat_draft_v1:$threadId"
+
 
     internal fun CodexChatActivity.editMessage(messageId: String, text: String) {
         val value = text.trim()
@@ -58,6 +65,7 @@ internal data class PendingNativeSteer(
         resetProtocolTurnState()
         chatState.prepareReplacementTurn()
         startFrameDiagnostics()
+        armTurnFirstActivityWatchdog()
         bridge?.editTurn(value, chatState.selectedModel, chatState.selectedEffort, rollbackTurns)
     }
 
@@ -77,11 +85,17 @@ internal data class PendingNativeSteer(
         resetProtocolTurnState()
         chatState.prepareReplacementTurn()
         startFrameDiagnostics()
+        armTurnFirstActivityWatchdog()
         bridge?.sendMessage(value, chatState.selectedModel, chatState.selectedEffort, "[]", if (implementsPlan) "default" else chatState.selectedMode)
     }
 
     internal fun CodexChatActivity.persistDraft(value: String) {
-        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString("native_chat_draft_v1", value).apply()
+        val threadId = currentThreadId.orEmpty()
+        val key = if (threadId.isBlank()) {
+            val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+            newChatDraftKey(NativePersonaStore.activeId(prefs))
+        } else threadChatDraftKey(threadId)
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit().putString(key, value).apply()
     }
 
     internal fun CodexChatActivity.updateDraft(value: String) {
@@ -168,10 +182,12 @@ internal data class PendingNativeSteer(
         resetProtocolTurnState()
         val userMessage = chatState.addUser(followUp.text, followUp.skills, followUp.attachments)
         currentThreadId?.let { threadId ->
+            NativeConversationJournal.appendUser(this, threadId, userMessage)
             CodexTaskStore.assignProject(this, threadId, chatState.projectPath)
             conversationProjectCache[threadId] = chatState.projectPath
         }
         startFrameDiagnostics()
+        armTurnFirstActivityWatchdog()
         bridge?.sendMessage(
             followUp.text,
             followUp.model,
@@ -202,6 +218,7 @@ internal data class PendingNativeSteer(
             return queueFollowUp(followUp)
         }
         val userMessage = chatState.addFollowUpUser(followUp.text, followUp.skills, followUp.attachments)
+        currentThreadId?.let { NativeConversationJournal.appendUser(this, it, userMessage) }
         pendingNativeSteers[requestId] = PendingNativeSteer(userMessage.id, followUp)
         clearComposerAfterSubmit()
         return NativeSubmitResult(accepted = true, messageId = userMessage.id)
@@ -210,6 +227,14 @@ internal data class PendingNativeSteer(
     internal fun CodexChatActivity.sendMessage(text: String): NativeSubmitResult? {
         val value = text.trim()
         if ((value.isEmpty() && chatState.attachments.isEmpty()) || !chatState.ready) return null
+        if (chatState.historyLoading || chatState.historyLoadFailed) {
+            Toast.makeText(
+                this,
+                nativeText(nativeLanguage, "对话记录尚未就绪，请先重试加载", "Conversation history is not ready. Retry loading first."),
+                Toast.LENGTH_SHORT,
+            ).show()
+            return null
+        }
         if (compactionInProgress()) {
             Toast.makeText(
                 this,
@@ -292,6 +317,8 @@ internal data class PendingNativeSteer(
 
     internal fun CodexChatActivity.stopCurrentTurn() {
         if (!chatState.busy) return
+        turnFirstActivityWatchdog?.let(streamHandler::removeCallbacks)
+        turnFirstActivityWatchdog = null
         cancelGoalAutoRetry()
         goalRetryWaitingForCompletion = false
         suppressGoalRetryUntilNewTurn = true

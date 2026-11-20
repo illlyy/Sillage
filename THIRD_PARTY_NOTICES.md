@@ -46,3 +46,17 @@ This public repository combines source and generated assets from multiple upstre
 - The snapshot excludes RikkaHub web-ui and backend/database/service implementations.
 
 Fcode ports may modify the native UI for the Codex/Termux backend. Confirm upstream commercial/public-distribution rights before publication.
+
+## Shizuku API
+
+- Upstream: https://github.com/RikkaApps/Shizuku-API
+- Client API version: `13.1.5`
+- License: Apache License 2.0.
+- Sillage uses Shizuku only as an optional ADB/root privilege transport and does not bundle the Shizuku manager APK.
+
+## Ktor Server
+
+- Upstream: https://github.com/ktorio/ktor
+- Version: `3.5.2`
+- License: Apache License 2.0.
+- Used only for the loopback Streamable HTTP MCP endpoint.

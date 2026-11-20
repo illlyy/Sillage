@@ -1238,20 +1238,25 @@ internal fun FcodeTtsAction(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, durationMs: Int = 280, content: @Composable () -> Unit) {
-    // Smooth, coordinated height+fade tween. The old spring delivered full height in ~120ms while
-    // the linear fade lagged behind — on enter that read as "a full-size bar, then text fills in";
-    // on exit the fade finished first leaving a transparent shrinking rectangle that popped away at
-    // the end (shifting the whole list). No spring means no overshoot, so the layout below moves
-    // monotonically and the auto-follow motor can track it instead of lagging then snapping.
-    // [durationMs] scales the whole accordion; the historical card uses a gentler, longer value.
+internal fun QElasticExpand(visible: Boolean, modifier: Modifier = Modifier, durationMs: Int = 240, content: @Composable () -> Unit) {
+    // Single motion language for every chat disclosure: height on the M3 emphasized curve, fade
+    // finishing ahead of the height so nothing sits fully opaque inside a still-moving container.
+    // Earlier revisions faded with LinearEasing and a shorter tail, which made the text appear to
+    // lag the box; the collapse was also ~25% shorter than the expand and read as a snap.
+    val exitMs = (durationMs * 0.75f).toInt()
     AnimatedVisibility(
         visible = visible,
         modifier = modifier,
-        enter = expandVertically(expandFrom = Alignment.Top, animationSpec = tween(durationMs, easing = FastOutSlowInEasing), clip = true)
-            + fadeIn(tween(durationMs - 40, easing = LinearEasing)),
-        exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = tween(durationMs - 40, easing = FastOutSlowInEasing), clip = true)
-            + fadeOut(tween(durationMs - 80, easing = LinearEasing)),
+        enter = expandVertically(
+            expandFrom = Alignment.Top,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+            clip = true,
+        ) + fadeIn(tween((durationMs * 0.75f).toInt(), easing = FastOutSlowInEasing)),
+        exit = shrinkVertically(
+            shrinkTowards = Alignment.Top,
+            animationSpec = tween(exitMs, easing = FastOutSlowInEasing),
+            clip = true,
+        ) + fadeOut(tween((exitMs * 0.7f).toInt(), easing = FastOutSlowInEasing)),
     ) { content() }
 }
 

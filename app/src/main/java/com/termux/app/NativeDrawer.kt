@@ -289,14 +289,22 @@ internal fun RikkaDrawerV2(
     onResumeConversation: (String) -> Unit,
     onClose: () -> Unit,
     onNewConversation: () -> Unit,
+    onNewConversationForPersona: (String) -> Unit,
     onNewConversationAtProject: (String) -> Unit,
     onBackHome: () -> Unit,
     onOpenLegacyWebUi: () -> Unit,
 ) {
     val language = LocalNativeLanguage.current
     val context = LocalContext.current
-    var mode by remember { mutableStateOf("tasks") }
+    var mode by remember { mutableStateOf("personas") }
+    var personaPickerExpanded by remember { mutableStateOf(false) }
+    var viewMenuExpanded by remember { mutableStateOf(false) }
     var projectRevision by remember { mutableIntStateOf(0) }
+    val personaRevision = NativePersonaStore.revision
+    val personas = remember(personaRevision) { NativePersonaStore.load(context) }
+    val activePersonaId = remember(personaRevision) {
+        NativePersonaStore.activeId(NativePersonaStore.prefs(context))
+    }
     var newMenuExpanded by remember { mutableStateOf(false) }
     var showNewProjectDialog by remember { mutableStateOf(false) }
     var newProjectName by remember { mutableStateOf("") }
@@ -363,9 +371,22 @@ internal fun RikkaDrawerV2(
         result = 31 * result + conversation.state.hashCode()
         result = 31 * result + conversation.favorite.hashCode()
         result = 31 * result + conversation.attention.hashCode()
+        result = 31 * result + conversation.personaId.hashCode()
         result
     }
     val conversationSnapshot = remember(conversationRevision) { conversations.toList() }
+    val personaById = remember(personas) { personas.associateBy { it.id } }
+    val personaGroups = remember(conversationSnapshot, personas) {
+        classifyNativePersonaConversations(
+            conversations = conversationSnapshot,
+            personaIds = personas.map { it.id },
+            fallbackPersonaId = NativePersonaStore.DEFAULT_ID,
+        )
+    }
+    val selectedPersona = personaById[activePersonaId] ?: personas.firstOrNull()
+    val selectedPersonaGroup = selectedPersona?.let { persona ->
+        personaGroups.firstOrNull { it.personaId == persona.id }
+    }
     val registeredProjects = remember(projectRevision) { NativeDrawerProjectStore.registered(context) }
     val hiddenProjects = remember(projectRevision) { NativeDrawerProjectStore.hiddenPaths(context) }
     val drawerClassification = remember(conversationRevision, registeredProjects, hiddenProjects, projectRevision) {
@@ -392,6 +413,10 @@ internal fun RikkaDrawerV2(
     val tasksByProject = drawerClassification.tasksByProject
     val openTask: (NativeConversation) -> Unit = remember(context, onResumeConversation) {
         { conversation ->
+            if (conversation.personaId.isNotBlank()) {
+                NativePersonaStore.setActive(context, conversation.personaId)
+            }
+            personaPickerExpanded = false
             if (conversation.projectPath.isNotBlank()) {
                 context.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE).edit()
                     .putBoolean("custom_project_root_enabled", true)
@@ -414,25 +439,42 @@ internal fun RikkaDrawerV2(
                 .fillMaxHeight()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DrawerQuickAction(HugeIcons.Search01, nativeText(language, "\u641c\u7d22", "Search"), Modifier.weight(1f), onSearch)
-                Box(Modifier.weight(1f)) {
-                    DrawerQuickAction(
-                        HugeIcons.MessageAdd01,
-                        nativeText(language, "\u65b0\u5efa", "New"),
-                        Modifier.fillMaxWidth(),
-                    ) { newMenuExpanded = true }
+            val activeBackendLabel = if (backend == NativeBackendType.CODEX) "Codex" else "Claude"
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Sillage", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(
+                        modelLabel.ifBlank { activeBackendLabel },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Box {
+                    Surface(
+                        onClick = { viewMenuExpanded = false; newMenuExpanded = !newMenuExpanded },
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ) {
+                        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(HugeIcons.MessageAdd01, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text(nativeText(language, "新建", "New"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                     DropdownMenu(expanded = newMenuExpanded, onDismissRequest = { newMenuExpanded = false }) {
                         DropdownMenuItem(
-                            text = { Text(nativeText(language, "\u65b0\u5efa\u4efb\u52a1", "New task")) },
+                            text = { Text(nativeText(language, "新建任务", "New task")) },
                             leadingIcon = { Icon(HugeIcons.MessageAdd01, null) },
                             onClick = { newMenuExpanded = false; onNewConversation() },
                         )
                         DropdownMenuItem(
-                            text = { Text(nativeText(language, "\u65b0\u5efa\u9879\u76ee\u6587\u4ef6\u5939", "New project folder")) },
+                            text = { Text(nativeText(language, "新建项目文件夹", "New project folder")) },
                             leadingIcon = { Icon(HugeIcons.Folder01, null) },
                             onClick = {
                                 newMenuExpanded = false
@@ -444,114 +486,192 @@ internal fun RikkaDrawerV2(
                     }
                 }
             }
+            DrawerSearchBar(
+                label = nativeText(language, "搜索对话、任务或项目", "Search chats, tasks or projects"),
+                onClick = onSearch,
+            )
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("tasks" to nativeText(language, "\u4efb\u52a1", "Tasks"), "projects" to nativeText(language, "\u9879\u76ee", "Projects")).forEach { (value, label) ->
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fcodePressClickable(
-                                onClickLabel = nativeText(language, "\u5207\u6362\u5230$label", "Show $label"),
-                            ) { mode = value },
-                        shape = RoundedCornerShape(13.dp),
-                        color = if (mode == value) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-                    ) {
-                        Text(
-                            label,
-                            modifier = Modifier.padding(vertical = 8.dp),
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = if (mode == value) FontWeight.SemiBold else FontWeight.Normal,
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (mode == "personas") {
+                    val persona = selectedPersona
+                    if (persona != null) {
+                        DrawerCurrentPersonaRow(
+                            persona = persona,
+                            conversationCount = selectedPersonaGroup?.conversations?.size ?: 0,
+                            expanded = personaPickerExpanded,
+                            modifier = Modifier.weight(1f),
+                            onToggle = { personaPickerExpanded = !personaPickerExpanded },
+                            onNewConversation = { onNewConversationForPersona(persona.id) },
+                        )
+                    } else {
+                        DrawerModeSummary(
+                            icon = HugeIcons.Sparkles,
+                            title = nativeText(language, "还没有人物", "No personas"),
+                            subtitle = nativeText(language, "到设置里创建人物", "Create one in settings"),
+                            modifier = Modifier.weight(1f),
                         )
                     }
+                } else {
+                    DrawerModeSummary(
+                        icon = if (mode == "tasks") HugeIcons.LeftToRightListBullet else HugeIcons.Folder01,
+                        title = if (mode == "tasks") nativeText(language, "任务", "Tasks") else nativeText(language, "项目", "Projects"),
+                        subtitle = if (mode == "tasks") nativeText(language, "${standaloneTasks.size} 个独立任务", "${standaloneTasks.size} standalone tasks")
+                        else nativeText(language, "${projects.size} 个项目", "${projects.size} projects"),
+                        modifier = Modifier.weight(1f),
+                    )
                 }
+                DrawerViewMenuButton(
+                    mode = mode,
+                    expanded = viewMenuExpanded,
+                    onExpandedChange = { viewMenuExpanded = it; if (it) newMenuExpanded = false },
+                    onModeSelected = { selected ->
+                        mode = selected
+                        viewMenuExpanded = false
+                        if (selected != "personas") personaPickerExpanded = false
+                    },
+                )
             }
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(
-                    NativeBackendType.CODEX to "Codex",
-                    NativeBackendType.CLAUDE to "Claude",
-                ).forEach { (value, label) ->
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fcodePressClickable(
-                                onClickLabel = nativeText(language, "切换到$label", "Switch to $label"),
-                            ) { onSwitchBackend(value) },
-                        shape = RoundedCornerShape(13.dp),
-                        color = if (backend == value) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-                    ) {
-                        Text(
-                            label,
-                            modifier = Modifier.padding(vertical = 8.dp),
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = if (backend == value) FontWeight.SemiBold else FontWeight.Normal,
-                        )
-                    }
-                }
-            }
-
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
+                contentPadding = PaddingValues(bottom = 6.dp),
             ) {
-                if (mode == "tasks") {
-                    if (standaloneTasks.isEmpty()) {
-                        item { DrawerEmptyState(nativeText(language, "\u8fd8\u6ca1\u6709\u4efb\u52a1", "No tasks yet")) }
-                    } else {
-                        items(standaloneTasks, key = { "task:${it.threadId}" }) { conversation ->
-                            DrawerConversationTaskRow(
-                                conversation = conversation,
-                                selected = conversation.threadId == currentThreadId,
-                                indented = false,
-                                onOpen = { openTask(conversation) },
-                                onFavorite = { onToggleFavorite(conversation) },
-                                onRename = { onRenameConversation(conversation) },
-                                onDelete = { onDeleteConversation(conversation) },
-                            )
-                        }
+                if (mode == "personas" && personaPickerExpanded) {
+                    item(key = "persona-picker-label") {
+                        Text(
+                            nativeText(language, "切换人物", "Switch persona"),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                } else {
-                    if (projects.isEmpty()) {
-                        item { DrawerEmptyState(nativeText(language, "\u65b0\u5efa\u9879\u76ee\u540e\uff0cAI \u5c06\u9ed8\u8ba4\u8bfb\u53d6\u8be5\u6587\u4ef6\u5939", "Create a project to give AI a default readable folder")) }
+                    items(personas, key = { "persona-picker:${it.id}" }) { persona ->
+                        DrawerPersonaPickerRow(
+                            persona = persona,
+                            selected = persona.id == selectedPersona?.id,
+                            conversationCount = personaGroups.firstOrNull { it.personaId == persona.id }?.conversations?.size ?: 0,
+                            onClick = {
+                                NativePersonaStore.setActive(context, persona.id)
+                                personaPickerExpanded = false
+                            },
+                        )
                     }
-                    projects.forEach { project ->
-                        val projectTasks = tasksByProject[project.path].orEmpty()
-                        item(key = "project:${project.path}") {
-                            DrawerProjectRow(
-                                project = project,
-                                taskCount = projectTasks.size,
-                                expanded = project.path in expandedProjects,
-                                onToggle = {
-                                    expandedProjects = if (project.path in expandedProjects) expandedProjects - project.path else expandedProjects + project.path
-                                },
-                                onNewTask = { onNewConversationAtProject(project.path) },
-                                onRename = { renameProjectError = ""; renameProject = project },
-                                onDelete = { deleteProject = project },
-                            )
-                        }
-                        if (project.path in expandedProjects) {
-                            if (projectTasks.isEmpty()) {
-                                item(key = "empty:${project.path}") {
+                    item(key = "persona-picker-divider") {
+                        HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    }
+                }
+                when (mode) {
+                    "personas" -> {
+                        val persona = selectedPersona
+                        val selectedConversations = selectedPersonaGroup?.conversations.orEmpty()
+                        if (persona == null) {
+                            item { DrawerEmptyState(nativeText(language, "还没有人物", "No personas yet")) }
+                        } else if (selectedConversations.isEmpty()) {
+                            item(key = "empty-persona:${persona.id}") {
+                                Column(
+                                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 28.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
                                     Text(
-                                        nativeText(language, "\u8be5\u9879\u76ee\u8fd8\u6ca1\u6709\u4efb\u52a1", "No tasks in this project"),
-                                        modifier = Modifier.padding(start = 46.dp, top = 6.dp, bottom = 8.dp),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        nativeText(language, "还没有和「${persona.name}」的对话", "No conversations with ${persona.name} yet"),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    TextButton({ onNewConversationForPersona(persona.id) }, modifier = Modifier.padding(top = 6.dp)) {
+                                        Icon(HugeIcons.MessageAdd01, null, Modifier.size(17.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(nativeText(language, "和 ${persona.name} 开始新对话", "Start a chat with ${persona.name}"))
+                                    }
+                                }
+                            }
+                        } else {
+                            item(key = "conversation-section:${persona.id}") {
+                                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        nativeText(language, "最近对话", "Recent chats"),
+                                        Modifier.weight(1f),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        selectedConversations.size.toString(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
                                     )
                                 }
-                            } else {
-                                items(projectTasks, key = { "project-task:${it.threadId}" }) { conversation ->
-                                    DrawerConversationTaskRow(
-                                        conversation = conversation,
-                                        selected = conversation.threadId == currentThreadId,
-                                        indented = true,
-                                        onOpen = { openTask(conversation) },
-                                        onFavorite = { onToggleFavorite(conversation) },
-                                        onRename = { onRenameConversation(conversation) },
-                                        onDelete = { onDeleteConversation(conversation) },
-                                    )
+                            }
+                            items(selectedConversations, key = { "persona-task:${it.threadId}" }) { conversation ->
+                                DrawerConversationTaskRow(
+                                    conversation = conversation,
+                                    selected = conversation.threadId == currentThreadId,
+                                    indented = false,
+                                    onOpen = { openTask(conversation) },
+                                    onFavorite = { onToggleFavorite(conversation) },
+                                    onRename = { onRenameConversation(conversation) },
+                                    onDelete = { onDeleteConversation(conversation) },
+                                )
+                            }
+                        }
+                    }
+                    "tasks" -> {
+                        if (standaloneTasks.isEmpty()) {
+                            item { DrawerEmptyState(nativeText(language, "还没有任务", "No tasks yet")) }
+                        } else {
+                            items(standaloneTasks, key = { "task:${it.threadId}" }) { conversation ->
+                                DrawerConversationTaskRow(
+                                    conversation = conversation,
+                                    selected = conversation.threadId == currentThreadId,
+                                    indented = false,
+                                    onOpen = { openTask(conversation) },
+                                    onFavorite = { onToggleFavorite(conversation) },
+                                    onRename = { onRenameConversation(conversation) },
+                                    onDelete = { onDeleteConversation(conversation) },
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        if (projects.isEmpty()) {
+                            item { DrawerEmptyState(nativeText(language, "新建项目后，AI 将默认读取该文件夹", "Create a project to give AI a default readable folder")) }
+                        }
+                        projects.forEach { project ->
+                            val projectTasks = tasksByProject[project.path].orEmpty()
+                            item(key = "project:${project.path}") {
+                                DrawerProjectRow(
+                                    project = project,
+                                    taskCount = projectTasks.size,
+                                    expanded = project.path in expandedProjects,
+                                    onToggle = {
+                                        expandedProjects = if (project.path in expandedProjects) expandedProjects - project.path else expandedProjects + project.path
+                                    },
+                                    onNewTask = { onNewConversationAtProject(project.path) },
+                                    onRename = { renameProjectError = ""; renameProject = project },
+                                    onDelete = { deleteProject = project },
+                                )
+                            }
+                            if (project.path in expandedProjects) {
+                                if (projectTasks.isEmpty()) {
+                                    item(key = "empty:${project.path}") {
+                                        Text(
+                                            nativeText(language, "该项目还没有任务", "No tasks in this project"),
+                                            modifier = Modifier.padding(start = 46.dp, top = 6.dp, bottom = 8.dp),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        )
+                                    }
+                                } else {
+                                    items(projectTasks, key = { "project-task:${it.threadId}" }) { conversation ->
+                                        DrawerConversationTaskRow(
+                                            conversation = conversation,
+                                            selected = conversation.threadId == currentThreadId,
+                                            indented = true,
+                                            onOpen = { openTask(conversation) },
+                                            onFavorite = { onToggleFavorite(conversation) },
+                                            onRename = { onRenameConversation(conversation) },
+                                            onDelete = { onDeleteConversation(conversation) },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -559,11 +679,11 @@ internal fun RikkaDrawerV2(
                 }
             }
 
-            DrawerQuickAction(
-                HugeIcons.Settings03,
-                nativeText(language, "\u8bbe\u7f6e", "Settings"),
-                Modifier.fillMaxWidth(),
-                onBackHome,
+            DrawerBackendSwitchBar(
+                backend = backend,
+                modelLabel = modelLabel.ifBlank { activeBackendLabel },
+                onSwitchBackend = onSwitchBackend,
+                onSettings = onBackHome,
             )
         }
     }
@@ -674,6 +794,230 @@ internal fun documentTreeUriToPath(uri: android.net.Uri): String? {
     val selected = if (rest.isBlank()) base else java.io.File(base, rest).canonicalFile
     val basePath = base.path.trimEnd(java.io.File.separatorChar) + java.io.File.separator
     return if (selected == base || selected.path.startsWith(basePath)) selected.path else null
+}
+
+@Composable
+private fun DrawerSearchBar(label: String, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(HugeIcons.Search01, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(10.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DrawerCurrentPersonaRow(
+    persona: NativePersona,
+    conversationCount: Int,
+    expanded: Boolean,
+    modifier: Modifier = Modifier,
+    onToggle: () -> Unit,
+    onNewConversation: () -> Unit,
+) {
+    Surface(
+        modifier = modifier.fcodePressClickable(onClickLabel = nativeText(LocalNativeLanguage.current, "切换人物", "Switch persona")) { onToggle() },
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f)),
+    ) {
+        Row(Modifier.padding(start = 10.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(Modifier.size(40.dp), shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(persona.emoji.ifBlank { "✦" }, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(persona.name.ifBlank { "—" }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (conversationCount == 0) nativeText(LocalNativeLanguage.current, "暂无对话", "No chats")
+                    else nativeText(LocalNativeLanguage.current, "$conversationCount 个对话", "$conversationCount chats"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onNewConversation, Modifier.size(36.dp)) {
+                Icon(HugeIcons.MessageAdd01, nativeText(LocalNativeLanguage.current, "与 ${persona.name} 新建对话", "New chat with ${persona.name}"), Modifier.size(19.dp))
+            }
+            Icon(
+                if (expanded) HugeIcons.ArrowUp01 else HugeIcons.ArrowDown01,
+                null,
+                Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(4.dp))
+        }
+    }
+}
+
+@Composable
+private fun DrawerPersonaPickerRow(
+    persona: NativePersona,
+    selected: Boolean,
+    conversationCount: Int,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(Modifier.size(34.dp), shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                Box(contentAlignment = Alignment.Center) { Text(persona.emoji.ifBlank { "✦" }, style = MaterialTheme.typography.bodyLarge) }
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Text(persona.name.ifBlank { "—" }, style = MaterialTheme.typography.bodyLarge, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (conversationCount == 0) nativeText(LocalNativeLanguage.current, "暂无对话", "No chats")
+                    else nativeText(LocalNativeLanguage.current, "$conversationCount 个对话", "$conversationCount chats"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (selected) Icon(HugeIcons.Tick02, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+private fun DrawerModeSummary(icon: ImageVector, title: String, subtitle: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f)),
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(Modifier.size(38.dp), shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                Box(contentAlignment = Alignment.Center) { Icon(icon, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer) }
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrawerViewMenuButton(
+    mode: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onModeSelected: (String) -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val options = listOf(
+        Triple("personas", nativeText(language, "对话", "Chats"), HugeIcons.MessageAdd01),
+        Triple("tasks", nativeText(language, "任务", "Tasks"), HugeIcons.LeftToRightListBullet),
+        Triple("projects", nativeText(language, "项目", "Projects"), HugeIcons.Folder01),
+    )
+    val current = options.firstOrNull { it.first == mode } ?: options.first()
+    Box {
+        Surface(
+            onClick = { onExpandedChange(!expanded) },
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f)),
+        ) {
+            Row(Modifier.padding(horizontal = 11.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(current.third, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(current.second, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.width(3.dp))
+                Icon(HugeIcons.ArrowDown01, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { onExpandedChange(false) }) {
+            options.forEach { (value, label, icon) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    leadingIcon = { Icon(icon, null, Modifier.size(18.dp)) },
+                    trailingIcon = { if (value == mode) Icon(HugeIcons.Tick02, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary) },
+                    onClick = { onModeSelected(value) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrawerBackendSwitchBar(
+    backend: NativeBackendType,
+    modelLabel: String,
+    onSwitchBackend: (NativeBackendType) -> Unit,
+    onSettings: () -> Unit,
+) {
+    val language = LocalNativeLanguage.current
+    val activeLabel = if (backend == NativeBackendType.CODEX) "Codex" else "Claude"
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f)),
+    ) {
+        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                    Text(modelLabel, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        nativeText(language, "$activeLabel 后端", "$activeLabel backend"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onSettings, Modifier.size(38.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape)) {
+                    Icon(HugeIcons.Settings03, nativeText(language, "设置", "Settings"), Modifier.size(19.dp))
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(NativeBackendType.CODEX to "Codex", NativeBackendType.CLAUDE to "Claude").forEach { (value, label) ->
+                    val selected = backend == value
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        onClick = { if (!selected) onSwitchBackend(value) },
+                        shape = RoundedCornerShape(15.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                    ) {
+                        Row(
+                            Modifier.padding(vertical = 10.dp, horizontal = 10.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(HugeIcons.Code, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
+                            if (selected) {
+                                Spacer(Modifier.width(5.dp))
+                                Icon(HugeIcons.Tick02, null, Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

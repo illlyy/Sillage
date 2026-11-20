@@ -38,6 +38,7 @@ internal object CodexConversationSource : NativeConversationSource {
     override fun refresh(activity: CodexChatActivity, backend: NativeBackendType, generation: Int) {
         val favorites = activity.favoriteThreadIds()
         val snapshot = CodexTaskStore.current(activity)
+        val personaPrefs = activity.getSharedPreferences("codex_mobile", android.content.Context.MODE_PRIVATE)
         val registeredProjectPaths = NativeDrawerProjectStore.registered(activity).map(NativeDrawerProject::path)
         fun visibleProjectPath(path: String): String = resolveNativeConversationProjectMigration(
             cachedResolvedPath = path,
@@ -90,8 +91,13 @@ internal object CodexConversationSource : NativeConversationSource {
                     else visibleProjectPath(activity.conversationProjectCache[task.threadId].orEmpty())
                 if (fallbackTitle && title.startsWith("Codex 任务")) null
                 else NativeConversation(
-                    task.threadId, title, task.state, project, task.threadId in favorites,
-                    activity.taskAttention(task.threadId, task.state),
+                    threadId = task.threadId,
+                    title = title,
+                    state = task.state,
+                    projectPath = project,
+                    favorite = task.threadId in favorites,
+                    attention = activity.taskAttention(task.threadId, task.state),
+                    personaId = NativePersonaStore.resolvedThreadPersonaId(personaPrefs, task.threadId),
                 )
             }.sortedWith(compareByDescending<NativeConversation> { it.state == CodexTaskStore.RUNNING }
                 .thenByDescending { activity.attentionPriority(it.attention) })

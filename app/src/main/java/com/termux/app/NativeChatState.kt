@@ -412,6 +412,8 @@ internal class NativeChatState {
     var connectionLabel by mutableStateOf("正在启动 Codex…")
     var ready by mutableStateOf(false)
     var historyLoading by mutableStateOf(false)
+    /** True when the route stayed empty past the history handshake deadline. */
+    var historyLoadFailed by mutableStateOf(false)
     var phase by mutableStateOf(NativeTurnPhase.IDLE)
     val busy: Boolean get() = phase.active
     var modelLabel by mutableStateOf("")
@@ -944,6 +946,7 @@ internal class NativeChatState {
     fun resetConversation() {
         turnTerminationBarrier.reset()
         historyLoading = false
+        historyLoadFailed = false
         messages.clear()
         pendingEchoMessages.clear()
         planJson = "[]"

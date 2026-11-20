@@ -72,15 +72,36 @@ object ClaudeMcpConfigStore {
     }
 
     @JvmStatic
-    fun remove(key: String) = synchronized(lock) {
+    fun remove(key: String): Unit = synchronized(lock) {
         val root = readGlobalJson() ?: return
         writeGlobal(removeServer(root, key))
     }
 
     @JvmStatic
-    fun setEnabled(key: String, enabled: Boolean) = synchronized(lock) {
+    fun setEnabled(key: String, enabled: Boolean): Unit = synchronized(lock) {
         val root = readGlobalJson() ?: return
         writeGlobal(setServerEnabled(root, key, enabled))
+    }
+
+    /** Reserved server entry managed by Sillage device control. */
+    @JvmStatic
+    fun upsertManagedServer(key: String, url: String): Unit = synchronized(lock) {
+        val root = readGlobalJson() ?: JSONObject()
+        val servers = copyTable(root.optJSONObject("mcpServers"))
+        val existing = servers.optJSONObject(key)
+        if (existing != null && existing.optString("type") == "http" && existing.optString("url") == url) {
+            return@synchronized
+        }
+        servers.put(key, JSONObject().put("type", "http").put("url", url))
+        writeGlobal(copyRoot(root).put("mcpServers", servers))
+    }
+
+    @JvmStatic
+    fun removeManagedServer(key: String): Unit = synchronized(lock) {
+        val root = readGlobalJson() ?: return@synchronized
+        val servers = copyTable(root.optJSONObject("mcpServers"))
+        if (servers.remove(key) == null) return@synchronized
+        writeGlobal(copyRoot(root).put("mcpServers", servers))
     }
 
     private val lock = Any()

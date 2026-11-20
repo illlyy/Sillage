@@ -80,7 +80,7 @@ final class TermuxInstaller {
      * $PREFIX/lib and is not preserved here on purpose: the bootstrap's lib tree does not ship it,
      * and ClaudeMuslRuntime reinstalls it from bundled assets the next time the CLI is spawned.
      */
-    private static final String[] APP_MANAGED_BINARIES = {"codex", "claude", "mihomo"};
+    private static final String[] APP_MANAGED_BINARIES = {"codex", "claude", "mihomo", "fcode-memory"};
 
     /** Performs bootstrap setup if necessary. */
     static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {

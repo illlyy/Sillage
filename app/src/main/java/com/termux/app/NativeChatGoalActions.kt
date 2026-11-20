@@ -53,6 +53,9 @@ import org.json.JSONObject
 
     internal fun CodexChatActivity.pendingPlanImplementationPreferenceKey(threadId: String): String = "native_thread_pending_plan_v1_$threadId"
 
+    internal fun shouldRestoreStoredPlan(restorePlanFromPreferences: Boolean, currentPlanJson: String): Boolean =
+        restorePlanFromPreferences || currentPlanJson.isBlank() || currentPlanJson == "[]"
+
     internal fun CodexChatActivity.threadAttention(threadId: String): String {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         val pendingInput = prefs.getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
@@ -94,14 +97,22 @@ import org.json.JSONObject
         }
     }
 
-    internal fun CodexChatActivity.restoreGoalForThread(threadId: String) {
+    internal fun CodexChatActivity.restoreGoalForThread(
+        threadId: String,
+        restorePlanFromPreferences: Boolean = true,
+    ) {
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         chatState.activeGoalObjective = prefs.getString(goalPreferenceKey(threadId), "").orEmpty()
         chatState.activeGoalStatus = prefs.getString(goalStatusPreferenceKey(threadId), "active").orEmpty()
             .takeIf { it == "active" || it == "paused" || it == "budgetLimited" } ?: "active"
         chatState.selectedMode = prefs.getString(modePreferenceKey(threadId), "default").orEmpty().takeIf { it == "plan" } ?: "default"
-        chatState.planJson = prefs.getString(planPreferenceKey(threadId), "[]").orEmpty().ifBlank { "[]" }
-        chatState.planExplanation = prefs.getString(planExplanationPreferenceKey(threadId), "").orEmpty()
+        // The rollout is authoritative for plan contents. During a resumed route the prefs are
+        // loaded before history so the panel can render immediately, but onReady fires after the
+        // history snapshot and must not blank a plan that only exists in the rollout.
+        if (shouldRestoreStoredPlan(restorePlanFromPreferences, chatState.planJson)) {
+            chatState.planJson = prefs.getString(planPreferenceKey(threadId), "[]").orEmpty().ifBlank { "[]" }
+            chatState.planExplanation = prefs.getString(planExplanationPreferenceKey(threadId), "").orEmpty()
+        }
         chatState.pendingUserInputRequest = prefs.getString(pendingUserInputPreferenceKey(threadId), "").orEmpty()
         chatState.pendingApprovalRequest = prefs.getString(pendingApprovalPreferenceKey(threadId), "").orEmpty()
         chatState.pendingPlanImplementation = prefs.getString(pendingPlanImplementationPreferenceKey(threadId), "").orEmpty()

@@ -47,6 +47,36 @@ public class NativeHistorySnapshotTest {
     }
 
     @Test
+    public void keepsAttachmentOnlyUserTurns() throws Exception {
+        JSONArray history = new JSONArray()
+            .put(new JSONObject().put("role", "user").put("content", "")
+                .put("attachments", new JSONArray().put(new JSONObject()
+                    .put("name", "photo.png").put("path", "/tmp/photo.png").put("image", true))))
+            .put(new JSONObject().put("role", "assistant").put("content", "seen"));
+
+        NativeHistorySnapshot snapshot = NativeHistoryParser.parse(history);
+
+        assertEquals(2, snapshot.getMessages().size());
+        assertEquals(NativeChatRole.USER, snapshot.getMessages().get(0).getRole());
+        assertEquals("", snapshot.getMessages().get(0).getContent());
+        assertEquals(1, snapshot.getMessages().get(0).getAttachments().size());
+    }
+
+    @Test
+    public void filtersInternalUserContextWithoutRelyingOnTheCodexAdapter() throws Exception {
+        JSONArray history = new JSONArray()
+            .put(new JSONObject().put("role", "user")
+                .put("content", "<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>"))
+            .put(new JSONObject().put("role", "user").put("content", "visible prompt"))
+            .put(new JSONObject().put("role", "assistant").put("content", "answer"));
+
+        NativeHistorySnapshot snapshot = NativeHistoryParser.parse(history);
+
+        assertEquals(2, snapshot.getMessages().size());
+        assertEquals("visible prompt", snapshot.getMessages().get(0).getContent());
+    }
+
+    @Test
     public void extractsPlanWithoutKeepingProtocolMessage() throws Exception {
         JSONObject plan = new JSONObject()
             .put("plan", new JSONArray().put(new JSONObject().put("step", "Inspect").put("status", "pending")))

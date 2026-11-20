@@ -92,6 +92,16 @@ adb shell input text "hello"     # 输入 ASCII（先点输入框聚焦，等 ~3
 adb shell screencap -p /sdcard/x.png && adb pull /sdcard/x.png
 ```
 
+### 设备控制真机调试（可选）
+
+设备控制使用 Shizuku，不要求在 App 内再安装 adb 客户端：
+
+1. 安装并启动 Shizuku。MediaTek / HyperOS 设备请优先使用 **Shizuku 13.5.4**；13.6.0 在该组合上存在已知的 UserService 启动 NPE。
+2. 打开 Sillage → 设置 → 设备控制，启用功能，授予 Shizuku、悬浮窗或通知权限。
+3. 在聊天里直接要求 AI 操作手机；AI 会调用 `device_control_start` 自行开启 5–30 分钟会话，红色悬浮条可随时停止。
+4. 调试连接：`adb shell ps -A | findstr shizuku` 应能看到 `shizuku_server` 和 `com.ilyop.codex:device_control`；`adb shell dumpsys activity services com.ilyop.codex` 可确认设备控制前台服务。
+5. shell 工具必须逐次确认；通知被关闭或“AI 设备命令”渠道被静音时，shell 会返回 `NOTIFICATION_REQUIRED`，不会静默执行。
+
 ## 7. 常见问题
 
 - **`JAVA_HOME` 未设置 / 版本不对** → `./gradlew` 立即报 `Unable to locate a Java Runtime`。设 `JAVA_HOME` 到 JDK 17。

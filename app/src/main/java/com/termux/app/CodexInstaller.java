@@ -28,6 +28,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
@@ -235,10 +236,28 @@ final class CodexInstaller {
         Toast.makeText(context, "测试版暂未启用共享存储映射", Toast.LENGTH_SHORT).show();
     }
 
+    /** Marker written only after the whole tool setup succeeds; also read by the self-check page. */
+    static File environmentMarker() {
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".codex-mobile-environment-v1");
+    }
+
+    /**
+     * One-time provisioning of the recommended tool set.
+     *
+     * This used to shell out to `apt-get install`, which can never work here: Termux debs embed
+     * `./data/data/com.termux/...` paths and this app relocates the prefix to
+     * `/data/data/com.ilyop.codex/xusr`, so dpkg aborts with
+     * "unable to stat './data/data/com.termux' (which was about to be installed): Permission denied".
+     * The marker was therefore never written and git/node/python stayed missing forever on devices
+     * that never opened the WebUI.
+     *
+     * [DevelopmentToolInstaller.installAptTools] already handles this: it downloads the debs,
+     * extracts them, rewrites the embedded prefix, rebuilds them, and only then hands them to dpkg.
+     */
     static void setupDevelopmentExtensions(final Activity activity, final Runnable whenDone) {
-        File marker = new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".codex-mobile-environment-v1");
+        final File marker = environmentMarker();
         if (marker.exists()) {
-            whenDone.run();
+            if (whenDone != null) whenDone.run();
             return;
         }
 
@@ -248,75 +267,79 @@ final class CodexInstaller {
             "正在准备开发环境",
             "将安装 Git、Python、Node.js 等常用工具，这可能需要几分钟。"
         );
-        progress.showStage("正在安装工具", "更新软件源并配置 Termux 开发环境…");
+        progress.showStage("正在安装工具", "更新软件源并下载软件包…");
 
-        new Thread(() -> {
-            File log = new File(TermuxConstants.TERMUX_HOME_DIR_PATH, "codex-environment-setup.log");
-            try {
-                File script = writeEnvironmentSetupScript(marker);
-                ProcessBuilder builder = new ProcessBuilder(
-                    TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + "/bash", script.getAbsolutePath());
-                builder.environment().put("HOME", TermuxConstants.TERMUX_HOME_DIR_PATH);
-                builder.environment().put("PREFIX", TermuxConstants.TERMUX_PREFIX_DIR_PATH);
-                builder.environment().put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin");
-                builder.redirectErrorStream(true);
-                Process setupProcess = builder.start();
-                try (InputStream input = setupProcess.getInputStream();
-                     FileOutputStream output = new FileOutputStream(log, true)) {
-                    byte[] buffer = new byte[8 * 1024];
-                    int count;
-                    while ((count = input.read(buffer)) >= 0) {
-                        if (count > 0) output.write(buffer, 0, count);
-                    }
-                }
-                int exitCode = setupProcess.waitFor();
-                if (exitCode != 0) throw new IOException("Environment setup exited with code " + exitCode + ". Log: " + log.getAbsolutePath());
+        final java.util.List<DevelopmentTool> tools = new java.util.ArrayList<>();
+        for (DevelopmentTool tool : DevelopmentToolCatalog.INSTANCE.getTools()) {
+            if (tool.getRecommended()) tools.add(tool);
+        }
+        if (tools.isEmpty()) {
+            progress.dismiss();
+            if (whenDone != null) whenDone.run();
+            return;
+        }
+        DevelopmentToolInstaller.INSTANCE.installAptTools(
+            activity,
+            tools,
+            (stage, detail) -> {
+                activity.runOnUiThread(() -> {
+                    if (canShowUi(activity)) progress.showStage("正在安装工具", detail);
+                });
+                return kotlin.Unit.INSTANCE;
+            },
+            (installed, log) -> {
                 activity.runOnUiThread(() -> {
                     progress.dismiss();
-                    if (!canShowUi(activity)) return;
-                    Toast.makeText(activity, "Termux 开发环境已就绪", Toast.LENGTH_LONG).show();
+                    try (FileOutputStream out = new FileOutputStream(marker)) {
+                        out.write("ready\n".getBytes(StandardCharsets.UTF_8));
+                    } catch (Exception error) {
+                        Log.w(TAG, "Unable to write environment marker: " + error.getMessage());
+                    }
+                    if (canShowUi(activity)) {
+                        Toast.makeText(activity, "Termux 开发环境已就绪", Toast.LENGTH_LONG).show();
+                    }
                     if (whenDone != null) whenDone.run();
                 });
-            } catch (Exception error) {
-                Log.e(TAG, "Development environment setup failed: " + error.getClass().getSimpleName());
+                return kotlin.Unit.INSTANCE;
+            },
+            (message, log) -> {
+                String logLine = lastLogLine(log);
                 activity.runOnUiThread(() -> {
                     progress.dismiss();
                     if (!canShowUi(activity)) return;
                     new MaterialAlertDialogBuilder(activity)
                         .setIcon(R.drawable.ic_codex_logo)
                         .setTitle("开发环境未完成")
-                        .setMessage("工具安装过程中出现问题。Codex CLI 仍可正常使用，你可以稍后再试。")
+                        .setMessage("工具安装过程中出现问题。Codex CLI 仍可正常使用，你可以稍后再试。"
+                            + (logLine.isEmpty() ? "" : "\n\n" + logLine))
                         .setNegativeButton("稍后", (dialog, which) -> { if (whenDone != null) whenDone.run(); })
                         .setPositiveButton("重试", (dialog, which) ->
                             activity.getWindow().getDecorView().post(() -> setupDevelopmentExtensions(activity, whenDone)))
                         .show();
                 });
+                return kotlin.Unit.INSTANCE;
             }
-        }, "CodexEnvironmentInstaller").start();
+        );
     }
 
-    private static File writeEnvironmentSetupScript(File marker) throws IOException {
-        File script = new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".codex-mobile-setup-environment.sh");
-        File tempMarker = new File(marker.getAbsolutePath() + ".tmp");
-        String contents = "#!/data/data/com.ilyop.codex/xusr/bin/bash\n" +
-            "set -euo pipefail\n" +
-            "export DEBIAN_FRONTEND=noninteractive\n" +
-            "export APT_LISTCHANGES_FRONTEND=none\n" +
-            "printf 'deb https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main stable main\n' > \"$PREFIX/etc/apt/sources.list\"\n" +
-            "apt-get update\n" +
-            "apt-get -o Dpkg::Options::=--force-confold upgrade -y\n" +
-            "apt-get install -y git curl wget openssh python nodejs-lts clang make cmake ninja pkg-config jq ripgrep fd findutils coreutils diffutils patch tar unzip zip gzip sed grep less nano vim tmux procps openssl\n" +
-            "for package in rust golang man; do apt-get install -y \"$package\" || printf 'Optional package unavailable: %s\\n' \"$package\"; done\n" +
-            "python -m pip install --upgrade setuptools wheel || true\n" +
-            "printf 'ready\n' > '" + tempMarker.getAbsolutePath() + "'\n" +
-            "mv '" + tempMarker.getAbsolutePath() + "' '" + marker.getAbsolutePath() + "'\n";
-        try (FileOutputStream out = new FileOutputStream(script)) {
-            out.write(contents.getBytes(StandardCharsets.UTF_8));
+    /** Last non-empty line of the tool log, so the failure dialog names the actual cause. */
+    private static String lastLogLine(File log) {
+        try (RandomAccessFile file = new RandomAccessFile(log, "r")) {
+            long length = file.length();
+            if (length <= 0) return "";
+            int window = (int) Math.min(4096L, length);
+            byte[] bytes = new byte[window];
+            file.seek(length - window);
+            file.readFully(bytes);
+            String[] lines = new String(bytes, StandardCharsets.UTF_8).split("\\R");
+            for (int index = lines.length - 1; index >= 0; index--) {
+                String line = lines[index].trim();
+                if (line.isEmpty()) continue;
+                return line.length() > 220 ? line.substring(0, 220) + "…" : line;
+            }
+        } catch (Exception ignored) {
         }
-        if (!script.setExecutable(true, false) && !script.canExecute()) {
-            throw new IOException("Cannot mark environment setup script executable");
-        }
-        return script;
+        return "";
     }
 
     private static boolean canShowUi(Activity activity) {

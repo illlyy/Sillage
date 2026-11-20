@@ -38,6 +38,9 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Far past any healthy history handshake; see `scheduleHistoryLoadWatchdog`. */
+private const val HISTORY_LOAD_TIMEOUT_MS = 20_000L
+
 
     internal fun CodexChatActivity.refreshConversations() {
         // The overlay_tasks_v1 preference listener fires synchronously on whichever thread wrote
@@ -99,18 +102,16 @@ import org.json.JSONObject
                 backend != NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) ||
                 isFinishing || isDestroyed) return@runOnUiThread
             android.util.Log.d("IlyopCodexTasks", "apply generation=$generation backend=$backend count=${conversations.size} first=${conversations.firstOrNull()?.title}")
-            // Skip pointless re-clears: background task-state writes fire refreshes repeatedly and
-            // the list only changes when thread ids/titles differ. Re-clearing identical content is
-            // what made the drawer flash empty between same-backend refreshes.
+            // Skip pointless re-clears only when every visible field is unchanged. Comparing just
+            // ids/titles used to drop running -> completed transitions and favorite/attention
+            // updates, leaving stale spinners and badges in the drawer.
             val current = chatState.conversations
-            if (current.size == conversations.size && current.indices.all { index ->
-                    current[index].threadId == conversations[index].threadId && current[index].title == conversations[index].title
-                }
-            ) return@runOnUiThread
+            if (current == conversations) return@runOnUiThread
             chatState.conversations.clear()
             chatState.conversations.addAll(conversations)
-            conversations.firstOrNull { it.threadId == currentThreadId }?.projectPath?.takeIf { it.isNotBlank() }?.let {
-                chatState.projectPath = it
+            conversations.firstOrNull { it.threadId == currentThreadId }?.let { conversation ->
+                conversation.projectPath.takeIf { it.isNotBlank() }?.let { chatState.projectPath = it }
+                conversation.title.takeIf { it.isNotBlank() }?.let { chatState.conversationTitle = it }
             }
         }
     }
@@ -155,6 +156,7 @@ import org.json.JSONObject
             if (ClaudeNativeRuntime.exists()) ClaudeNativeRuntime.shutdown()
         }
         bridge = null
+        pendingNewConversationPersonaId = NativePersonaStore.activeId(getSharedPreferences("codex_mobile", MODE_PRIVATE))
         startBackend()
         newConversationAtProject("")
         if (cutShortBySwitch) {
@@ -206,6 +208,16 @@ import org.json.JSONObject
             .remove(pendingUserInputPreferenceKey(conversation.threadId))
             .remove(pendingApprovalPreferenceKey(conversation.threadId))
             .remove(pendingPlanImplementationPreferenceKey(conversation.threadId))
+            .apply()
+        NativePersonaStore.setThreadPersona(this, conversation.threadId, "")
+        NativeActiveThreadStore.clearIfMatches(
+            this,
+            NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)),
+            conversation.threadId,
+        )
+        NativeConversationJournal.delete(this, conversation.threadId)
+        getSharedPreferences("codex_mobile", MODE_PRIVATE).edit()
+            .remove(threadChatDraftKey(conversation.threadId))
             .apply()
         CodexTaskStore.delete(this, conversation.threadId)
         refreshConversations()
@@ -279,7 +291,14 @@ import org.json.JSONObject
     }
 
     internal fun CodexChatActivity.resumeConversation(threadId: String, retainedRuntime: Boolean = false) {
+        turnFirstActivityWatchdog?.let(streamHandler::removeCallbacks)
+        turnFirstActivityWatchdog = null
         detachNativeContinuationHintBeforeRouteChange(threadId)
+        pendingNewConversationPersonaId = ""
+        val personaPrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        if (NativePersonaStore.threadPersonaId(personaPrefs, threadId).isBlank()) {
+            NativePersonaStore.setThreadPersona(this, threadId, NativePersonaStore.DEFAULT_ID)
+        }
         pendingNativeSteers.clear()
         cancelGoalAutoRetry()
         goalRetryCycleActive = false
@@ -290,6 +309,11 @@ import org.json.JSONObject
         subagentRouteGeneration = CodexChatActivity.subagentRouteCounter.incrementAndGet()
         subagentHistoryAttempts.clear()
         currentThreadId = threadId
+        NativeActiveThreadStore.remember(
+            this,
+            NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)),
+            threadId,
+        )
         notificationTargetThreadId = ""
         NativeTaskNotificationManager.markSeen(this, threadId)
         NativeTaskNotificationManager.setForegroundThread(this, threadId)
@@ -313,8 +337,15 @@ import org.json.JSONObject
         displayedHistorySnapshot = null
         chatState.resetConversation()
         chatState.currentThreadId = threadId
+        // Restore per-thread goal/plan state before history arrives. Waiting for onReady made the
+        // work panel depend on a live backend handshake and let a fresh snapshot overwrite the
+        // cached plan while an Activity was recreated in the background.
+        restoreGoalForThread(threadId)
         chatState.projectPath = selectedConversation?.projectPath.orEmpty()
+        chatState.input = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+            .getString(threadChatDraftKey(threadId), "").orEmpty()
         chatState.historyLoading = true
+        chatState.historyLoadFailed = false
         // Commit the lightweight route before any cached messages. The screen can render its
         // loading shell in one frame instead of attaching history and changing route together.
         chatState.conversationAnimationKey = threadId
@@ -342,14 +373,37 @@ import org.json.JSONObject
         } else {
             bridge?.resumeConversation(threadId) ?: -1
         }
+        scheduleHistoryLoadWatchdog(threadId, expectedHistoryGeneration)
         if (isClaude) {
             // Claude has no onHistoryPrepared; load a lightweight transcript snapshot instead.
             val routeGeneration = expectedHistoryGeneration
             Thread {
-                val snapshot = ClaudeHistoryAdapter.loadSnapshot(this, threadId)
-                if (snapshot == null) return@Thread
+                val backendSnapshot = ClaudeHistoryAdapter.loadSnapshot(this, threadId)
+                val snapshot = NativeConversationJournal.recover(
+                    this,
+                    threadId,
+                    backendSnapshot ?: NativeHistorySnapshot(messages = emptyList(), estimatedChars = 0),
+                )
                 runOnUiThread {
-                    if (currentThreadId != threadId || expectedHistoryGeneration != routeGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                    if (currentThreadId != threadId || expectedHistoryGeneration != routeGeneration || isFinishing || isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    if (snapshot.messages.isEmpty()) {
+                        // No transcript for this id and no app journal fallback. The CLI session was
+                        // pruned elsewhere, or the resume never landed.
+                        NativeChatDiagnostics.record(this, "history_snapshot_missing", JSONObject()
+                            .put("thread", threadId.take(8))
+                            .put("backend", "claude"))
+                        Toast.makeText(
+                            this,
+                            nativeText(
+                                nativeLanguage,
+                                "这个会话在本机没有记录，已按空会话打开",
+                                "No local record for this conversation; opened it empty",
+                            ),
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
                     applyPreparedHistory(threadId, snapshot, fresh = true)
                 }
             }.apply { name = "ClaudeHistoryLoad" }.start()
@@ -373,7 +427,25 @@ import org.json.JSONObject
 
     internal fun CodexChatActivity.newConversation() = newConversationAtProject("")
 
+    /** Persona-first entry point: the next backend thread is permanently bound to this owner. */
+    internal fun CodexChatActivity.newConversationForPersona(personaId: String) {
+        val persona = NativePersonaStore.find(this, personaId) ?: return
+        NativePersonaStore.setActive(this, persona.id)
+        pendingNewConversationPersonaId = persona.id
+        newConversationAtProject("")
+    }
+
     internal fun CodexChatActivity.newConversationAtProject(requestedProjectPath: String) {
+        turnFirstActivityWatchdog?.let(streamHandler::removeCallbacks)
+        turnFirstActivityWatchdog = null
+        if (pendingNewConversationPersonaId.isBlank()) {
+            pendingNewConversationPersonaId = NativePersonaStore.effectiveId(this, currentThreadId)
+        }
+        if (pendingNewConversationPersonaId.isNotBlank()) {
+            // The backend captures developerInstructions during thread/start, before the new
+            // thread id exists. Keep the global "new chat" persona in sync with the route owner.
+            NativePersonaStore.setActive(this, pendingNewConversationPersonaId)
+        }
         // Project creation/registration enters through this callback. Re-evaluate cached legacy
         // cwd values now so old tasks migrate in the same process instead of waiting for restart.
         if (requestedProjectPath.isNotBlank()) refreshConversations()
@@ -390,6 +462,10 @@ import org.json.JSONObject
         subagentHistoryAttempts.clear()
         pendingCachedHistoryThreadId = null
         pendingCachedHistorySnapshot = null
+        NativeActiveThreadStore.clear(
+            this,
+            NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)),
+        )
         currentThreadId = null
         expectedHistoryGeneration = -1
         displayedHistorySnapshot = null
@@ -407,9 +483,51 @@ import org.json.JSONObject
             + " resolved=" + chatState.projectPath
             + " fallbackToDefault=" + chatState.projectPath.isEmpty())
         chatState.conversationTitle = "新对话"
+        val draftPrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        chatState.input = draftPrefs.getString(newChatDraftKey(pendingNewConversationPersonaId), null)
+            ?: draftPrefs.getString(LEGACY_NEW_CHAT_DRAFT_KEY, "").orEmpty()
         chatState.ready = false
         chatState.connectionLabel = "正在创建新对话…"
         bridge?.newConversationAtCwd(chatState.projectPath.ifBlank { TermuxConstants.TERMUX_HOME_DIR_PATH })
+    }
+
+    /**
+     * Guards the history route against a lost response.
+     *
+     * Both backends answer a resume with a notification, and a bridge restart in the middle of
+     * that handshake drops it. `historyLoading` then stays true for the whole session: the chat
+     * shows a spinner over an empty thread and, on the Codex path, every queued message is gated
+     * behind it. Twenty seconds is far past any healthy load, so on expiry we stop pretending and
+     * tell the user to retry instead of spinning forever.
+     */
+    private fun CodexChatActivity.scheduleHistoryLoadWatchdog(threadId: String, generation: Int) {
+        streamHandler.postDelayed({
+            if (currentThreadId != threadId || expectedHistoryGeneration != generation) return@postDelayed
+            if (!chatState.historyLoading) return@postDelayed
+            NativeChatDiagnostics.record(this, "history_load_timeout", JSONObject()
+                .put("thread", threadId.take(8))
+                .put("messages", chatState.messages.size))
+            chatState.historyLoading = false
+            chatState.historyLoadFailed = chatState.messages.isEmpty()
+            if (chatState.messages.isNotEmpty()) {
+                Toast.makeText(
+                    this,
+                    nativeText(
+                        nativeLanguage,
+                        "会话记录刷新超时，已保留本地快照",
+                        "History refresh timed out; the local snapshot is still available",
+                    ),
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }, HISTORY_LOAD_TIMEOUT_MS)
+    }
+
+    /** User-initiated retry after the history handshake timed out. Main thread only. */
+    internal fun CodexChatActivity.retryConversationHistory() {
+        val threadId = currentThreadId?.takeIf { it.isNotBlank() } ?: return
+        if (chatState.busy) return
+        resumeConversation(threadId)
     }
 
     internal fun CodexChatActivity.consumePendingCachedHistory(threadId: String): NativeHistorySnapshot? {
@@ -453,6 +571,7 @@ import org.json.JSONObject
             }
         }
         if (fresh) {
+            chatState.historyLoadFailed = false
             if (!preserveCachedSnapshot && !unchangedFreshSnapshot) {
                 NativeHistorySnapshotCache.put(threadId, preparedSnapshot)
             }

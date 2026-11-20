@@ -798,7 +798,9 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                 File sessionsRoot = new File(new File(TermuxConstants.TERMUX_HOME_DIR, ".codex"), "sessions");
                 File sessionFile = CodexAppServerBridgeHistory.findSessionFile(sessionsRoot, requestedThread);
                 JSONArray history = sessionFile == null ? new JSONArray() : CodexAppServerBridgeHistory.readConversationHistory(sessionFile);
-                NativeHistorySnapshot historySnapshot = NativeHistoryParser.parse(history);
+                NativeHistorySnapshot parsedHistory = NativeHistoryParser.parse(history);
+                final NativeHistorySnapshot historySnapshot =
+                    NativeConversationJournal.recover(appContext, requestedThread, parsedHistory);
                 NativeChatDiagnostics.record(appContext, "history_prepared", CodexAppServerBridgeProtocol.navigationDetails(generation, CodexAppServerBridgeProtocol.shortId(requestedThread))
                     .put("messages", historySnapshot.getMessages().size())
                     .put("estimatedChars", historySnapshot.getEstimatedChars())
@@ -839,8 +841,10 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                     // Live output is more useful than a permanently blank route, so fail-open the
                     // gate before surfacing the explicit history error.
                     try {
+                        NativeHistorySnapshot journalFallback = NativeConversationJournal.recover(
+                            appContext, requestedThread, emptySnapshot);
                         if (eventListener != null) eventListener.onHistoryPrepared(
-                            requestedThread, generation, emptySnapshot);
+                            requestedThread, generation, journalFallback);
                     } catch (Exception callbackError) {
                         Log.w(TAG, "Unable to apply empty history fallback", callbackError);
                     }
@@ -909,6 +913,7 @@ final class CodexAppServerBridge extends NativeBackendBridge {
             if (deferResumeUntilInitialized(requestedThread, generation)) return;
             JSONObject resumeParams = new JSONObject().put("threadId", requestedThread);
             CodexAppServerBridgeProtocol.applyNativeMcpConfig(resumeParams);
+            applyPersonaInstructions(resumeParams, requestedThread);
             String permissionMode = configuredPermissionMode();
             NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
             Log.i(TAG, "RESUME_PERMISSIONS mode=" + permissionMode + " sandbox="
@@ -1252,13 +1257,10 @@ final class CodexAppServerBridge extends NativeBackendBridge {
     }
 
     private String configuredCwd() {
-        String cwd = TermuxConstants.TERMUX_HOME_DIR_PATH;
         android.content.SharedPreferences mobile = appContext.getSharedPreferences("codex_mobile", Context.MODE_PRIVATE);
-        if (mobile.getBoolean("custom_project_root_enabled", true)) {
-            String configured = mobile.getString("custom_project_root", "/storage/emulated/0/");
-            if (configured != null && new File(configured).isDirectory()) cwd = configured;
-        }
-        return cwd;
+        // Requires a writable directory, not just an existing one: without storage permission
+        // /storage/emulated/0/ still passes isDirectory() but fails every file operation.
+        return NativeWorkspace.resolvePath(mobile);
     }
 
     private String configuredPermissionMode() {
@@ -1271,6 +1273,7 @@ final class CodexAppServerBridge extends NativeBackendBridge {
     private void sendThreadStart(String requestedCwd) throws Exception {
         JSONObject params = new JSONObject();
         CodexAppServerBridgeProtocol.applyNativeMcpConfig(params);
+        applyPersonaInstructions(params, null);
         String mode = configuredPermissionMode();
         String configured = configuredCwd();
         String cwd = requestedCwd == null || requestedCwd.trim().isEmpty() ? configured : requestedCwd.trim();
@@ -1289,6 +1292,24 @@ final class CodexAppServerBridge extends NativeBackendBridge {
         else sendRequest("thread/start", params);
     }
 
+
+    /**
+     * Injects the persona + memory preamble as Codex `developerInstructions`.
+     *
+     * `thread/start` and `thread/resume` both accept the field (the bundled CLI advertises
+     * `developerInstructions` in its protocol), so switching persona takes effect on the next
+     * (re)connect of a conversation instead of requiring a new thread.
+     */
+    private void applyPersonaInstructions(JSONObject params, String threadId) {
+        try {
+            String prompt = NativePersonaPrompt.INSTANCE.build(appContext, threadId);
+            if (prompt != null && !prompt.trim().isEmpty()) {
+                params.put("developerInstructions", prompt);
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "Unable to build persona instructions", error);
+        }
+    }
 
     private int sendNavigationRequest(String method, JSONObject params, int generation) throws Exception {
         int id = nextId.getAndIncrement();
@@ -1528,6 +1549,7 @@ final class CodexAppServerBridge extends NativeBackendBridge {
                     && deferredThread.equals(visibleThreadId)) {
                 JSONObject resumeParams = new JSONObject().put("threadId", deferredThread);
                 CodexAppServerBridgeProtocol.applyNativeMcpConfig(resumeParams);
+                applyPersonaInstructions(resumeParams, deferredThread);
                 String permissionMode = configuredPermissionMode();
                 NativePermissionMode.applyThreadParams(resumeParams, permissionMode, configuredCwd());
                 sendNavigationRequest("thread/resume", resumeParams, deferredGeneration);

@@ -11,7 +11,7 @@ import androidx.compose.runtime.setValue
  */
 internal enum class SettingsPage {
     ROOT, APPEARANCE, THEME, CHAT_APPEARANCE, CHAT_BACKGROUND, TYPOGRAPHY,
-    MCP, MCP_EDITOR, SKILLS,
+    MCP, MCP_EDITOR, SKILLS, ENVIRONMENT, PERSONA, DEVICE_CONTROL,
     OVERLAY, DEVELOPMENT_TOOLS, MODEL_CONFIGS, MODEL_EDITOR, CLAUDE_EDITOR, WEB_UI, PROXY,
     DEVELOPER, LOGS, ABOUT,
 }
@@ -19,7 +19,7 @@ internal enum class SettingsPage {
 internal val SettingsPage.navigationDepth: Int
     get() = when (this) {
         SettingsPage.ROOT -> 0
-        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
+        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS, SettingsPage.ENVIRONMENT, SettingsPage.PERSONA, SettingsPage.DEVICE_CONTROL,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
         SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
         SettingsPage.LOGS, SettingsPage.ABOUT -> 1
@@ -35,7 +35,7 @@ internal val SettingsPage.previousPage: SettingsPage?
         SettingsPage.MCP_EDITOR -> SettingsPage.MCP
         SettingsPage.CHAT_BACKGROUND -> SettingsPage.THEME
         SettingsPage.THEME, SettingsPage.CHAT_APPEARANCE -> SettingsPage.APPEARANCE
-        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS,
+        SettingsPage.APPEARANCE, SettingsPage.MCP, SettingsPage.SKILLS, SettingsPage.ENVIRONMENT, SettingsPage.PERSONA, SettingsPage.DEVICE_CONTROL,
         SettingsPage.OVERLAY, SettingsPage.DEVELOPMENT_TOOLS, SettingsPage.MODEL_CONFIGS,
         SettingsPage.WEB_UI, SettingsPage.PROXY, SettingsPage.DEVELOPER, SettingsPage.TYPOGRAPHY,
         SettingsPage.LOGS, SettingsPage.ABOUT -> SettingsPage.ROOT

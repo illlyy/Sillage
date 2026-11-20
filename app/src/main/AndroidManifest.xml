@@ -64,6 +64,12 @@
             android:screenOrientation="portrait"
             android:theme="@style/Theme.CodexMobile" />
         <activity
+            android:name=".app.DeviceShellApprovalActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.CodexMobile" />
+
+        <activity
             android:name=".app.CodexChatActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|uiMode|keyboard|keyboardHidden|navigation"
             android:exported="true"
@@ -205,6 +211,15 @@
                 android:resource="@xml/log_file_paths" />
         </provider>
 
+        <!-- Shizuku/Sui bridge. The provider is protected by the platform signature permission. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
         <receiver android:name=".app.TermuxOpenReceiver" android:exported="false" />
 
         <receiver android:name=".shared.activities.ReportActivity$ReportActivityBroadcastReceiver" android:exported="false" />
@@ -216,6 +231,25 @@
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false" />
+
+        <service
+            android:name=".app.DeviceControlSessionService"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+        <!-- Hidden bridge IME used only to commit Unicode text during an AI control session. -->
+        <service
+            android:name=".app.SillageDeviceImeService"
+            android:exported="true"
+            android:label="Sillage AI input"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/device_ime" />
+        </service>
 
         <service
             android:name=".app.TermuxService"

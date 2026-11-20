@@ -335,6 +335,21 @@ internal object DevelopmentToolInstaller {
                             "install", "--download-only", "--reinstall", "-y",
                         ) + packages,
                     )
+                    // The bootstrap ships a dpkg database that already lists base libraries, and
+                    // `--reinstall` above honours those pins. That leaves libc++ at the version that
+                    // shipped with the bootstrap, while node 24 is linked against the newer one
+                    // (std::__ndk1::__hash_memory), so `node --version` dies with
+                    // CANNOT LINK EXECUTABLE "node": cannot locate symbol "_ZNSt6__ndk113__hash_memoryEPKvm".
+                    // Pulling the candidate version explicitly keeps the two in sync.
+                    runCommand(
+                        activity, writer, onProgress, "更新核心库",
+                        listOf(
+                            "$bin/apt-get",
+                            "-o", "Dir::Cache::archives=${downloadDir.absolutePath}",
+                            "install", "--download-only", "--only-upgrade", "-y", "libc++",
+                        ),
+                        allowFailure = true,
+                    )
                     val archives = downloadDir.listFiles { file -> file.extension == "deb" }
                         ?.sortedBy { it.name }
                         .orEmpty()
@@ -411,12 +426,13 @@ internal object DevelopmentToolInstaller {
         writer.appendLine("\$ ${command.joinToString(" ")}")
         writer.flush()
         val builder = ProcessBuilder(command)
-        builder.environment()["HOME"] = TermuxConstants.TERMUX_HOME_DIR_PATH
-        builder.environment()["PREFIX"] = TermuxConstants.TERMUX_PREFIX_DIR_PATH
-        builder.environment()["TMPDIR"] = TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH
-        builder.environment()["PATH"] = "${TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH}:/system/bin"
-        builder.environment()["DEBIAN_FRONTEND"] = "noninteractive"
-        builder.environment()["APT_LISTCHANGES_FRONTEND"] = "none"
+        NativeProcessEnv.apply(
+            builder,
+            mapOf(
+                "DEBIAN_FRONTEND" to "noninteractive",
+                "APT_LISTCHANGES_FRONTEND" to "none",
+            ),
+        )
         builder.redirectErrorStream(true)
         val started = builder.start()
         process = started

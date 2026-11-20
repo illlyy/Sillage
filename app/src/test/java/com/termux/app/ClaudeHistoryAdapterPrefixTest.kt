@@ -117,6 +117,22 @@ class ClaudeHistoryAdapterPrefixTest {
     }
 
     @Test
+    fun dropsInternalTurnAbortedContext() {
+        assertEquals(
+            "",
+            visibleUserPrompt(
+                "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+            ),
+        )
+        assertEquals(
+            "",
+            visibleUserPrompt(
+                "<codex_internal_context source=\"goal\">\nContinue working toward the active goal.\n</codex_internal_context>",
+            ),
+        )
+    }
+
+    @Test
     fun keepsAnOrdinaryMessageThatMentionsTheTags() {
         val text = "Why does my transcript contain a command-name tag?"
         assertEquals(text, visibleUserPrompt(text))

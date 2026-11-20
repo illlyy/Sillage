@@ -217,8 +217,9 @@ internal fun McpSettingsPage(
                     item { SettingsSection(tr(lang, "\u670d\u52a1\u5668", "Servers")) }
                     items(snapshot.servers, key = { it.key }) { server ->
                         val runtimeStatus = snapshot.statuses[server.key] ?: NativeMcpRuntimeStatus()
+                        val managed = server.key == DeviceControlMcpRegistry.MANAGED_SERVER_KEY
                         Card(
-                            onClick = { onEdit(server.key) },
+                            onClick = { if (!managed) onEdit(server.key) },
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
                             shape = RoundedCornerShape(20.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -230,13 +231,13 @@ internal fun McpSettingsPage(
                                         Text(server.key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                                         Spacer(Modifier.width(8.dp))
                                         Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
-                                            Text(if (server.isHttp) "HTTP" else "STDIO", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
+                                            Text(if (managed) "\u5185\u7f6e" else if (server.isHttp) "HTTP" else "STDIO", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
                                         }
                                         Spacer(Modifier.width(6.dp))
                                         McpRuntimeStatusBadge(lang, runtimeStatus)
                                     }
                                     Text(
-                                        if (server.isHttp) server.url else listOf(server.command, server.args.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" "),
+                                        if (managed) "127.0.0.1 loopback · token hidden" else if (server.isHttp) server.url else listOf(server.command, server.args.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" "),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 2,
@@ -260,12 +261,12 @@ internal fun McpSettingsPage(
                                     )
                                 }
                                 Switch(server.enabled, onCheckedChange = { enabled ->
-                                    scope.launch {
+                                    if (!managed) scope.launch {
                                         runCatching { withContext(kotlinx.coroutines.Dispatchers.IO) { NativeMcpStoreFacade.setEnabled(prefs, server.key, enabled) } }
                                             .onSuccess { markChanged() }
                                             .onFailure { Toast.makeText(context, it.message, Toast.LENGTH_LONG).show() }
                                     }
-                                })
+                                }, enabled = !managed)
                             }
                         }
                     }

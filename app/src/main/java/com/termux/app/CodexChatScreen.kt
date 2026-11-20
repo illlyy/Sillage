@@ -407,8 +407,10 @@ internal fun NativeChatScreen(
     onFollowUpActionChange: (NativeFollowUpSubmitAction) -> Unit,
     onRemoveQueuedFollowUp: (String) -> Unit,
     onNewConversation: () -> Unit,
+    onNewConversationForPersona: (String) -> Unit,
     onNewConversationAtProject: (String) -> Unit,
     onResumeConversation: (String) -> Unit,
+    onRetryHistory: () -> Unit,
     onUiMotionChanged: (Boolean) -> Unit,
     onRefreshConversations: () -> Unit,
     onLoadSubagentHistory: (String) -> Unit,
@@ -441,6 +443,13 @@ internal fun NativeChatScreen(
 ) {
     val context = LocalContext.current
     val language = LocalNativeLanguage.current
+    val personaRevision = NativePersonaStore.revision
+    val activePersona = remember(personaRevision, state.currentThreadId) {
+        NativePersonaStore.effective(context, state.currentThreadId.ifBlank { null })
+    }
+    val activePersonaLabel = remember(activePersona) {
+        "${activePersona.emoji.ifBlank { "✦" }} ${activePersona.name}".trim()
+    }
     val interfaceStyle = LocalFcodeInterfaceStyle.current
     val appearanceRevision = LocalFcodeAppearanceRevision.current
     val topBarGlassConfig = remember(appearanceRevision, context) { readTopBarLiquidGlassConfig(context) }
@@ -466,7 +475,8 @@ internal fun NativeChatScreen(
         androidx.compose.foundation.lazy.LazyListState(initialLastItem, Int.MAX_VALUE)
     }
     val conversationSurfaceStage = when {
-        state.historyLoading && state.messages.isEmpty() && state.currentThreadId.isNotBlank() -> "loading"
+        (state.historyLoading || state.historyLoadFailed) &&
+            state.messages.isEmpty() && state.currentThreadId.isNotBlank() -> "loading"
         state.messages.isEmpty() -> "empty"
         else -> "messages"
     }
@@ -762,6 +772,20 @@ internal fun NativeChatScreen(
                             }
                         }
                     },
+                    onNewConversationForPersona = { personaId ->
+                        if (pendingConversationThreadId == null) {
+                            pendingConversationThreadId = ""
+                            scope.launch {
+                                try {
+                                    drawerState.close()
+                                    withFrameNanos { }
+                                    onNewConversationForPersona(personaId)
+                                } finally {
+                                    pendingConversationThreadId = null
+                                }
+                            }
+                        }
+                    },
                     onNewConversationAtProject = { projectPath ->
                         if (pendingConversationThreadId == null) {
                             pendingConversationThreadId = ""
@@ -860,14 +884,22 @@ internal fun NativeChatScreen(
                             transformOrigin = TransformOrigin.Center
                         },
                     ) {
-                    if (state.historyLoading && state.messages.isEmpty() && state.currentThreadId.isNotBlank()) {
+                    if ((state.historyLoading || state.historyLoadFailed) &&
+                        state.messages.isEmpty() && state.currentThreadId.isNotBlank()
+                    ) {
                         Box(Modifier.fillMaxSize().padding(top = topBarContentPadding)) {
-                            ConversationHistoryLoading(state.conversationTitle)
+                            ConversationHistoryLoading(
+                                title = state.conversationTitle,
+                                failed = state.historyLoadFailed,
+                                onRetry = onRetryHistory,
+                                onNewConversation = onNewConversation,
+                            )
                         }
                     } else if (state.messages.isEmpty()) {
                         RikkaEmptyState(
                             status = state.connectionLabel,
                             ready = state.ready,
+                            persona = activePersona,
                             onSuggestion = onInputChange,
                             modifier = Modifier.padding(
                                 top = topBarContentPadding,
@@ -1104,7 +1136,7 @@ internal fun NativeChatScreen(
                     }
                     RikkaChatInput(
                         value = state.input,
-                        enabled = state.ready,
+                        enabled = state.ready && !state.historyLoading && !state.historyLoadFailed,
                         loading = state.phase.active,
                         compactEnabled = !state.phase.active && state.compactionItems.none { !it.isTerminal },
                         compactRunning = state.compactionItems.any { !it.isTerminal },
@@ -1173,6 +1205,7 @@ internal fun NativeChatScreen(
                 RikkaTopBar(
                     title = state.conversationTitle,
                     modelLabel = state.modelLabel,
+                    personaLabel = activePersonaLabel,
                     onOpenDrawer = {
                         if (!textSelectionActive) {
                             scope.launch {

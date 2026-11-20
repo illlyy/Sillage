@@ -53,7 +53,13 @@ object NativeMcpConfigStore {
     @JvmStatic
     fun threadConfig(): JSONObject = synchronized(lock) {
         val file = configFile()
-        threadConfig(parse(file.takeIf(File::isFile)?.readText(StandardCharsets.UTF_8).orEmpty()))
+        val config = threadConfig(parse(file.takeIf(File::isFile)?.readText(StandardCharsets.UTF_8).orEmpty()))
+        DeviceControlMcpRegistry.codexServerConfig()?.let { managed ->
+            val servers = config.optJSONObject("mcp_servers") ?: JSONObject().also { config.put("mcp_servers", it) }
+            // This key is reserved and injected only into the native app-server thread config.
+            servers.put(DeviceControlMcpRegistry.MANAGED_SERVER_KEY, managed)
+        }
+        config
     }
 
     internal fun threadConfig(configuredServers: List<NativeMcpServerConfig>): JSONObject {

@@ -297,14 +297,10 @@ internal object ClaudeInstaller {
         val process = ProcessBuilder(command)
             .directory(home)
             .apply {
-                environment()["HOME"] = home.absolutePath
-                environment()["TMPDIR"] = File(home, ".tmp").absolutePath
-                environment()["npm_config_cache"] = File(home, ".npm").absolutePath
-                // npm resolves its interpreter and lifecycle scripts through PATH (shebang
-                // `#!/usr/bin/env node`). The app process PATH only lists Android system dirs,
-                // so without the Termux bin directory npm fails with `env: 'node': No such
-                // file or directory` (exit 127).
-                environment()["PATH"] = TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":/system/bin"
+                NativeProcessEnv.apply(
+                    this,
+                    mapOf("npm_config_cache" to File(home, ".npm").absolutePath),
+                )
             }
             .redirectErrorStream(true)
             .start()

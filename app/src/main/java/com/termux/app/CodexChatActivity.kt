@@ -1,7 +1,9 @@
 package com.termux.app
 
+import android.Manifest
 import android.app.ActivityOptions
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -39,11 +41,21 @@ import org.json.JSONObject
 
 
 internal const val NATIVE_USER_INPUT_TIMEOUT_MS = 240_000L
+/** Abort a locally-started turn only when the model never produced any live item. */
+internal const val NATIVE_TURN_FIRST_ACTIVITY_TIMEOUT_MS = 180_000L
 internal const val NATIVE_SHOW_RESPONSE_STATS_PREFERENCE = "native_show_response_stats_v1"
 internal const val NATIVE_SHOW_MODEL_SUBTITLE_PREFERENCE = "native_show_model_subtitle_v1"
 internal const val NATIVE_SHOW_REASONING_TITLES_PREFERENCE = "native_show_reasoning_titles_v1"
 internal const val NATIVE_FOLLOW_UP_ACTION_PREFERENCE = "native_follow_up_submit_action_v1"
 internal const val CODEX_INSTALL_PROMPT_VIEWED_PREFERENCE = "codex_install_prompt_viewed_v1"
+
+/** Pure guard used by the silent-turn watchdog and its unit test. */
+internal fun shouldAbortSilentNativeTurn(
+    busy: Boolean,
+    sameThread: Boolean,
+    sameTurnStart: Boolean,
+    producedLiveActivity: Boolean,
+): Boolean = busy && sameThread && sameTurnStart && !producedLiveActivity
 
 
 internal data class NativeLegacyPendingStreamScope(
@@ -143,6 +155,8 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
     companion object {
         internal val subagentRouteCounter = java.util.concurrent.atomic.AtomicInteger(0)
         internal val stalePendingStateCleaned = java.util.concurrent.atomic.AtomicBoolean(false)
+        internal const val STORAGE_PERMISSION_REQUEST = 0x5350
+        internal const val NATIVE_STORAGE_PROMPTED_PREFERENCE = "native_storage_prompted_v1"
         internal const val STREAM_CATCH_UP_CHUNK_CHARS = 1_200
         internal const val STREAM_CATCH_UP_DELAY_MS = 24L
         internal const val MOTION_DEFER_CAP_MS = 400L
@@ -224,6 +238,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
 
     internal var runtimeStartAttempted = false
 
+    /** Persona selected for the route currently being created, bound once onReady returns its id. */
+    internal var pendingNewConversationPersonaId = ""
+
     internal var pendingCachedHistoryThreadId: String? = null
 
     internal var pendingCachedHistorySnapshot: NativeHistorySnapshot? = null
@@ -271,6 +288,8 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
     internal var goalRetryWaitingForCompletion = false
 
     internal var goalRetryScheduled = false
+
+    internal var turnFirstActivityWatchdog: Runnable? = null
 
     internal var suppressGoalRetryUntilNewTurn = false
 
@@ -440,6 +459,49 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         uris.forEach { cacheAttachment(it, false) }
     }
 
+    /**
+     * Stops an infinite connecting spinner when a locally-started turn never produces a single
+     * reasoning, assistant, plan or tool item. This deliberately does not run for resumed turns:
+     * a background turn may already be inside a long tool call before this process attaches.
+     */
+    internal fun armTurnFirstActivityWatchdog() {
+        turnFirstActivityWatchdog?.let(streamHandler::removeCallbacks)
+        val threadId = currentThreadId.orEmpty()
+        val startedAt = chatState.turnStartedAt
+        val watchdog = Runnable {
+            val producedLiveActivity = protocolReasoningSeen || protocolAssistantSeen ||
+                protocolCommandSeen || protocolToolSeen || protocolPlanSeen ||
+                protocolSubagentSeen || protocolUsageSeen
+            if (!shouldAbortSilentNativeTurn(
+                    busy = chatState.busy,
+                    sameThread = currentThreadId == threadId,
+                    sameTurnStart = chatState.turnStartedAt == startedAt,
+                    producedLiveActivity = producedLiveActivity,
+                )
+            ) return@Runnable
+            NativeChatDiagnostics.record(this, "turn_first_activity_timeout", JSONObject()
+                .put("thread", threadId.take(8))
+                .put("turn", chatState.currentTurnId.take(8))
+                .put("elapsedMs", System.currentTimeMillis() - startedAt))
+            stopCurrentTurn()
+            // The provider request may still be retrying inside the proxy. Seal the local turn
+            // so the composer is usable again, then present an actionable error instead of an
+            // endless spinner.
+            chatState.completeTurn()
+            chatState.addError(
+                nativeText(
+                    nativeLanguage,
+                    "模型服务长时间没有返回任何内容，本轮已停止。请检查网络或模型配置后重试。",
+                    "The model produced no output for too long, so this turn was stopped. Check the network or model settings and retry.",
+                ),
+            )
+            syncSessionActivitySnapshot()
+            refreshConversations()
+        }
+        turnFirstActivityWatchdog = watchdog
+        streamHandler.postDelayed(watchdog, NATIVE_TURN_FIRST_ACTIVITY_TIMEOUT_MS)
+    }
+
     internal fun startFrameDiagnostics() {
         lastFrameNanos = 0L
         frameWindowStartedAt = android.os.SystemClock.uptimeMillis()
@@ -460,6 +522,11 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
         NativeChatDiagnostics.record(this, "activity_create", JSONObject()
             .put("diagnostics", NativeChatDiagnostics.file(this).absolutePath))
         val nativePrefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        // Persisted RUNNING entries only make sense while a process-scoped runtime still owns the
+        // child process. After a crash/force-stop they otherwise become immortal spinners.
+        if (!CodexNativeRuntime.exists() && !ClaudeNativeRuntime.exists()) {
+            CodexTaskStore.markInterruptedTasks(this)
+        }
         providerStore = CodexProviderStore(nativePrefs)
         compactionSettingsStore = NativeCompactionSettingsStore(nativePrefs)
         compactionJournalStore = NativeCompactionJournalStore(nativePrefs)
@@ -470,7 +537,9 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 staleApprovalKeys.forEach(::remove)
             }.apply()
         }
-        chatState.input = nativePrefs.getString("native_chat_draft_v1", "").orEmpty()
+        val activePersonaId = NativePersonaStore.activeId(nativePrefs)
+        chatState.input = nativePrefs.getString(newChatDraftKey(activePersonaId), null)
+            ?: nativePrefs.getString(LEGACY_NEW_CHAT_DRAFT_KEY, "").orEmpty()
         chatState.followUpSubmitAction = NativeFollowUpSubmitAction.from(
             nativePrefs.getString(NATIVE_FOLLOW_UP_ACTION_PREFERENCE, "steer"),
         )
@@ -533,8 +602,10 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                     onFollowUpActionChange = ::setFollowUpSubmitAction,
                     onRemoveQueuedFollowUp = ::removeQueuedFollowUp,
                     onNewConversation = ::newConversation,
+                    onNewConversationForPersona = ::newConversationForPersona,
                     onNewConversationAtProject = ::newConversationAtProject,
                     onResumeConversation = ::resumeConversation,
+                    onRetryHistory = ::retryConversationHistory,
                     onUiMotionChanged = ::setUiMotionActive,
                     onRefreshConversations = ::refreshConversations,
                     onLoadSubagentHistory = ::loadSubagentHistory,
@@ -577,6 +648,47 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
 
         getSharedPreferences("codex_mobile", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(taskPreferenceListener)
         startRuntimeAfterFirstDraw()
+        maybeRequestStoragePermission()
+    }
+
+    /**
+     * Asks once for shared-storage access.
+     *
+     * The default workspace points at /storage/emulated/0/, but this app targets SDK 28, so on
+     * Android 11+ the legacy READ/WRITE grant is the only way to reach it — and nothing on the
+     * native chat path ever requested it. Without the grant the provider is handed a cwd it cannot
+     * list and every file tool fails, which reads as "the AI can't find my files".
+     *
+     * Asked at most once: the flag is written before the dialog shows, so a decline is final until
+     * the user re-grants from Settings → Environment check.
+     */
+    private fun maybeRequestStoragePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+        if (prefs.getBoolean(NATIVE_STORAGE_PROMPTED_PREFERENCE, false)) return
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) return
+        prefs.edit().putBoolean(NATIVE_STORAGE_PROMPTED_PREFERENCE, true).apply()
+        MaterialAlertDialogBuilder(this)
+            .setTitle(nativeText(nativeLanguage, "允许读写项目文件夹", "Allow access to project folders"))
+            .setMessage(
+                nativeText(
+                    nativeLanguage,
+                    "Sillage 需要读写共享存储里的项目（例如 Download、Documents）。\n" +
+                        "不授权也能正常聊天，但 AI 只能改动应用私有目录，读取和修改项目文件会失败。\n" +
+                        "之后可以在「设置 → 环境自检」里补授权。",
+                    "Sillage needs to read and write projects on shared storage (for example Download, Documents).\n" +
+                        "Chat still works without it, but the AI can only touch the app-private directory and project edits will fail.\n" +
+                        "You can grant it later in Settings → Environment check.",
+                ),
+            )
+            .setPositiveButton(nativeText(nativeLanguage, "去授权", "Allow")) { _, _ ->
+                requestPermissions(
+                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                    STORAGE_PERMISSION_REQUEST,
+                )
+            }
+            .setNegativeButton(nativeText(nativeLanguage, "以后再说", "Later"), null)
+            .show()
     }
 
     private fun applyNativeStatusBarVisibility(hidden: Boolean) {
@@ -633,9 +745,37 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 // starts a fresh session and the host must adopt it or stay unready forever.
                 val isClaudeBackend = NativeBackendType.current(getSharedPreferences("codex_mobile", MODE_PRIVATE)) == NativeBackendType.CLAUDE
                 if (!isClaudeBackend && currentThreadId != null && currentThreadId != value) return
+                val previousThreadId = currentThreadId
                 currentThreadId = value
                 chatState.currentThreadId = value
-                restoreGoalForThread(value)
+                NativeActiveThreadStore.remember(
+                    this,
+                    if (isClaudeBackend) NativeBackendType.CLAUDE else NativeBackendType.CODEX,
+                    value,
+                )
+                val personaToBind = pendingNewConversationPersonaId.takeIf { it.isNotBlank() }
+                if (personaToBind != null) {
+                    NativePersonaStore.setThreadPersona(this, value, personaToBind)
+                    val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
+                    val newDraft = prefs.getString(newChatDraftKey(personaToBind), null)
+                        ?: prefs.getString(LEGACY_NEW_CHAT_DRAFT_KEY, "").orEmpty()
+                    prefs.edit()
+                        .putString(threadChatDraftKey(value), newDraft)
+                        .remove(newChatDraftKey(personaToBind))
+                        .remove(LEGACY_NEW_CHAT_DRAFT_KEY)
+                        .apply()
+                    chatState.input = newDraft
+                    pendingNewConversationPersonaId = ""
+                    chatState.conversationTitle = if (chatState.messages.isEmpty()) "新对话" else chatState.conversationTitle
+                } else if (previousThreadId.isNullOrBlank()) {
+                    // Legacy/new routes created by an older path still get a stable owner.
+                    NativePersonaStore.setThreadPersona(
+                        this,
+                        value,
+                        NativePersonaStore.effectiveId(this, null),
+                    )
+                }
+                restoreGoalForThread(value, restorePlanFromPreferences = false)
                 chatState.ready = true
                 bridge?.getThreadGoal()
                 bridge?.loadSkills()
@@ -965,6 +1105,8 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 chatState.addActivity(value)
             }
             "onTurnComplete" -> {
+                turnFirstActivityWatchdog?.let(streamHandler::removeCallbacks)
+                turnFirstActivityWatchdog = null
                 // A whole-answer relay can buffer the full reply in one onDelta; force-draining it
                 // here would pop the entire answer in a single frame. Reveal the remaining tail at
                 // the capped rate first, then seal exactly as the immediate path does. Real
@@ -986,9 +1128,13 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 chatState.addNotice(value)
             }
             "onNativeError" -> {
+                turnFirstActivityWatchdog?.let(streamHandler::removeCallbacks)
+                turnFirstActivityWatchdog = null
                 // Terminal backend failures must leave the loading shell immediately; keeping this
                 // true can make a useful error look like the same blank route that failed.
                 chatState.historyLoading = false
+                chatState.historyLoadFailed = chatState.messages.isEmpty() &&
+                    !currentThreadId.isNullOrBlank()
                 currentThreadId?.let(NativeHistorySnapshotCache::remove)
                 drainPendingNativeUiEvents()
                 // The turn is dead, so a request still waiting on the user must be released on
@@ -1106,6 +1252,14 @@ class CodexChatActivity : ComponentActivity(), NativeBackendBridge.EventListener
                 failed = wasFailed,
             ))
             chatState.completeTurn()
+        }
+        if (routeThreadId.isNotBlank()) {
+            val turnStart = chatState.turnMessageStartIndex.coerceIn(0, chatState.messages.size)
+            NativeConversationJournal.appendAssistant(
+                this,
+                routeThreadId,
+                chatState.messages.drop(turnStart),
+            )
         }
         currentThreadId?.let(NativeHistorySnapshotCache::remove)
         approvalThreadId(chatState.pendingApprovalRequest)?.let(::clearPendingApproval)

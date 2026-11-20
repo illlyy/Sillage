@@ -560,6 +560,26 @@ final class ClaudeAgentBridge extends NativeBackendBridge {
             } else {
                 command.add("--session-id");
                 command.add(freshUuid);
+                // Claude names the new session before the host receives onReady. Bind its owner
+                // now so a fresh Claude chat inherits the persona selected for this route instead
+                // of the legacy-thread default.
+                if (NativePersonaStore.INSTANCE.threadPersonaId(prefs, provisionalSessionId).isEmpty()) {
+                    NativePersonaStore.INSTANCE.setThreadPersona(
+                        appContext,
+                        provisionalSessionId,
+                        NativePersonaStore.INSTANCE.activeId(prefs));
+                }
+            }
+            // Persona + long-term memory preamble. Kept out of settings.json because it is
+            // per-conversation content, not provider configuration.
+            try {
+                String personaPrompt = NativePersonaPrompt.INSTANCE.build(appContext, provisionalSessionId);
+                if (personaPrompt != null && !personaPrompt.trim().isEmpty()) {
+                    command.add("--append-system-prompt");
+                    command.add(personaPrompt);
+                }
+            } catch (Throwable error) {
+                Log.w(TAG, "Unable to build persona prompt", error);
             }
             ProcessBuilder builder = new ProcessBuilder(command);
             // The working directory must exist before fork: Android returns ENOENT from

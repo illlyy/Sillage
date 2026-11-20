@@ -268,14 +268,28 @@ import me.rerere.hugeicons.stroke.Voice
 import me.rerere.hugeicons.stroke.Zap
 
 @Composable
-internal fun ConversationHistoryLoading(title: String) {
+internal fun ConversationHistoryLoading(
+    title: String,
+    failed: Boolean = false,
+    onRetry: () -> Unit = {},
+    onNewConversation: () -> Unit = {},
+) {
     val language = LocalNativeLanguage.current
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp)
+        if (failed) {
+            Icon(
+                HugeIcons.TransactionHistory,
+                contentDescription = null,
+                modifier = Modifier.size(30.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        } else {
+            CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp)
+        }
         Spacer(Modifier.height(14.dp))
         Text(
             title,
@@ -286,10 +300,28 @@ internal fun ConversationHistoryLoading(title: String) {
         )
         Spacer(Modifier.height(5.dp))
         Text(
-            nativeText(language, "\u6b63\u5728\u8f7d\u5165\u5bf9\u8bdd\u2026", "Loading conversation\u2026"),
+            if (failed) nativeText(
+                language,
+                "对话记录没有及时载入。可以重试，或新建一个对话继续。",
+                "History did not load in time. Retry, or start a new conversation.",
+            ) else nativeText(language, "\u6b63\u5728\u8f7d\u5165\u5bf9\u8bdd\u2026", "Loading conversation\u2026"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
         )
+        if (failed) {
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onRetry) {
+                    Icon(HugeIcons.Refresh03, null, Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(nativeText(language, "重试加载", "Retry"))
+                }
+                TextButton(onClick = onNewConversation) {
+                    Text(nativeText(language, "新建对话", "New conversation"))
+                }
+            }
+        }
     }
 }
 
@@ -297,6 +329,7 @@ internal fun ConversationHistoryLoading(title: String) {
 internal fun RikkaTopBar(
     title: String,
     modelLabel: String,
+    personaLabel: String = "",
     onOpenDrawer: () -> Unit,
     onNewConversation: () -> Unit,
     backdrop: Backdrop? = null,
@@ -354,8 +387,14 @@ internal fun RikkaTopBar(
                         ) { value ->
                             Text(value, maxLines = 1, style = MaterialTheme.typography.bodyMedium, overflow = TextOverflow.Ellipsis)
                         }
-                        if (LocalShowModelSubtitle.current) Text(
-                            text = modelLabel.ifBlank { nativeText(language, "默认模型", "Default model") },
+                        val modelSubtitle = if (LocalShowModelSubtitle.current) {
+                            modelLabel.ifBlank { nativeText(language, "默认模型", "Default model") }
+                        } else ""
+                        val subtitle = listOf(personaLabel, modelSubtitle)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" · ")
+                        if (subtitle.isNotBlank()) Text(
+                            text = subtitle,
                             maxLines = 1,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
                             style = MaterialTheme.typography.labelSmall,
@@ -400,10 +439,12 @@ internal fun AssistantBackdrop() {
 internal fun RikkaEmptyState(
     status: String,
     ready: Boolean,
+    persona: NativePersona,
     onSuggestion: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val language = LocalNativeLanguage.current
+    // Persona drives the empty state: who is answering and how they open the conversation.
     val suggestions = remember(language) {
         listOf(
             nativeText(language, "理解项目", "Understand project") to
@@ -434,16 +475,29 @@ internal fun RikkaEmptyState(
                 color = MaterialTheme.colorScheme.primaryContainer,
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        HugeIcons.Sparkles,
-                        contentDescription = null,
-                        modifier = Modifier.size(27.dp),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
+                    if (persona.emoji.isNotBlank()) {
+                        Text(persona.emoji, style = MaterialTheme.typography.headlineSmall)
+                    } else {
+                        Icon(
+                            HugeIcons.Sparkles,
+                            contentDescription = null,
+                            modifier = Modifier.size(27.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                 }
             }
+            if (persona.name.isNotBlank()) {
+                Text(
+                    persona.name,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
             Text(
-                nativeText(language, "今天想做什么？", "What would you like to build?"),
+                persona.greeting.ifBlank {
+                    nativeText(language, "今天想做什么？", "What would you like to build?")
+                },
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center,

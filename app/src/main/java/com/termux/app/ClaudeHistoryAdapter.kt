@@ -71,6 +71,7 @@ internal fun visibleUserPrompt(text: String): String {
     val stripped = stripInjectedPromptPrefixes(stripCollapsedInjectedPrefix(text))
     if (stripped.trim() == COMPACTION_COMMAND) return ""
     if (isCliProtocolTurn(stripped)) return ""
+    if (isNativeInternalContextText(stripped)) return ""
     return stripped
 }
 
@@ -117,6 +118,7 @@ internal object ClaudeHistoryAdapter {
     /** Scans Claude transcripts and returns conversation metadata for the drawer/list. */
     fun listConversations(context: Context): List<NativeConversation> {
         val result = ArrayList<NativeConversation>()
+        val personaPrefs = context.getSharedPreferences(NativePersonaStore.PREFS_FILE, Context.MODE_PRIVATE)
         val root = projectsRoot()
         val candidates = ArrayList<File>()
         collectJsonl(root, candidates, 0)
@@ -126,7 +128,11 @@ internal object ClaudeHistoryAdapter {
             scanned++
             val cached = transcriptCache[file.absolutePath]
             if (cached != null && cached.size == file.length() && cached.modifiedAt == file.lastModified()) {
-                result.add(cached.conversation)
+                val personaId = NativePersonaStore.resolvedThreadPersonaId(personaPrefs, cached.conversation.threadId)
+                result.add(
+                    if (cached.conversation.personaId == personaId) cached.conversation
+                    else cached.conversation.copy(personaId = personaId),
+                )
                 continue
             }
             val sessionId = readSessionId(file) ?: continue
@@ -140,6 +146,7 @@ internal object ClaudeHistoryAdapter {
                 state = CodexTaskStore.COMPLETED,
                 projectPath = project,
                 favorite = false,
+                personaId = NativePersonaStore.resolvedThreadPersonaId(personaPrefs, sessionId),
             )
             transcriptCache[file.absolutePath] = TranscriptMetadata(file.length(), file.lastModified(), conversation)
             result.add(conversation)

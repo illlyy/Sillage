@@ -204,10 +204,12 @@ final class CodexDesktopBridge {
     }
 
     private String defaultProjectRoot() {
-        if (mobilePreferences.getBoolean("custom_project_root_enabled", true)) {
-            String configured = mobilePreferences.getString("custom_project_root", "/storage/emulated/0/");
-            File directory = new File(configured == null ? "/storage/emulated/0/" : configured);
-            if (directory.isDirectory() || directory.mkdirs()) return directory.getAbsolutePath();
+        // mkdirs() is kept so a configured-but-missing folder is recreated, but a path that exists
+        // yet cannot be read/written (shared storage without the permission) falls back to home.
+        File configured = NativeWorkspace.configured(mobilePreferences);
+        if (configured != null && (configured.isDirectory() || configured.mkdirs())
+            && NativeWorkspace.isUsable(configured)) {
+            return configured.getAbsolutePath();
         }
         return TermuxConstants.TERMUX_HOME_DIR_PATH;
     }

@@ -5,6 +5,26 @@ import org.json.JSONObject
 import java.io.File
 import java.util.LinkedHashMap
 
+/** Internal model-only context that is persisted as a user row but never belongs in the chat UI. */
+internal fun isNativeInternalContextText(value: String): Boolean {
+    val text = value.trimStart()
+    if (text.isEmpty()) return true
+    return listOf(
+        "<environment_context>",
+        "<permissions instructions>",
+        "<app-context>",
+        "<turn_aborted>",
+        "<codex_internal_context",
+        "<collaboration_mode>",
+        "<skills_instructions>",
+        "<plugins_instructions>",
+        "<goal>",
+        "<thread_goal>",
+        "<task_goal>",
+        "<goal_context>",
+    ).any(text::startsWith)
+}
+
 /** Immutable history payload prepared before crossing to the Compose main thread. */
 data class NativeHistorySnapshot(
     val messages: List<NativeChatMessage>,
@@ -77,6 +97,9 @@ internal object NativeHistoryParser {
                     )
                 }
             }
+            if (role == NativeChatRole.USER && content.isNotEmpty() && isNativeInternalContextText(content)) {
+                continue
+            }
             if (role == NativeChatRole.ACTIVITY && content.startsWith("PLAN|")) {
                 decodePayload(content.substringAfter('|'))?.let { planPayload ->
                     planJson = planPayload.optJSONArray("plan")?.toString() ?: "[]"
@@ -116,7 +139,9 @@ internal object NativeHistoryParser {
             } else if (pendingLegacyCompactionIndex >= 0) {
                 pendingLegacyCompactionIndex = -1
             }
-            if (content.isEmpty()) continue
+            // Attachment-only user turns legitimately have no text. Keep them so a reloaded
+            // conversation still shows the image/file bubble instead of only the AI reply.
+            if (content.isEmpty() && messageSkills.isEmpty() && messageAttachments.isEmpty()) continue
             // Some app-server versions persist agent-message markup verbatim instead of the
             // normalized history parts produced by the bridge. Run the same stateful parser used
             // by live deltas so protocol tags can never reach the regular assistant renderer.

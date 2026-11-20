@@ -200,6 +200,11 @@ internal data class NativeBackendStartRequest(
         val retainedThread = notificationTargetThreadId.takeIf { it.isNotBlank() }
             ?: CodexNativeRuntime.currentThreadId()?.takeIf { it.isNotBlank() }
             ?: currentThreadId?.takeIf { it.isNotBlank() }
+            ?: NativeActiveThreadStore.read(this, NativeBackendType.CODEX).takeIf { it.isNotBlank() }
+            // Upgrade path for builds that predate NativeActiveThreadStore: the task registry is
+            // already sorted newest-first, so it can still recover the conversation the user was
+            // most likely viewing instead of forcing a fresh thread after process death.
+            ?: CodexTaskStore.current(this).firstOrNull()?.threadId?.takeIf { it.isNotBlank() }
         bridge = CodexNativeRuntime.attach(
             this,
             this,
@@ -318,6 +323,7 @@ internal data class NativeBackendStartRequest(
         val retainedThread = notificationTargetThreadId.takeIf { it.isNotBlank() }
             ?: ClaudeNativeRuntime.currentThreadId()?.takeIf { it.isNotBlank() }
             ?: currentThreadId?.takeIf { it.isNotBlank() }
+            ?: NativeActiveThreadStore.read(this, NativeBackendType.CLAUDE).takeIf { it.isNotBlank() }
         bridge = ClaudeNativeRuntime.attach(
             this,
             this,
@@ -413,7 +419,8 @@ internal data class NativeBackendStartRequest(
         if (base.isBlank()) return ""
         val prefs = getSharedPreferences("codex_mobile", MODE_PRIVATE)
         val remembered = ClaudeAllowedToolsStore.load(prefs, activeProfileId)
-        return ClaudeAllowedToolsStore.merge(base, remembered)
+        val managedDevice = if (DeviceControlStore.enabled(this)) DeviceMcpProvisioner.claudeAllowedTools() else ""
+        return ClaudeAllowedToolsStore.merge(listOf(base, managedDevice).filter { it.isNotBlank() }.joinToString(","), remembered)
     }
 
     internal fun CodexChatActivity.reloadProviderConfigurationIfChanged() {

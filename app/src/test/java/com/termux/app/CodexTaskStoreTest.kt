@@ -64,6 +64,15 @@ class CodexTaskStoreTest {
     }
 
     @Test
+    fun orphanedRunningTasksAreMarkedFailedAfterProcessRestart() {
+        CodexTaskStore.markRunning(context, THREAD_ID, "Interrupted task")
+
+        CodexTaskStore.markInterruptedTasks(context)
+
+        assertEquals(CodexTaskStore.FAILED, CodexTaskStore.current(context).single().state)
+    }
+
+    @Test
     fun legacyEntryWithoutProjectPathHasUnknownAssignment() {
         val legacy = JSONObject()
             .put("threadId", THREAD_ID)
